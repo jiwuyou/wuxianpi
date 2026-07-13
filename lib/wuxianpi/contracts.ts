@@ -1,4 +1,4 @@
-export const MYWEB_SCHEMA_VERSION = 1 as const;
+export const WUXIANPI_SCHEMA_VERSION = 1 as const;
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -23,7 +23,7 @@ export interface AssistantTtsConfig {
 }
 
 export interface AssistantManifestV1 {
-  schemaVersion: typeof MYWEB_SCHEMA_VERSION;
+  schemaVersion: typeof WUXIANPI_SCHEMA_VERSION;
   name: string;
   description?: string;
   avatar?: string;
@@ -55,7 +55,7 @@ export interface AssistantFiles {
 }
 
 export interface AssistantBundleV1 {
-  schemaVersion: typeof MYWEB_SCHEMA_VERSION;
+  schemaVersion: typeof WUXIANPI_SCHEMA_VERSION;
   manifest: AssistantManifestV1;
   files: AssistantFiles;
 }
@@ -100,7 +100,7 @@ export interface WebExtensionContribution {
 }
 
 export interface WebExtensionManifestV1 {
-  schemaVersion: typeof MYWEB_SCHEMA_VERSION;
+  schemaVersion: typeof WUXIANPI_SCHEMA_VERSION;
   id: string;
   name: string;
   version: string;
@@ -118,8 +118,8 @@ export interface PermissionGrant {
   updatedAt: string;
 }
 
-export interface GlobalMyWebConfigV1 {
-  schemaVersion: typeof MYWEB_SCHEMA_VERSION;
+export interface GlobalWuxianPiConfigV1 {
+  schemaVersion: typeof WUXIANPI_SCHEMA_VERSION;
   defaults: {
     model?: ModelRef;
     thinkingLevel?: string;
@@ -202,7 +202,7 @@ export interface PermissionRequest {
 }
 
 export interface ExtensionBridgeRequest {
-  type: "myweb_bridge_request";
+  type: "wuxianpi_bridge_request";
   requestId: string;
   extensionId: string;
   nonce: string;
@@ -211,7 +211,7 @@ export interface ExtensionBridgeRequest {
 }
 
 export interface ExtensionBridgeResponse {
-  type: "myweb_bridge_response";
+  type: "wuxianpi_bridge_response";
   requestId: string;
   extensionId: string;
   nonce: string;

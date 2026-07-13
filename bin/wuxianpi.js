@@ -37,7 +37,7 @@ const port = cliArgs.port ?? process.env.PORT ?? "30141";
 const hostname = cliArgs.hostname ?? process.env.HOSTNAME ?? null;
 
 if (!fs.existsSync(nextDir)) {
-  console.error("Pi MyWeb build artifacts were not found. Build the project before starting it.");
+  console.error("WuxianPi build artifacts were not found. Build the project before starting it.");
   process.exit(1);
 }
 

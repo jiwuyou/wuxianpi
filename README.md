@@ -1,8 +1,8 @@
-# Pi MyWeb
+# WuxianPi
 
 [中文文档](./README.zh-CN.md)
 
-Pi MyWeb is a mobile-first personal assistant workspace powered by [Pi](https://github.com/badlogic/pi-mono). The project currently keeps `jiwuyou/pi-web` as its runnable baseline and will evolve around assistant directories, role definitions, a global capability center, TTS, MCP, and optional HTML WebUI extensions.
+WuxianPi is a mobile-first personal assistant workspace powered by [Pi](https://github.com/badlogic/pi-mono). The project currently keeps `jiwuyou/pi-web` as its runnable baseline and will evolve around assistant directories, role definitions, a global capability center, TTS, MCP, and optional HTML WebUI extensions.
 
 See [`docs/PRODUCT.md`](./docs/PRODUCT.md) for the product boundary and implementation direction. Pi remains an unmodified upstream runtime.
 
@@ -24,11 +24,11 @@ Then open [http://localhost:30141](http://localhost:30141). The CLI will try to 
 **Options:**
 
 ```bash
-pi-myweb --port 8080              # custom port
-pi-myweb --hostname 127.0.0.1     # local access only
-pi-myweb -p 8080 -H 127.0.0.1     # combine options
+wuxianpi --port 8080              # custom port
+wuxianpi --hostname 127.0.0.1     # local access only
+wuxianpi -p 8080 -H 127.0.0.1     # combine options
 
-PORT=8080 pi-myweb                # environment variable is also supported
+PORT=8080 wuxianpi                # environment variable is also supported
 ```
 
 ## Features
@@ -41,7 +41,7 @@ PORT=8080 pi-myweb                # environment variable is also supported
 
 ## Notes
 
-- **Data directory**: Pi MyWeb reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
+- **Data directory**: WuxianPi reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
 - **Session files**: files are stored as `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
 - **Model config**: the Models panel reads and writes `models.json` in the pi agent directory. Model lists and defaults come from pi's config.
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.

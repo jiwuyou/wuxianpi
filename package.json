@@ -1,11 +1,11 @@
 {
-  "name": "@jiwuyou/pi-myweb",
+  "name": "@jiwuyou/wuxianpi",
   "version": "0.1.0",
   "description": "Mobile-first personal assistant web UI powered by Pi",
   "license": "MIT",
   "bin": {
-    "pi-myweb": "bin/pi-myweb.js",
-    "pi-web": "bin/pi-myweb.js"
+    "wuxianpi": "bin/wuxianpi.js",
+    "pi-web": "bin/wuxianpi.js"
   },
   "files": [
     "bin",

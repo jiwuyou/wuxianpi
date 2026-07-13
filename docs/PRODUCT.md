@@ -1,13 +1,13 @@
-# Pi MyWeb Product Direction
+# WuxianPi Product Direction
 
-Pi MyWeb is a mobile-first, local personal-assistant workspace powered by the
+WuxianPi is a mobile-first, local personal-assistant workspace powered by the
 unmodified Pi runtime. It starts from the pi-web codebase, but its primary
 navigation and product model are assistants rather than coding projects.
 
 ## Product boundaries
 
 - Pi remains an upstream dependency and is not forked or patched.
-- Pi MyWeb owns assistant orchestration, mobile UI, capability selection, TTS,
+- WuxianPi owns assistant orchestration, mobile UI, capability selection, TTS,
   MCP adapters, and optional HTML-based WebUI extensions.
 - One assistant maps to one real working directory. Pi uses that directory as
   the session `cwd` and loads its normal project context and resources.
@@ -46,7 +46,7 @@ TTS providers, and WebUI extensions.
 
 ## WebUI extensions
 
-Existing Pi extensions remain the primary Agent extension mechanism. Pi MyWeb
+Existing Pi extensions remain the primary Agent extension mechanism. WuxianPi
 maps Pi's abstract UI requests to mobile Web components. Extensions that need a
 rich visual surface may optionally contribute sandboxed HTML/JavaScript/CSS
 panels and tool-result renderers through a permission-checked bridge.
@@ -62,7 +62,7 @@ panels and tool-result renderers through a permission-checked bridge.
 
 ## Initial implementation sequence
 
-1. Establish Pi MyWeb branding and an independent repository.
+1. Establish WuxianPi branding and an independent repository.
 2. Add assistant-directory discovery and creation.
 3. Replace project-first navigation with an assistant-first mobile shell.
 4. Add global capability selection and per-assistant overrides.

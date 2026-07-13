@@ -1,8 +1,8 @@
-# Pi MyWeb
+# WuxianPi
 
 [English](./README.md)
 
-Pi MyWeb 是基于 [Pi](https://github.com/badlogic/pi-mono) 的移动优先个人助手工作台。项目当前以 `jiwuyou/pi-web` 为可运行基线，后续将围绕助手目录、角色定义、全局能力中心、TTS、MCP 和 HTML WebUI 扩展逐步重构。
+WuxianPi 是基于 [Pi](https://github.com/badlogic/pi-mono) 的移动优先个人助手工作台。项目当前以 `jiwuyou/pi-web` 为可运行基线，后续将围绕助手目录、角色定义、全局能力中心、TTS、MCP 和 HTML WebUI 扩展逐步重构。
 
 产品边界与演进方向见 [`docs/PRODUCT.md`](./docs/PRODUCT.md)。Pi 作为上游运行时保持不修改。
 
@@ -20,11 +20,11 @@ npm run dev
 **可选参数：**
 
 ```bash
-pi-myweb --port 8080              # 自定义端口
-pi-myweb --hostname 127.0.0.1     # 仅本机访问
-pi-myweb -p 8080 -H 127.0.0.1     # 组合使用
+wuxianpi --port 8080              # 自定义端口
+wuxianpi --hostname 127.0.0.1     # 仅本机访问
+wuxianpi -p 8080 -H 127.0.0.1     # 组合使用
 
-PORT=8080 pi-myweb                # 也支持环境变量
+PORT=8080 wuxianpi                # 也支持环境变量
 ```
 
 ## 功能介绍

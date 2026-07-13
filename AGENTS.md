@@ -1,4 +1,4 @@
-# Pi MyWeb - Development Notes
+# WuxianPi - Development Notes
 
 ## Quick Start
 

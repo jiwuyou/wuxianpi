@@ -10,7 +10,7 @@ const notoSansMono = Noto_Sans_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Pi MyWeb",
+  title: "WuxianPi",
   description: "Mobile-first personal assistant web UI powered by Pi",
 };
 
