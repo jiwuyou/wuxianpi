@@ -4,6 +4,7 @@ import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import test from "node:test";
+import type { CapabilityDescriptor } from "../lib/wuxianpi/contracts";
 
 const bundled = process.env.WUXIANPI_BACKEND_TEST_BUNDLE === "1";
 
@@ -133,6 +134,7 @@ if (!bundled) {
       const echoResult = await echo.execute("echo-call", { text: "hello" }, undefined, undefined, {} as never);
       assert.equal(echoResult.content[0].type === "text" ? echoResult.content[0].text : "", "hello");
       const pending = mcp.callMcpTool("fake", "wait", { milliseconds: 5_000 }, { callId: "cancel-me", assistantId: "alpha" });
+      await assert.rejects(() => mcp.callMcpTool("fake", "echo", { text: "duplicate" }, { callId: "cancel-me", assistantId: "alpha" }), /already exists/);
       await delay(100);
       assert.equal(mcp.cancelMcpCall("cancel-me", "other"), false);
       assert.equal(mcp.cancelMcpCall("cancel-me", "alpha"), true);
@@ -160,6 +162,22 @@ if (!bundled) {
     });
 
     await t.test("Ubuntu worker exposes allowlisted tools and isolates cancellation by assistant", async () => {
+      const ubuntu = await import("../lib/wuxianpi/ubuntu-bridge");
+      const descriptor: CapabilityDescriptor = { id: "ubuntu:test", name: "ubuntu.test_wait", source: "ubuntu", risk: ["execute"], status: "available", assistantSelectable: false, metadata: { inputSchema: { type: "object" } } };
+      let receivedSignal: AbortSignal | undefined;
+      const definitions = ubuntu.buildUbuntuToolDefinitions([descriptor], "alpha", async (_toolName, _args, _callId, _assistantId, signal) => {
+        receivedSignal = signal;
+        return new Promise((_resolve, reject) => {
+          if (signal?.aborted) return reject(new DOMException("aborted", "AbortError"));
+          signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+      });
+      const controller = new AbortController();
+      const throughToolDefinition = definitions[0].execute("pi-abort", {}, controller.signal, undefined, {} as never);
+      controller.abort();
+      await assert.rejects(throughToolDefinition, /aborted/i);
+      assert.equal(receivedSignal, controller.signal);
+
       const worker = spawn(process.execPath, [path.join(process.cwd(), "workers/ubuntu-worker.mjs")], {
         stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, WUXIANPI_ASSISTANTS_ROOT: paths.getWuxianPiPaths().assistants, WUXIANPI_TEST_MODE: "1" },
       });

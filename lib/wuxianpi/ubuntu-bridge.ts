@@ -10,7 +10,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 interface RpcResponse { id: string; result?: JsonValue; error?: { code: number; message: string } }
-interface Pending { resolve: (value: JsonValue) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+interface Pending { resolve: (value: JsonValue) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; cleanup: () => void }
 
 declare global {
   var __wuxianpiUbuntuBridge: UbuntuBridge | undefined;
@@ -52,7 +52,7 @@ class UbuntuBridge {
     child.once("exit", (code, signal) => {
       this.process = undefined;
       const error = new Error(`Ubuntu worker exited (${code ?? signal ?? "unknown"}): ${this.stderr}`);
-      for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
+      for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(error); }
       this.pending.clear();
     });
     try { await this.request("health", {}, 15_000); }
@@ -68,28 +68,37 @@ class UbuntuBridge {
     try { response = JSON.parse(line) as RpcResponse; } catch { return; }
     const pending = this.pending.get(response.id);
     if (!pending) return;
-    this.pending.delete(response.id); clearTimeout(pending.timer);
+    this.pending.delete(response.id); pending.cleanup();
     if (response.error) pending.reject(new Error(`${response.error.code}: ${response.error.message}`));
     else pending.resolve(response.result ?? null);
   }
 
-  async request(method: string, params: JsonValue, timeoutMs = 120_000): Promise<JsonValue> {
+  async request(method: string, params: JsonValue, timeoutMs = 120_000, signal?: AbortSignal): Promise<JsonValue> {
+    if (signal?.aborted) throw new DOMException("Ubuntu RPC aborted", "AbortError");
     if (!this.isRunning() && method !== "ping") await this.start();
+    if (signal?.aborted) throw new DOMException("Ubuntu RPC aborted", "AbortError");
     if (!this.process) throw new Error("Ubuntu worker is not running");
     this.resetIdleTimer();
     const id = randomUUID();
     return new Promise((resolve, reject) => {
+      const paramsRecord = params && typeof params === "object" && !Array.isArray(params) ? params as Record<string, JsonValue> : {};
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
+      const onAbort = () => {
+        if (!this.pending.delete(id)) return;
+        cleanup();
+        if (method === "tools/call") this.sendCancellation(String(paramsRecord.assistantId ?? ""), String(paramsRecord.callId ?? ""));
+        reject(new DOMException("Ubuntu RPC aborted", "AbortError"));
+      };
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        if (method === "tools/call" && params && typeof params === "object" && !Array.isArray(params)) {
-          const call = params as Record<string, JsonValue>;
-          this.sendCancellation(String(call.assistantId ?? ""), String(call.callId ?? ""));
-        }
+        cleanup();
+        if (method === "tools/call") this.sendCancellation(String(paramsRecord.assistantId ?? ""), String(paramsRecord.callId ?? ""));
         reject(new Error(`Ubuntu RPC timed out: ${method}`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.pending.set(id, { resolve, reject, timer, cleanup });
       this.process!.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`, (error) => {
-        if (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
+        if (error) { this.pending.delete(id); cleanup(); reject(error); }
       });
     });
   }
@@ -134,34 +143,41 @@ export async function getUbuntuStatus(includeTools = false): Promise<UbuntuStatu
 }
 
 export async function startUbuntuWorker(): Promise<void> { await bridge().start(); }
-export async function callUbuntuTool(toolName: string, args: JsonValue | undefined, callId: string | undefined, assistantId: string): Promise<JsonValue> {
+export async function callUbuntuTool(toolName: string, args: JsonValue | undefined, callId: string | undefined, assistantId: string, signal?: AbortSignal): Promise<JsonValue> {
+  if (signal?.aborted) throw new DOMException("Ubuntu tool call aborted", "AbortError");
   await requireExecutionPermission(assistantId, "ubuntu:worker", {
     title: "Use Ubuntu worker",
     description: `Allow this assistant to call ${toolName} in its Ubuntu workspace`,
     risk: ["execute", "write"],
   });
-  return bridge().request("tools/call", { toolName, arguments: args ?? {}, callId: callId ?? randomUUID(), assistantId });
+  if (signal?.aborted) throw new DOMException("Ubuntu tool call aborted", "AbortError");
+  return bridge().request("tools/call", { toolName, arguments: args ?? {}, callId: callId ?? randomUUID(), assistantId }, 120_000, signal);
 }
 export async function cancelUbuntuCall(callId: string, assistantId: string): Promise<JsonValue> { return bridge().request("cancel", { callId, assistantId }, 10_000); }
 export async function shutdownUbuntuWorker(): Promise<void> { await bridge().shutdown(); }
 
 export interface UbuntuToolDefinitionsResult { tools: ToolDefinition[]; diagnostics: UbuntuStatusData["diagnostics"] }
 
-export async function createUbuntuToolDefinitions(assistantId: string): Promise<UbuntuToolDefinitionsResult> {
-  const status = await getUbuntuStatus(true);
-  if (!status.tools?.length) return { tools: [], diagnostics: status.diagnostics };
-  const tools = status.tools.map<ToolDefinition>((tool) => ({
+type UbuntuToolInvoker = (toolName: string, args: JsonValue | undefined, callId: string | undefined, assistantId: string, signal?: AbortSignal) => Promise<JsonValue>;
+
+export function buildUbuntuToolDefinitions(descriptors: CapabilityDescriptor[], assistantId: string, invoke: UbuntuToolInvoker = callUbuntuTool): ToolDefinition[] {
+  return descriptors.map<ToolDefinition>((tool) => ({
     name: `ubuntu__${tool.name.replace(/^ubuntu\./, "").replace(/[^a-zA-Z0-9_-]/g, "_")}`,
     label: tool.name,
     description: tool.description ?? tool.name,
     promptSnippet: `${tool.name}: ${tool.description ?? "Ubuntu workspace tool"}`,
     parameters: Type.Unsafe<Record<string, unknown>>((tool.metadata?.inputSchema ?? { type: "object" }) as Record<string, unknown>),
-    execute: async (toolCallId, params) => {
-      const result = await callUbuntuTool(tool.name, JSON.parse(JSON.stringify(params)) as JsonValue, toolCallId, assistantId);
+    execute: async (toolCallId, params, signal) => {
+      const result = await invoke(tool.name, JSON.parse(JSON.stringify(params)) as JsonValue, toolCallId, assistantId, signal);
       const raw = result as { content?: unknown[]; isError?: boolean };
       const content = Array.isArray(raw.content) ? raw.content.filter((item): item is { type: "text"; text: string } => Boolean(item && typeof item === "object" && (item as Record<string, unknown>).type === "text" && typeof (item as Record<string, unknown>).text === "string")) : [];
       return { content: content.length ? content : [{ type: "text" as const, text: JSON.stringify(result) }], details: result, isError: Boolean(raw.isError) };
     },
   }));
-  return { tools, diagnostics: status.diagnostics };
+}
+
+export async function createUbuntuToolDefinitions(assistantId: string): Promise<UbuntuToolDefinitionsResult> {
+  const status = await getUbuntuStatus(true);
+  if (!status.tools?.length) return { tools: [], diagnostics: status.diagnostics };
+  return { tools: buildUbuntuToolDefinitions(status.tools, assistantId), diagnostics: status.diagnostics };
 }

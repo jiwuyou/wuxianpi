@@ -146,20 +146,24 @@ export async function callMcpTool(
 ): Promise<JsonValue> {
   const callId = options.callId ?? `${serverId}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
   if (calls().has(callId)) throw new Error(`MCP callId already exists: ${callId}`);
-  if (options.assistantId) {
-    await requireExecutionPermission(options.assistantId, `mcp:${serverId}`, {
-      title: "Use MCP server",
-      description: `Allow this assistant to call ${serverId}`,
-      risk: ["network", "external", "write"],
-    });
-  }
-  const { client, config } = await getClient(serverId);
   const controller = new AbortController();
   const onAbort = () => controller.abort();
-  options.signal?.addEventListener("abort", onAbort, { once: true });
   calls().set(callId, { controller, assistantId: options.assistantId, serverId });
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs ?? 60_000);
+  if (options.signal?.aborted) controller.abort();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
+    if (options.assistantId) {
+      await requireExecutionPermission(options.assistantId, `mcp:${serverId}`, {
+        title: "Use MCP server",
+        description: `Allow this assistant to call ${serverId}`,
+        risk: ["network", "external", "write"],
+      });
+    }
+    if (controller.signal.aborted) throw new DOMException("MCP call aborted", "AbortError");
+    const { client, config } = await getClient(serverId);
+    if (controller.signal.aborted) throw new DOMException("MCP call aborted", "AbortError");
+    timeout = setTimeout(() => controller.abort(), config.timeoutMs ?? 60_000);
     const result = await client.callTool(
       { name: toolName, arguments: (args && typeof args === "object" && !Array.isArray(args) ? args : {}) as Record<string, unknown> },
       undefined,
@@ -167,8 +171,8 @@ export async function callMcpTool(
     );
     return normalizeJson(result);
   } finally {
-    clearTimeout(timeout);
-    calls().delete(callId);
+    if (timeout) clearTimeout(timeout);
+    if (calls().get(callId)?.controller === controller) calls().delete(callId);
     options.signal?.removeEventListener("abort", onAbort);
   }
 }
