@@ -117,7 +117,7 @@ export async function exportAssistant(id: string): Promise<void> {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `${id}.wuxianpi.json`;
+  anchor.download = `${id}.wuxianpi.zip`;
   anchor.click();
   URL.revokeObjectURL(url);
 }

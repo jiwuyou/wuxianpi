@@ -99,6 +99,21 @@ function Typewriter({ phrases }: { phrases: string[] }) {
 }
 
 export function ChatWindow({ assistantId, assistant, webExtensions = [], defaultTts, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenModelsConfig, onContextUsageChange, initialPrompt, initialPromptKey, onInitialPromptQueued }: Props) {
+  const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
+  const assistantTts = assistant?.manifest.tts;
+  const ttsConfig = !assistantTts || assistantTts === "inherit" ? defaultTts : assistantTts;
+  const { speak, stop: stopSpeaking, speaking, error: ttsError } = useTts(assistantId, ttsConfig);
+  const autoSpeakPendingRef = useRef(false);
+  const playDoneSoundRef = useRef(playDoneSound);
+  playDoneSoundRef.current = playDoneSound;
+  const soundEnabledRef = useRef(soundEnabled);
+  soundEnabledRef.current = soundEnabled;
+  const handleAgentCompleted = useCallback(() => {
+    if (soundEnabledRef.current) playDoneSoundRef.current();
+    autoSpeakPendingRef.current = true;
+    onAgentEnd?.();
+  }, [onAgentEnd]);
+
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
@@ -115,33 +130,11 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, handleAgentEventRef,
+    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
   } = useAgentSession({
-    assistantId, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+    assistantId, session, newSessionCwd, onAgentEnd: handleAgentCompleted, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
-
-  const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
-  const assistantTts = assistant?.manifest.tts;
-  const ttsConfig = !assistantTts || assistantTts === "inherit" ? defaultTts : assistantTts;
-  const { speak, stop: stopSpeaking, speaking, error: ttsError } = useTts(assistantId, ttsConfig);
-  const autoSpeakPendingRef = useRef(false);
-  const playDoneSoundRef = useRef(playDoneSound);
-  playDoneSoundRef.current = playDoneSound;
-  const soundEnabledRef = useRef(soundEnabled);
-  soundEnabledRef.current = soundEnabled;
-
-  // Wrap agent event handler to play sound on agent_end
-  const origHandler = handleAgentEventRef.current;
-  useEffect(() => {
-    handleAgentEventRef.current = (event) => {
-      if (event.type === "agent_end" && soundEnabledRef.current) {
-        playDoneSoundRef.current();
-      }
-      if (event.type === "agent_end") autoSpeakPendingRef.current = true;
-      origHandler?.(event);
-    };
-  }, [origHandler, handleAgentEventRef]);
 
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.

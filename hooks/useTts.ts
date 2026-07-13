@@ -106,7 +106,7 @@ export function useTts(assistantId?: string, config?: AssistantTtsConfig) {
       let output: TtsClientInstruction | Blob | null;
       try {
         output = await speakText({ profileId: config?.profileId ?? "browser-default", assistantId, text, rate: config?.rate, pitch: config?.pitch, readCode: config?.readCode, preview }, controller.signal);
-      } catch (reason) {
+      } catch {
         if (controller.signal.aborted) throw abortError();
         output = { kind: "browser-speech", text, rate: config?.rate, pitch: config?.pitch };
       }
