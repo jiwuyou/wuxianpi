@@ -258,3 +258,129 @@ export interface ApiFailure {
 }
 
 export type ApiResult<T> = ApiSuccess<T> | ApiFailure;
+
+export const WUXIANPI_API_ROUTES = {
+  assistants: "/api/assistants",
+  assistant: (id: string) => `/api/assistants/${encodeURIComponent(id)}`,
+  assistantResolved: (id: string) => `/api/assistants/${encodeURIComponent(id)}/resolved`,
+  assistantExport: (id: string) => `/api/assistants/${encodeURIComponent(id)}/export`,
+  assistantImport: "/api/assistants/import",
+  capabilities: "/api/capabilities",
+  capabilityConfig: "/api/capabilities/config",
+  secrets: "/api/secrets",
+  mcp: "/api/mcp",
+  tts: "/api/tts",
+  webExtensions: "/api/web-extensions",
+  extensionBridge: "/api/extension-bridge",
+  ubuntu: "/api/ubuntu",
+} as const;
+
+export interface AssistantListData {
+  assistants: AssistantSummary[];
+  legacySessionCount: number;
+}
+
+export interface AssistantDetailData {
+  assistant: AssistantSummary;
+  files: AssistantFiles;
+}
+
+export interface AssistantMutationData {
+  assistant: AssistantSummary;
+}
+
+export interface AssistantCopyRequest {
+  sourceId: string;
+  targetId: string;
+  name?: string;
+}
+
+export interface CapabilityConfigPatch {
+  defaults?: Partial<GlobalWuxianPiConfigV1["defaults"]>;
+  mcpServers?: McpServerConfig[];
+  ttsProfiles?: TtsProfile[];
+  ubuntu?: GlobalWuxianPiConfigV1["ubuntu"];
+}
+
+export interface CapabilityCatalogData {
+  catalog: CapabilityCatalog;
+  config: GlobalWuxianPiConfigV1;
+}
+
+export interface SecretSummary {
+  name: string;
+  configured: boolean;
+  updatedAt?: string;
+}
+
+export interface SecretMutationRequest {
+  name: string;
+  value?: string;
+}
+
+export interface McpActionRequest {
+  action: "test" | "listTools" | "call" | "cancel";
+  serverId: string;
+  assistantId?: string;
+  toolName?: string;
+  arguments?: JsonValue;
+  callId?: string;
+}
+
+export interface McpActionData {
+  serverId: string;
+  tools?: CapabilityDescriptor[];
+  result?: JsonValue;
+  diagnostics?: CapabilityDiagnostic[];
+}
+
+export interface TtsSpeakRequest {
+  profileId: string;
+  text: string;
+  assistantId?: string;
+  rate?: number;
+  pitch?: number;
+  readCode?: boolean;
+  preview?: boolean;
+}
+
+export interface TtsClientInstruction {
+  kind: "browser-speech";
+  text: string;
+  voice?: string;
+  rate?: number;
+  pitch?: number;
+}
+
+export interface PermissionResponseRequest {
+  requestId: string;
+  decision: PermissionDecision;
+}
+
+export interface WebExtensionSummary {
+  id: string;
+  path: string;
+  manifest: WebExtensionManifestV1;
+  enabled: boolean;
+  diagnostics: CapabilityDiagnostic[];
+}
+
+export interface WebExtensionListData {
+  extensions: WebExtensionSummary[];
+}
+
+export interface UbuntuActionRequest {
+  action: "status" | "start" | "listTools" | "call" | "cancel" | "shutdown";
+  assistantId?: string;
+  toolName?: string;
+  arguments?: JsonValue;
+  callId?: string;
+}
+
+export interface UbuntuStatusData {
+  available: boolean;
+  running: boolean;
+  distro?: string;
+  tools?: CapabilityDescriptor[];
+  diagnostics: CapabilityDiagnostic[];
+}
