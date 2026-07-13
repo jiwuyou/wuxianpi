@@ -60,11 +60,15 @@ panels and tool-result renderers through a permission-checked bridge.
 - Keep tool results collapsed by default.
 - Retain only a small number of live AgentSession runtimes on mobile.
 
-## Initial implementation sequence
+## Implementation status
 
-1. Establish WuxianPi branding and an independent repository.
-2. Add assistant-directory discovery and creation.
-3. Replace project-first navigation with an assistant-first mobile shell.
-4. Add global capability selection and per-assistant overrides.
-5. Add TTS and full Pi extension UI compatibility.
-6. Add optional MCP and HTML WebUI extension adapters.
+- [x] WuxianPi branding and independent repository
+- [x] Assistant-directory discovery, CRUD, copy, archive, import, and export
+- [x] Assistant-first responsive mobile shell
+- [x] Global capability selection and per-assistant overrides
+- [x] TTS and Pi extension Web UI compatibility
+- [x] MCP and sandbox HTML WebUI extension adapters
+- [x] Granular permission broker and secret masking
+- [x] Optional Ubuntu JSON-RPC tool worker
+- [x] Mobile streaming batching, virtualization, and lazy heavy renderers
+- [x] Linux and native Termux automated/build/runtime smoke verification

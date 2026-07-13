@@ -2,13 +2,13 @@
 
 [中文文档](./README.zh-CN.md)
 
-WuxianPi is a mobile-first personal assistant workspace powered by [Pi](https://github.com/badlogic/pi-mono). The project currently keeps `jiwuyou/pi-web` as its runnable baseline and will evolve around assistant directories, role definitions, a global capability center, TTS, MCP, and optional HTML WebUI extensions.
+WuxianPi is a mobile-first personal assistant workspace powered by [Pi](https://github.com/badlogic/pi-mono). It keeps Pi runtime and JSONL session compatibility while adding assistant directories, role definitions, a global capability center, TTS, MCP, permissions, and sandboxed HTML WebUI extensions.
 
 See [`docs/PRODUCT.md`](./docs/PRODUCT.md) for the product boundary and implementation direction. Pi remains an unmodified upstream runtime.
 
 ![Pi Web shows the same pi session with structured Markdown, tool calls, and project navigation beside the CLI](./docs/screenshot2.png)
 
-The current baseline retains pi-web session compatibility while the mobile assistant experience is developed.
+The project is derived from `jiwuyou/pi-web`; Pi remains an unmodified upstream dependency.
 
 ## Quick Start
 
@@ -33,15 +33,18 @@ PORT=8080 wuxianpi                # environment variable is also supported
 
 ## Features
 
-- **Pick work back up**: browse previous pi conversations by project without digging through terminal history or session paths.
-- **Try different directions safely**: continue from an earlier message or fork a session into a separate route.
-- **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
-- **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
-- **Configure less from the terminal**: manage models, login/API keys, model tests, and skill switches from the web UI.
+- **One directory per assistant**: keep role, memory, workspace notes, knowledge, and assistant-local Pi resources together; create, copy, archive, import, and export them.
+- **Mobile-first chat**: assistant cards, bottom navigation, virtualized messages, batched streaming, lazy code highlighting, and collapsed tool results.
+- **Global capability center**: configure models, tools, Skills, MCP, TTS, WebUI extensions, permissions, and the optional Ubuntu worker once, then select or override them per assistant.
+- **Role/capability separation**: disabling every tool does not remove `AGENTS.md`, memory, or workspace context.
+- **Speech output**: browser speech, Termux Android TTS, and OpenAI-compatible/HTTP providers with preview, auto-speak, and cancellation.
+- **Extension compatibility**: Pi Extension UI mapping plus rich sandboxed iframe contributions protected by CSP, nonces, and granular bridge permissions.
+- **Pi compatibility**: existing JSONL sessions, forks, in-session branches, SSE reconnect, compaction, model configuration, Skills, and file preview remain available.
 
 ## Notes
 
 - **Data directory**: WuxianPi reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
+- **Assistant directory**: assistants live at `~/.pi/agent/assistants/<assistant-id>` by default.
 - **Session files**: files are stored as `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
 - **Model config**: the Models panel reads and writes `models.json` in the pi agent directory. Model lists and defaults come from pi's config.
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.

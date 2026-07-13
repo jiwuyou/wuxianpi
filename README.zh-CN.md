@@ -2,7 +2,7 @@
 
 [English](./README.md)
 
-WuxianPi 是基于 [Pi](https://github.com/badlogic/pi-mono) 的移动优先个人助手工作台。项目当前以 `jiwuyou/pi-web` 为可运行基线，后续将围绕助手目录、角色定义、全局能力中心、TTS、MCP 和 HTML WebUI 扩展逐步重构。
+WuxianPi 是基于 [Pi](https://github.com/badlogic/pi-mono) 的移动优先个人助手工作台。它在保持 Pi 运行时和 JSONL 会话兼容的同时，提供助手目录、角色定义、全局能力中心、TTS、MCP、权限控制和沙箱 HTML WebUI 扩展。
 
 产品边界与演进方向见 [`docs/PRODUCT.md`](./docs/PRODUCT.md)。Pi 作为上游运行时保持不修改。
 
@@ -29,15 +29,18 @@ PORT=8080 wuxianpi                # 也支持环境变量
 
 ## 功能介绍
 
-- **把历史工作接回来**：打开网页就能按项目找到以前的 pi 对话，不必在终端里翻文件或记住会话路径。
-- **放心试不同方向**：可以从某条历史消息重新开始，也可以复制出一条独立的新路线，探索方案时不怕弄乱原来的对话。
-- **边聊边看项目文件**：左侧浏览项目文件，右侧打开源码、文档、图片、音频和 PDF；文件变化会自动刷新，适合边让 agent 改边检查结果。
-- **随时掌握会话状态**：在顶部就能看到上下文占用、花费、压缩结果和系统提示，长会话不再像黑箱。
-- **少离开当前界面**：模型、登录/API key、模型测试和技能开关都能在网页里处理，配置 agent 时不用在多个工具之间来回切换。
+- **一个助手一个目录**：角色、记忆、外部工作区说明、知识和专属 Pi 资源一起保存，可创建、复制、归档和 ZIP 导入导出。
+- **手机优先聊天**：助手卡片首页、底部导航、虚拟消息列表、批量流式渲染、按需代码高亮和默认折叠工具结果。
+- **全局能力中心**：统一配置模型、工具、Skills、MCP、TTS、WebUI 扩展、权限和可选 Ubuntu Worker，再由助手选择或覆盖。
+- **角色与能力解耦**：即使关闭全部工具，Pi 仍加载助手目录中的 `AGENTS.md`、记忆和工作区说明。
+- **语音输出**：支持浏览器语音、Termux Android TTS 和 OpenAI-compatible/HTTP TTS，支持试听、自动朗读和取消。
+- **扩展兼容**：映射 Pi Extension UI，并允许富界面扩展通过 sandbox iframe、CSP、nonce 和细粒度 Bridge 权限运行。
+- **保留 Pi 能力**：历史 JSONL 会话、Fork、会话内分支、SSE 重连、压缩、模型配置、Skills 和文件预览继续可用。
 
 ## 注意事项
 
 - **数据目录**：默认读取 `~/.pi/agent/sessions` 下的会话文件。可通过环境变量 `PI_CODING_AGENT_DIR` 指定其他 pi agent 目录。
+- **助手目录**：默认位于 `~/.pi/agent/assistants/<assistant-id>`。
 - **会话文件**：路径形如 `~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`。
 - **模型配置**：Models 面板读写 pi agent 目录下的 `models.json`，模型列表和默认模型由 pi 的配置解析得到。
 - **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。
