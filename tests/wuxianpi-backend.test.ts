@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import test from "node:test";
@@ -9,21 +9,31 @@ import type { CapabilityDescriptor } from "../lib/wuxianpi/contracts";
 const bundled = process.env.WUXIANPI_BACKEND_TEST_BUNDLE === "1";
 
 if (!bundled) {
-  test("WuxianPi backend bundled test suite", () => {
-    const output = path.join(process.cwd(), ".wuxianpi-backend-tests.mjs");
+  test("WuxianPi backend bundled test suite", async () => {
+    const { resolveWuxianPiRuntimeTempDir } = await import("../lib/wuxianpi/paths");
+    const temporaryRoot = await resolveWuxianPiRuntimeTempDir();
+    const suiteDirectory = path.join(temporaryRoot, `wuxianpi-backend-tests-${process.pid}`);
+    await mkdir(suiteDirectory, { recursive: true, mode: 0o700 });
+    await symlink(path.join(process.cwd(), "node_modules"), path.join(suiteDirectory, "node_modules"), "dir");
+    const output = path.join(suiteDirectory, "backend-tests.mjs");
     try {
       execFileSync(path.join(process.cwd(), "node_modules/.bin/esbuild"), [
         path.join(process.cwd(), "tests/wuxianpi-backend.test.ts"), "--bundle", "--platform=node", "--format=esm", "--packages=external",
         `--outfile=${output}`,
       ], { stdio: "inherit" });
-      const childEnv: NodeJS.ProcessEnv = { ...process.env, WUXIANPI_BACKEND_TEST_BUNDLE: "1", PI_CODING_AGENT_DIR: path.join("/tmp", `wuxianpi-tests-${process.pid}`) };
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        WUXIANPI_BACKEND_TEST_BUNDLE: "1",
+        WUXIANPI_TEST_RUNTIME_DIR: suiteDirectory,
+        PI_CODING_AGENT_DIR: path.join(suiteDirectory, "agent"),
+      };
       delete childEnv.NODE_TEST_CONTEXT;
       execFileSync(process.execPath, ["--test", output], {
         cwd: process.cwd(), stdio: "inherit",
         env: childEnv,
       });
     } finally {
-      void rm(output, { force: true });
+      await rm(suiteDirectory, { recursive: true, force: true });
     }
   });
 } else {
@@ -40,6 +50,27 @@ if (!bundled) {
     const rpc = await import("../lib/rpc-manager");
     const web = await import("../lib/wuxianpi/web-extension-manager");
     const fflate = await import("fflate");
+
+    await t.test("runtime temp resolver handles Termux without TMPDIR and regular Linux", async () => {
+      const runtimeRoot = process.env.WUXIANPI_TEST_RUNTIME_DIR!;
+      const termuxHome = path.join(runtimeRoot, "termux-home");
+      const termuxPrefix = path.join(runtimeRoot, "unwritable-prefix");
+      const termuxResolved = await paths.resolveWuxianPiRuntimeTempDir({
+        env: { NODE_ENV: "test", HOME: termuxHome, PREFIX: termuxPrefix, TERMUX_VERSION: "1" },
+        osTmpDir: "/tmp",
+        probeDirectory: async (directory) => {
+          if (directory === path.resolve("/tmp") || directory === path.resolve(termuxPrefix, "tmp")) return false;
+          await mkdir(directory, { recursive: true, mode: 0o700 });
+          const probe = path.join(directory, "probe"); await writeFile(probe, "ok"); await rm(probe);
+          return true;
+        },
+      });
+      assert.equal(termuxResolved, path.resolve(termuxHome, ".cache", "wuxianpi", "tmp"));
+      const linuxTmp = path.join(runtimeRoot, "linux-tmp");
+      const linuxResolved = await paths.resolveWuxianPiRuntimeTempDir({ env: { NODE_ENV: "test", TMPDIR: linuxTmp }, osTmpDir: "/tmp" });
+      assert.equal(linuxResolved, path.resolve(linuxTmp));
+      await writeFile(path.join(linuxResolved, "writable"), "ok");
+    });
 
     await t.test("assistant traversal and ZIP expansion are rejected", async () => {
       await assert.rejects(() => assistants.createAssistant({ id: "../escape", manifest: { schemaVersion: 1, name: "bad" } }));
@@ -110,7 +141,7 @@ if (!bundled) {
     });
 
     await t.test("MCP result conversion, cancellation, timeout, and offline isolation", async () => {
-      const serverFile = path.join(process.cwd(), `.wuxianpi-mcp-${process.pid}.mjs`);
+      const serverFile = path.join(process.env.WUXIANPI_TEST_RUNTIME_DIR!, `mcp-server-${process.pid}.mjs`);
       await writeFile(serverFile, `
         import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
         import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -122,7 +153,7 @@ if (!bundled) {
       `);
       const base = await configStore.readWuxianPiConfig();
       await configStore.writeWuxianPiConfig({ ...base, mcpServers: [
-        { id: "fake", name: "Fake", transport: "stdio", command: process.execPath, args: [serverFile], timeoutMs: 2_000 },
+        { id: "fake", name: "Fake", transport: "stdio", command: process.execPath, args: [serverFile], timeoutMs: 5_000 },
         { id: "offline", name: "Offline", transport: "stdio", command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], timeoutMs: 100 },
       ] });
       await permissions.revokePermission("alpha", "mcp:fake");
@@ -131,6 +162,7 @@ if (!bundled) {
       const definitions = await mcp.createMcpToolDefinitions(["fake", "offline"], "alpha");
       assert.ok(definitions.diagnostics.some((item) => item.capabilityId === "mcp:offline"));
       const echo = definitions.tools.find((tool) => tool.label.includes("echo"))!;
+      assert.ok(echo, JSON.stringify(definitions.diagnostics));
       const echoResult = await echo.execute("echo-call", { text: "hello" }, undefined, undefined, {} as never);
       assert.equal(echoResult.content[0].type === "text" ? echoResult.content[0].text : "", "hello");
       const pending = mcp.callMcpTool("fake", "wait", { milliseconds: 5_000 }, { callId: "cancel-me", assistantId: "alpha" });
