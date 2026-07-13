@@ -1,9 +1,12 @@
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, SessionManager } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "crypto";
 import { cacheSessionPath } from "./session-reader";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 // ============================================================================
 // Types
@@ -51,13 +54,21 @@ export class AgentSessionWrapper {
   private pendingUiResponses = new Map<string, PendingUiResponse>();
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
+  private extensionWorkingState: Record<string, unknown> = {};
+  private toolsExpanded = false;
   private promptRunning = false;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
+  private lastActivityAt = Date.now();
 
-  constructor(public readonly inner: AgentSessionLike) {
+  constructor(
+    public readonly inner: AgentSessionLike,
+    private readonly idleTimeoutMs = 10 * 60 * 1000,
+    private readonly strictToolSelection = false,
+    private readonly alwaysActiveToolNames: string[] = [],
+  ) {
     this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
   }
 
@@ -73,6 +84,9 @@ export class AgentSessionWrapper {
     return this._alive;
   }
 
+  isBusy(): boolean { return this.promptRunning || this.inner.isStreaming || this.inner.isCompacting; }
+  getLastActivityAt(): number { return this.lastActivityAt; }
+
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
@@ -86,8 +100,9 @@ export class AgentSessionWrapper {
   }
 
   private resetIdleTimer(): void {
+    this.lastActivityAt = Date.now();
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => this.destroy(), 10 * 60 * 1000);
+    this.idleTimer = setTimeout(() => this.destroy(), this.idleTimeoutMs);
   }
 
   private refreshModelRuntime(): void {
@@ -166,6 +181,7 @@ export class AgentSessionWrapper {
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
+          extensionWorkingState: this.extensionWorkingState,
         };
       }
 
@@ -309,7 +325,8 @@ export class AgentSessionWrapper {
       }
 
       case "set_tools": {
-        this.inner.setActiveToolsByName(withExtensionTools(this.inner, command.toolNames as string[]));
+        const requested = command.toolNames as string[];
+        this.inner.setActiveToolsByName(this.strictToolSelection ? [...new Set([...requested, ...this.alwaysActiveToolNames])] : withExtensionTools(this.inner, requested));
         return null;
       }
 
@@ -449,10 +466,10 @@ export class AgentSessionWrapper {
           statusText: text,
         } as ExtensionUiRequest as AgentEvent);
       },
-      setWorkingMessage: () => {},
-      setWorkingVisible: () => {},
-      setWorkingIndicator: () => {},
-      setHiddenThinkingLabel: () => {},
+      setWorkingMessage: (message) => { this.extensionWorkingState.message = message; this.emit({ type: "extension_ui_request", id: randomUUID(), method: "setWorkingMessage", message }); },
+      setWorkingVisible: (visible) => { this.extensionWorkingState.visible = visible; this.emit({ type: "extension_ui_request", id: randomUUID(), method: "setWorkingVisible", visible }); },
+      setWorkingIndicator: (options) => { this.extensionWorkingState.indicator = options; this.emit({ type: "extension_ui_request", id: randomUUID(), method: "setWorkingIndicator", options }); },
+      setHiddenThinkingLabel: (label) => { this.extensionWorkingState.hiddenThinkingLabel = label; this.emit({ type: "extension_ui_request", id: randomUUID(), method: "setHiddenThinkingLabel", label }); },
       setWidget: (key, content, options) => {
         if (content !== undefined && !Array.isArray(content)) return;
         if (content === undefined) {
@@ -508,8 +525,8 @@ export class AgentSessionWrapper {
       getAllThemes: () => [],
       getTheme: () => undefined,
       setTheme: () => ({ success: false, error: "Theme switching is not supported in WuxianPi extension UI yet" }),
-      getToolsExpanded: () => false,
-      setToolsExpanded: () => {},
+      getToolsExpanded: () => this.toolsExpanded,
+      setToolsExpanded: (expanded) => { this.toolsExpanded = expanded; this.emit({ type: "extension_ui_request", id: randomUUID(), method: "setToolsExpanded", expanded }); },
     };
   }
 }
@@ -543,6 +560,25 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
+export interface StartRpcSessionOptions {
+  toolNames?: string[];
+  skillNames?: string[];
+  customTools?: ToolDefinition[];
+  idleSessionMs?: number;
+  maxLiveSessions?: number;
+  strictToolSelection?: boolean;
+  assistantContextFiles?: string[];
+}
+
+function evictExcessSessions(registry: Map<string, AgentSessionWrapper>, maxLiveSessions: number, keepId: string): void {
+  const overflow = registry.size - Math.max(1, maxLiveSessions);
+  if (overflow <= 0) return;
+  const candidates = Array.from(registry.entries())
+    .filter(([id, session]) => id !== keepId && !session.isBusy())
+    .sort((a, b) => a[1].getLastActivityAt() - b[1].getLastActivityAt());
+  for (let index = 0; index < Math.min(overflow, candidates.length); index++) candidates[index][1].destroy();
+}
+
 /**
  * Get or create an AgentSession for the given session.
  * For new sessions (sessionFile === ""), pi generates its own id.
@@ -552,7 +588,7 @@ export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
   cwd: string,
-  toolNames?: string[]
+  optionsOrToolNames?: string[] | StartRpcSessionOptions,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -564,6 +600,26 @@ export async function startRpcSession(
   if (inflight) return inflight;
 
   const starting = (async () => {
+    let options: StartRpcSessionOptions = Array.isArray(optionsOrToolNames) ? { toolNames: optionsOrToolNames } : (optionsOrToolNames ?? {});
+    if (optionsOrToolNames === undefined) {
+      const [{ assistantIdFromCwd }, { readWuxianPiConfig }] = await Promise.all([import("./wuxianpi/paths"), import("./wuxianpi/config-store")]);
+      const config = await readWuxianPiConfig();
+      options = { idleSessionMs: config.defaults.idleSessionMs, maxLiveSessions: config.defaults.maxLiveSessions };
+      const assistantId = assistantIdFromCwd(cwd);
+      if (assistantId) {
+        const [{ resolveAssistantRuntime }, { createMcpToolDefinitions }] = await Promise.all([import("./wuxianpi/runtime-resolver"), import("./wuxianpi/mcp-manager")]);
+        const resolved = await resolveAssistantRuntime(assistantId);
+        options = {
+          ...options,
+          toolNames: resolved.toolNames,
+          skillNames: resolved.skillNames,
+          customTools: await createMcpToolDefinitions(resolved.mcpServerIds),
+          strictToolSelection: true,
+          assistantContextFiles: ["MEMORY.md", "WORKSPACES.md"],
+        };
+      }
+    }
+    const { toolNames, skillNames, customTools = [], idleSessionMs = 10 * 60 * 1000, maxLiveSessions = Number.POSITIVE_INFINITY, strictToolSelection = false, assistantContextFiles = [] } = options;
     const { SessionManager, getAgentDir } = await import("@earendil-works/pi-coding-agent");
     const agentDir = getAgentDir();
 
@@ -571,42 +627,46 @@ export async function startRpcSession(
       ? SessionManager.open(sessionFile, undefined)
       : SessionManager.create(cwd, undefined);
 
-    // Determine which tools to pass based on requested toolNames.
-    // Since v0.68.0, createAgentSession expects string[] tool names instead of Tool[] instances.
-    let toolsOption: string[] | undefined;
-    if (toolNames !== undefined) {
-      // toolNames === [] -> "all off" (an empty allow-list disables every tool).
-      // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
-      // set allowedToolNames to coding builtins only, which filtered every
-      // extension/package-provided tool (e.g. subagents, web access) out of the
-      // tool registry — so they were unavailable in pi-web sessions even though the
-      // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
-      // tools (and activate extension tools); we narrow the ACTIVE set below.
-      toolsOption = toolNames.length === 0 ? [] : undefined;
+    let resourceLoader: DefaultResourceLoader | undefined;
+    if (skillNames !== undefined || assistantContextFiles.length > 0) {
+      const selectedSkills = new Set(skillNames);
+      const appendSystemPrompt: string[] = [];
+      for (const filename of assistantContextFiles) {
+        if (path.basename(filename) !== filename) throw new Error(`Unsafe assistant context filename: ${filename}`);
+        try {
+          const content = await readFile(path.join(cwd, filename), "utf8");
+          if (content.trim()) appendSystemPrompt.push(`## ${filename}\n\n${content.slice(0, 256 * 1024)}${content.length > 256 * 1024 ? "\n\n[Content truncated by WuxianPi]" : ""}`);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+      resourceLoader = new DefaultResourceLoader({
+        cwd,
+        agentDir,
+        ...(skillNames !== undefined ? { skillsOverride: (base: ReturnType<DefaultResourceLoader["getSkills"]>) => ({ ...base, skills: base.skills.filter((skill) => selectedSkills.has(skill.name)) }) } : {}),
+        appendSystemPrompt,
+      });
+      await resourceLoader.reload();
     }
 
     const { session: inner } = await createAgentSession({
       cwd,
       agentDir,
       sessionManager,
-      ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
+      ...(toolNames?.length === 0 ? { noTools: customTools.length ? "builtin" as const : "all" as const } : {}),
+      ...(customTools.length ? { customTools } : {}),
+      ...(resourceLoader ? { resourceLoader } : {}),
     });
 
     // If specific tool names were requested (non-empty), set the active tools to the
     // requested builtin coding tools PLUS all extension/package tools, so installed
-    // extensions stay usable in pi-web just like in the `pi` CLI.
-    if (toolNames && toolNames.length > 0) {
-      inner.setActiveToolsByName(withExtensionTools(inner, toolNames));
+    // extensions stay usable in WuxianPi just like in the `pi` CLI.
+    if (toolNames && (toolNames.length > 0 || customTools.length > 0)) {
+      const requested = [...toolNames, ...customTools.map((tool) => tool.name)];
+      inner.setActiveToolsByName(strictToolSelection ? requested : (toolNames.length > 0 ? withExtensionTools(inner, toolNames) : customTools.map((tool) => tool.name)));
     }
 
-    // When all tools are disabled, clear the system prompt entirely.
-    // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
-    // the only way to truly clear it is to call agent.setSystemPrompt directly.
-    if (toolNames?.length === 0) {
-      inner.agent.state.systemPrompt = "";
-    }
-
-    const wrapper = new AgentSessionWrapper(inner);
+    const wrapper = new AgentSessionWrapper(inner, idleSessionMs, strictToolSelection, customTools.map((tool) => tool.name));
     wrapper.start();
 
     const realSessionId = inner.sessionId as string;
@@ -615,6 +675,7 @@ export async function startRpcSession(
 
     wrapper.onDestroy(() => registry.delete(realSessionId));
     registry.set(realSessionId, wrapper);
+    evictExcessSessions(registry, maxLiveSessions, realSessionId);
 
     return { session: wrapper, realSessionId };
   })().finally(() => locks.delete(sessionId));

@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { allowFileRoot } from "@/lib/file-access";
 import { startRpcSession } from "@/lib/rpc-manager";
+import type { NewAgentSessionRequest } from "@/lib/wuxianpi/contracts";
+import { resolveAssistantRuntime } from "@/lib/wuxianpi/runtime-resolver";
+import { createMcpToolDefinitions } from "@/lib/wuxianpi/mcp-manager";
+import { readWuxianPiConfig } from "@/lib/wuxianpi/config-store";
 
 const DEFAULT_TOOL_NAMES = ["read", "bash", "edit", "write"];
 const FULL_TOOL_NAMES = ["bash", "read", "edit", "write", "grep", "find", "ls"];
@@ -28,8 +32,10 @@ function normalizeNewSessionToolNames(toolNames: unknown): string[] {
 // Returns { sessionId, data } where sessionId is pi's real session id.
 export async function POST(req: Request) {
   try {
-    const body = await req.json() as { cwd?: string; [key: string]: unknown };
-    const { cwd, ...command } = body;
+    const body = await req.json() as NewAgentSessionRequest;
+    const { assistantId, overrides, cwd: requestedCwd, ...command } = body;
+    const resolved = assistantId ? await resolveAssistantRuntime(assistantId, overrides) : undefined;
+    const cwd = resolved?.cwd ?? requestedCwd;
 
     if (!cwd || typeof cwd !== "string") {
       return NextResponse.json({ error: "cwd is required" }, { status: 400 });
@@ -39,11 +45,23 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; [key: string]: unknown };
-    const startupToolNames = normalizeNewSessionToolNames(toolNames);
+    const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = command;
+    const selectedModel = resolved?.model ?? (provider && modelId ? { provider, modelId } : undefined);
+    const selectedThinkingLevel = resolved?.thinkingLevel ?? thinkingLevel;
+    const startupToolNames = resolved?.toolNames ?? normalizeNewSessionToolNames(toolNames);
+    const customTools = resolved?.mcpServerIds.length ? await createMcpToolDefinitions(resolved.mcpServerIds) : [];
+    const runtimeConfig = await readWuxianPiConfig();
 
     const tempKey = `__new__${Date.now()}`;
-    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, startupToolNames);
+    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, {
+      toolNames: startupToolNames,
+      skillNames: resolved?.skillNames,
+      customTools,
+      idleSessionMs: runtimeConfig.defaults.idleSessionMs,
+      maxLiveSessions: runtimeConfig.defaults.maxLiveSessions,
+      strictToolSelection: Boolean(resolved),
+      assistantContextFiles: resolved ? ["MEMORY.md", "WORKSPACES.md"] : [],
+    });
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
     // in sync so the new cwd is immediately readable via /api/files. Without this,
@@ -51,13 +69,13 @@ export async function POST(req: Request) {
     allowFileRoot(cwd);
 
     // Apply pre-selected model before sending the prompt
-    if (provider && modelId) {
-      await session.send({ type: "set_model", provider, modelId });
+    if (selectedModel) {
+      await session.send({ type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
     }
 
     // Apply pre-selected thinking level before sending the prompt
-    if (thinkingLevel) {
-      await session.send({ type: "set_thinking_level", level: thinkingLevel });
+    if (selectedThinkingLevel) {
+      await session.send({ type: "set_thinking_level", level: selectedThinkingLevel });
     }
 
     if (promptCommand.type === "ensure_session") {
