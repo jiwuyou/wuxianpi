@@ -596,14 +596,14 @@ function ToolCallBlock({ block, result, duration, assistantId, sessionId, webExt
     : null;
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = result?.isError ?? false;
-  const renderer = useMemo(() => {
+  const renderer = (() => {
     for (const extension of webExtensions) {
       for (const contribution of extension.manifest.contributes?.toolRenderers ?? []) {
         if (matchToolPattern(contribution.toolPattern, block.toolName)) return { extension, contribution };
       }
     }
     return null;
-  }, [block.toolName, webExtensions]);
+  })();
 
   return (
     <div

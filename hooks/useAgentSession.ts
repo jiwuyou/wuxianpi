@@ -1203,10 +1203,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     if (!assistantId) return;
     let cancelled = false;
-    getPermissionState().then((state) => {
-      if (!cancelled) setPermissionRequest(state.pending.find((item) => item.assistantId === assistantId) ?? null);
-    }).catch(() => {});
-    return () => { cancelled = true; };
+    const refresh = () => {
+      getPermissionState().then((state) => {
+        if (!cancelled) setPermissionRequest((current) => {
+          const pending = state.pending.filter((item) => item.assistantId === assistantId);
+          return (current && pending.some((item) => item.id === current.id) ? current : pending[0]) ?? null;
+        });
+      }).catch(() => {});
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [assistantId]);
 
   useEffect(() => {

@@ -54,7 +54,16 @@ function copyText(text: string): Promise<void> {
 }
 
 export function MarkdownBody({ children, className, isStreaming }: MarkdownBodyProps) {
-  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
+  const normalizedMarkdown = useMemo(() => isStreaming ? children : normalizeDisplayMath(children), [children, isStreaming]);
+  const hasMath = !isStreaming && /(^|[^\\])\$\$?|\\\(|\\\[/.test(children);
+
+  useEffect(() => {
+    if (hasMath) void import("katex/dist/katex.min.css");
+  }, [hasMath]);
+
+  if (isStreaming) {
+    return <div className={["markdown-body", "markdown-streaming-plain", className].filter(Boolean).join(" ")}>{children}</div>;
+  }
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>

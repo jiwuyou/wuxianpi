@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import dynamic from "next/dynamic";
 import type { AgentMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
-import type { AssistantSummary, PermissionDecision, PermissionRequest, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
-import { MessageView } from "./MessageView";
+import type { AssistantSummary, AssistantTtsConfig, PermissionDecision, PermissionRequest, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
@@ -13,10 +13,13 @@ import { useDragDrop } from "@/hooks/useDragDrop";
 import { STARTER_PROMPTS } from "@/lib/starter-prompts";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 
+const MessageView = dynamic(() => import("./MessageView").then((module) => module.MessageView), { ssr: false, loading: () => <div className="message-render-placeholder" /> });
+
 interface Props {
   assistantId?: string;
   assistant?: AssistantSummary;
   webExtensions?: WebExtensionSummary[];
+  defaultTts?: AssistantTtsConfig;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   onAgentEnd?: () => void;
@@ -95,7 +98,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ assistantId, assistant, webExtensions = [], session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenModelsConfig, onContextUsageChange, initialPrompt, initialPromptKey, onInitialPromptQueued }: Props) {
+export function ChatWindow({ assistantId, assistant, webExtensions = [], defaultTts, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenModelsConfig, onContextUsageChange, initialPrompt, initialPromptKey, onInitialPromptQueued }: Props) {
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
@@ -119,8 +122,10 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], session
   });
 
   const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
-  const ttsConfig = assistant?.manifest.tts;
+  const assistantTts = assistant?.manifest.tts;
+  const ttsConfig = !assistantTts || assistantTts === "inherit" ? defaultTts : assistantTts;
   const { speak, stop: stopSpeaking, speaking, error: ttsError } = useTts(assistantId, ttsConfig);
+  const autoSpeakPendingRef = useRef(false);
   const playDoneSoundRef = useRef(playDoneSound);
   playDoneSoundRef.current = playDoneSound;
   const soundEnabledRef = useRef(soundEnabled);
@@ -133,6 +138,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], session
       if (event.type === "agent_end" && soundEnabledRef.current) {
         playDoneSoundRef.current();
       }
+      if (event.type === "agent_end") autoSpeakPendingRef.current = true;
       origHandler?.(event);
     };
   }, [origHandler, handleAgentEventRef]);
@@ -216,11 +222,16 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], session
   }, [messages]);
   const autoSpokenRef = useRef("");
   useEffect(() => {
-    const autoSpeak = ttsConfig !== "inherit" && ttsConfig?.autoSpeak;
-    if (!autoSpeak || agentRunning || streamState.isStreaming || !latestAssistantText || autoSpokenRef.current === latestAssistantText) return;
+    if (!ttsConfig?.autoSpeak || !autoSpeakPendingRef.current || agentRunning || streamState.isStreaming || !latestAssistantText || autoSpokenRef.current === latestAssistantText) return;
+    autoSpeakPendingRef.current = false;
     autoSpokenRef.current = latestAssistantText;
     void speak(latestAssistantText);
   }, [agentRunning, latestAssistantText, speak, streamState.isStreaming, ttsConfig]);
+
+  const handleAbortWithTts = useCallback(() => {
+    stopSpeaking();
+    void handleAbort();
+  }, [handleAbort, stopSpeaking]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
   const quickPrompts = assistant?.manifest.starterPrompts?.length
@@ -234,13 +245,14 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], session
     if (!initialPrompt || !initialPromptKey) return;
     if (initialPromptSentKeyRef.current === initialPromptKey) return;
     if (!isEmptyNew || agentRunning || streamState.isStreaming) return;
-    if (toolPreset !== "full") return;
+    if (!assistantId && toolPreset !== "full") return;
 
     initialPromptSentKeyRef.current = initialPromptKey;
     void handleSend(initialPrompt);
     onInitialPromptQueued?.();
   }, [
     agentRunning,
+    assistantId,
     handleSend,
     initialPrompt,
     initialPromptKey,
@@ -262,7 +274,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], session
     <ChatInput
       ref={chatInputRef}
       onSend={handleSend}
-      onAbort={handleAbort}
+      onAbort={handleAbortWithTts}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
       onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
@@ -736,6 +748,13 @@ function ExtensionDialog({
   useEffect(() => {
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
   }, [request]);
+
+  useEffect(() => {
+    const deadline = request.expiresAt ?? (request.timeout ? Date.now() + request.timeout : null);
+    if (deadline === null) return;
+    const timer = window.setTimeout(() => onRespond(request, { cancelled: true }), Math.max(0, deadline - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [onRespond, request]);
 
   const submitValue = () => {
     if (request.method === "confirm") {

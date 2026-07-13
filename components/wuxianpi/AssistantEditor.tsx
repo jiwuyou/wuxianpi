@@ -53,6 +53,13 @@ function capabilityField(source: CapabilityDescriptor["source"]): "tools" | "ski
   return "tools";
 }
 
+function capabilitySelectionId(capability: CapabilityDescriptor): string {
+  if (capability.source === "skill") return capability.id.replace(/^skill:/, "");
+  if (capability.source === "mcp") return capability.id.replace(/^mcp:/, "");
+  if (capability.source === "web-extension") return capability.id.replace(/^web-extension:/, "");
+  return capability.id;
+}
+
 function humanSource(source: CapabilityDescriptor["source"]): string {
   return ({
     "pi-builtin": "Pi 内置",
@@ -94,7 +101,7 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
   const grouped = useMemo(() => {
     const groups = new Map<CapabilityDescriptor["source"], CapabilityDescriptor[]>();
     for (const capability of catalog?.capabilities ?? []) {
-      if (!capability.assistantSelectable) continue;
+      if (!capability.assistantSelectable || capability.source === "tts" || capability.source === "ubuntu") continue;
       const current = groups.get(capability.source) ?? [];
       current.push(capability);
       groups.set(capability.source, current);
@@ -111,8 +118,9 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
     if (!field) return;
     setManifest((current) => {
       const selected = new Set(listValue(current[field]));
-      if (selected.has(capability.id)) selected.delete(capability.id);
-      else selected.add(capability.id);
+      const selectionId = capabilitySelectionId(capability);
+      if (selected.has(selectionId)) selected.delete(selectionId);
+      else selected.add(selectionId);
       return { ...current, [field]: [...selected] };
     });
   };
@@ -188,7 +196,7 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
                   <div className="capability-list">
                     {items.map((capability) => {
                       const field = capabilityField(source);
-                      const selected = field ? listValue(manifest[field]).includes(capability.id) : false;
+                      const selected = field ? listValue(manifest[field]).includes(capabilitySelectionId(capability)) : false;
                       return (
                         <label key={capability.id} className={`capability-row ${capability.status !== "available" ? "unavailable" : ""}`}>
                           <input type="checkbox" checked={selected} disabled={capability.status !== "available"} onChange={() => toggleCapability(capability)} />

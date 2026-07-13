@@ -18,8 +18,10 @@ import type {
   TtsSpeakRequest,
   WebExtensionListData,
   WebExtensionSummary,
-  WUXIANPI_API_ROUTES,
+  McpActionData,
+  McpActionRequest,
 } from "@/lib/wuxianpi/contracts";
+import { WUXIANPI_API_ROUTES } from "@/lib/wuxianpi/contracts";
 
 export class WuxianPiApiError extends Error {
   constructor(message: string, public readonly status?: number, public readonly code?: string) {
@@ -138,11 +140,12 @@ export function updateGlobalConfig(config: GlobalWuxianPiConfigV1 | CapabilityCo
   });
 }
 
-export function speakText(input: TtsSpeakRequest): Promise<TtsClientInstruction | Blob | null> {
+export function speakText(input: TtsSpeakRequest, signal?: AbortSignal): Promise<TtsClientInstruction | Blob | null> {
   return fetch(WUXIANPI_API_ROUTES.tts, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
+    signal,
   }).then(async (response) => {
     if (!response.ok) return parseResponse<never>(response);
     const contentType = response.headers.get("content-type") ?? "";
@@ -182,6 +185,13 @@ export function issueExtensionNonce(extensionId: string, assistantId?: string): 
 
 export function getPermissionState(): Promise<PermissionStateData> {
   return request<PermissionStateData>(WUXIANPI_API_ROUTES.permissions);
+}
+
+export function performMcpAction(input: McpActionRequest): Promise<McpActionData> {
+  return request<McpActionData>(WUXIANPI_API_ROUTES.mcp, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export function mutatePermission(input: PermissionMutationRequest): Promise<PermissionStateData> {

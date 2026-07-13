@@ -2,15 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import dynamic from "next/dynamic";
 import type { AssistantSummary, CapabilityCatalog, GlobalWuxianPiConfigV1, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
 import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
-import type { SessionInfo } from "@/lib/types";
+import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import { useTheme } from "@/hooks/useTheme";
 import { ChatWindow } from "./ChatWindow";
 import type { ChatInputHandle } from "./ChatInput";
-import { ModelsConfig } from "./ModelsConfig";
-import { AssistantEditor } from "./wuxianpi/AssistantEditor";
-import { CapabilityCenter } from "./wuxianpi/CapabilityCenter";
 import {
   cloneAssistant,
   exportAssistant,
@@ -22,6 +20,11 @@ import {
   listWebExtensions,
   setAssistantArchived,
 } from "./wuxianpi/api";
+
+const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { ssr: false, loading: () => <div className="wuxianpi-state">正在加载模型设置…</div> });
+const AssistantEditor = dynamic(() => import("./wuxianpi/AssistantEditor").then((module) => module.AssistantEditor), { ssr: false, loading: () => <div className="wuxianpi-modal-backdrop"><div className="wuxianpi-state">正在加载助手编辑器…</div></div> });
+const CapabilityCenter = dynamic(() => import("./wuxianpi/CapabilityCenter").then((module) => module.CapabilityCenter), { ssr: false, loading: () => <div className="wuxianpi-state">正在加载能力中心…</div> });
+const BranchNavigator = dynamic(() => import("./BranchNavigator").then((module) => module.BranchNavigator), { ssr: false });
 
 type MainView = "assistants" | "chats" | "capabilities" | "settings";
 
@@ -88,6 +91,9 @@ export function AppShell() {
   const [search, setSearch] = useState("");
   const importRef = useRef<HTMLInputElement | null>(null);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
+  const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
+  const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
+  const branchLeafChangeRef = useRef<((leafId: string | null) => void) | null>(null);
 
   const loadSessions = useCallback(async () => {
     const response = await fetch("/api/sessions");
@@ -168,6 +174,8 @@ export function AppShell() {
     .sort((a, b) => (b.lastActiveAt ?? "").localeCompare(a.lastActiveAt ?? "")), [assistants, includeArchived, search]);
 
   const openNewChat = (assistant: AssistantSummary, prompt?: string) => {
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
     setSelectedAssistant(assistant);
     setSelectedSession(null);
     setInitialPrompt(prompt ?? null);
@@ -177,6 +185,8 @@ export function AppShell() {
   };
 
   const openSession = (session: SessionInfo) => {
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
     const owner = assistants.find((assistant) => assistant.path === session.cwd) ?? virtualAssistant(session.cwd, sessions.filter((item) => item.cwd === session.cwd));
     setSelectedAssistant(owner);
     setSelectedSession(session);
@@ -187,6 +197,8 @@ export function AppShell() {
   };
 
   const closeChat = () => {
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
     setChatOpen(false);
     setSelectedSession(null);
     setInitialPrompt(null);
@@ -239,6 +251,12 @@ export function AppShell() {
     return extensions.filter((extension) => extension.enabled && ids.includes(extension.id));
   }, [extensions, globalConfig?.defaults.webExtensions, selectedAssistant]);
 
+  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
+    setBranchTree(tree);
+    setBranchActiveLeafId(activeLeafId);
+    branchLeafChangeRef.current = onLeafChange;
+  }, []);
+
   if (chatOpen && selectedAssistant) {
     return (
       <main className="wuxianpi-app chat-mode">
@@ -248,6 +266,7 @@ export function AppShell() {
           <div className="mobile-chat-title"><strong>{selectedAssistant.manifest.name}</strong><small>{selectedSession?.name || selectedAssistant.manifest.description || "WuxianPi 助手"}</small></div>
           <button className="icon-button" type="button" onClick={() => setEditorAssistant(selectedAssistant.id.startsWith("legacy-") ? undefined : selectedAssistant)} disabled={selectedAssistant.id.startsWith("legacy-")} aria-label="助手设置">⋯</button>
         </header>
+        {selectedSession && <BranchNavigator tree={branchTree} activeLeafId={branchActiveLeafId} onLeafChange={(leafId) => branchLeafChangeRef.current?.(leafId)} hasSession />}
         <div className="mobile-chat-body">
           <ChatWindow
             key={chatKey}
@@ -256,6 +275,7 @@ export function AppShell() {
             assistantId={selectedAssistant.id.startsWith("legacy-") ? undefined : selectedAssistant.id}
             assistant={selectedAssistant}
             webExtensions={selectedExtensions}
+            defaultTts={globalConfig?.defaults.tts}
             onAgentEnd={() => void loadSessions()}
             onSessionCreated={(session) => { setSelectedSession(session); router.replace(`/?session=${encodeURIComponent(session.id)}`); void loadSessions(); }}
             onSessionForked={(id) => { void loadSessions().then((items) => { const target = items.find((item) => item.id === id); if (target) openSession(target); }); }}
@@ -264,6 +284,7 @@ export function AppShell() {
             initialPromptKey={initialPrompt ? `${selectedAssistant.id}:${initialPrompt}` : null}
             onInitialPromptQueued={() => setInitialPrompt(null)}
             onOpenModelsConfig={() => setModelsOpen(true)}
+            onBranchDataChange={handleBranchDataChange}
           />
         </div>
         {editorAssistant !== undefined && <AssistantEditor assistant={editorAssistant} catalog={catalog} config={globalConfig} onClose={() => setEditorAssistant(undefined)} onSaved={(assistant) => { setAssistants((current) => current.map((item) => item.id === assistant.id ? assistant : item)); setSelectedAssistant(assistant); setEditorAssistant(undefined); }} />}

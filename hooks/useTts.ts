@@ -7,95 +7,122 @@ import { speakText } from "@/components/wuxianpi/api";
 function cleanForSpeech(text: string, readCode: boolean): string {
   let next = text;
   if (!readCode) next = next.replace(/```[\s\S]*?```/g, "（代码块已省略）");
-  return next
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/!\[[^\]]*]\([^)]*\)/g, "")
-    .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
-    .replace(/^#{1,6}\s+/gm, "")
-    .replace(/[>*_~|]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return next.replace(/`([^`]+)`/g, "$1").replace(/!\[[^\]]*]\([^)]*\)/g, "").replace(/\[([^\]]+)]\([^)]*\)/g, "$1").replace(/^#{1,6}\s+/gm, "").replace(/[>*_~|]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function speakInBrowser(instruction: TtsClientInstruction): Promise<void> {
+function abortError(): DOMException {
+  return new DOMException("语音已取消", "AbortError");
+}
+
+function speakInBrowser(instruction: TtsClientInstruction, signal: AbortSignal): Promise<void> {
   if (!("speechSynthesis" in window)) return Promise.reject(new Error("当前浏览器不支持语音朗读"));
-  window.speechSynthesis.cancel();
   return new Promise((resolve, reject) => {
     const utterance = new SpeechSynthesisUtterance(instruction.text);
+    let settled = false;
+    const finish = (reason?: unknown) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      if (reason) reject(reason); else resolve();
+    };
+    const abort = () => { window.speechSynthesis.cancel(); finish(abortError()); };
     utterance.rate = instruction.rate ?? 1;
     utterance.pitch = instruction.pitch ?? 1;
     if (instruction.voice) {
       const voice = window.speechSynthesis.getVoices().find((item) => item.name === instruction.voice || item.voiceURI === instruction.voice);
       if (voice) utterance.voice = voice;
     }
-    utterance.onend = () => resolve();
-    utterance.onerror = (event) => reject(new Error(event.error || "语音朗读失败"));
+    utterance.onend = () => finish();
+    utterance.onerror = (event) => finish(signal.aborted ? abortError() : new Error(event.error || "语音朗读失败"));
+    if (signal.aborted) return abort();
+    signal.addEventListener("abort", abort, { once: true });
+    window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utterance);
   });
 }
 
-export function useTts(assistantId?: string, config?: AssistantTtsConfig | "inherit") {
-  const resolved = config === "inherit" ? undefined : config;
+export function useTts(assistantId?: string, config?: AssistantTtsConfig) {
   const [speaking, setSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const runRef = useRef(0);
+  const audioUrlRef = useRef<string | null>(null);
+  const controllerRef = useRef<AbortController | null>(null);
 
-  const stop = useCallback(() => {
-    runRef.current += 1;
-    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
-    audioRef.current?.pause();
+  const clearAudio = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
     audioRef.current = null;
-    setSpeaking(false);
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    audioUrlRef.current = null;
   }, []);
 
+  const stop = useCallback(() => {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
+    clearAudio();
+    setSpeaking(false);
+  }, [clearAudio]);
+
+  const playBlob = useCallback((blob: Blob, signal: AbortSignal): Promise<void> => {
+    clearAudio();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audioRef.current = audio;
+    audioUrlRef.current = url;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (reason?: unknown) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        audio.onended = null;
+        audio.onerror = null;
+        clearAudio();
+        if (reason) reject(reason); else resolve();
+      };
+      const abort = () => finish(abortError());
+      audio.onended = () => finish();
+      audio.onerror = () => finish(new Error("音频播放失败"));
+      if (signal.aborted) return abort();
+      signal.addEventListener("abort", abort, { once: true });
+      void audio.play().catch(finish);
+    });
+  }, [clearAudio]);
+
   const speak = useCallback(async (rawText: string, preview = false) => {
-    const text = cleanForSpeech(rawText, resolved?.readCode ?? false);
+    const text = cleanForSpeech(rawText, config?.readCode ?? false);
     if (!text) return;
     stop();
-    const run = runRef.current;
+    const controller = new AbortController();
+    controllerRef.current = controller;
     setSpeaking(true);
     setError(null);
     try {
       let output: TtsClientInstruction | Blob | null;
       try {
-        output = await speakText({
-          profileId: resolved?.profileId ?? "browser-default",
-          assistantId,
-          text,
-          rate: resolved?.rate,
-          pitch: resolved?.pitch,
-          readCode: resolved?.readCode,
-          preview,
-        });
-      } catch {
-        output = { kind: "browser-speech", text, rate: resolved?.rate, pitch: resolved?.pitch };
+        output = await speakText({ profileId: config?.profileId ?? "browser-default", assistantId, text, rate: config?.rate, pitch: config?.pitch, readCode: config?.readCode, preview }, controller.signal);
+      } catch (reason) {
+        if (controller.signal.aborted) throw abortError();
+        output = { kind: "browser-speech", text, rate: config?.rate, pitch: config?.pitch };
       }
-      if (runRef.current !== run) return;
-      if (output === null) {
-        return;
-      }
-      if (output instanceof Blob) {
-        const url = URL.createObjectURL(output);
-        const audio = new Audio(url);
-        audioRef.current = audio;
-        await new Promise<void>((resolvePromise, reject) => {
-          audio.onended = () => resolvePromise();
-          audio.onerror = () => reject(new Error("音频播放失败"));
-          void audio.play().catch(reject);
-        });
-        URL.revokeObjectURL(url);
-      } else {
-        await speakInBrowser(output);
-      }
+      if (controller.signal.aborted) throw abortError();
+      if (output instanceof Blob) await playBlob(output, controller.signal);
+      else if (output) await speakInBrowser(output, controller.signal);
     } catch (reason) {
-      if (runRef.current === run) setError(reason instanceof Error ? reason.message : String(reason));
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      if (runRef.current === run) setSpeaking(false);
+      if (controllerRef.current === controller) {
+        controllerRef.current = null;
+        setSpeaking(false);
+      }
     }
-  }, [assistantId, resolved?.pitch, resolved?.profileId, resolved?.rate, resolved?.readCode, stop]);
+  }, [assistantId, config?.pitch, config?.profileId, config?.rate, config?.readCode, playBlob, stop]);
 
   useEffect(() => stop, [stop]);
-
   return { speak, stop, speaking, error };
 }

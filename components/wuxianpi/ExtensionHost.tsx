@@ -23,8 +23,8 @@ interface Props {
   initialData?: JsonValue;
 }
 
-function resourceUrl(resourceBaseUrl: string, extensionId: string, entry: string, nonce: string): string {
-  if (/^https?:\/\//i.test(entry)) return "about:blank";
+function resourceUrl(resourceBaseUrl: string, extensionId: string, entry: string, nonce: string): string | null {
+  if (/^https?:\/\//i.test(entry) || !entry.trim()) return null;
   const safeEntry = entry.replace(/^\/+/, "").split("/").filter((part) => part && part !== "." && part !== "..").join("/");
   const params = new URLSearchParams({ extensionId, nonce });
   return `${resourceBaseUrl.replace(/\/$/, "")}/${safeEntry}?${params}`;
@@ -46,6 +46,8 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
   const [height, setHeight] = useState(initialHeight);
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [failureReason, setFailureReason] = useState("扩展界面无法加载，已切换到通用显示。");
+  const [retryKey, setRetryKey] = useState(0);
   const src = nonce ? resourceUrl(extension.resourceBaseUrl, extension.id, entry, nonce) : null;
 
   useEffect(() => {
@@ -53,15 +55,33 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
     setNonce(null);
     setReady(false);
     setFailed(false);
+    if (/^https?:\/\//i.test(entry) || !entry.trim()) {
+      setFailureReason("扩展入口必须是扩展包内的相对 HTML 路径。");
+      setFailed(true);
+      return;
+    }
     if (!assistantId) {
+      setFailureReason("该扩展界面需要一个已授权的助手上下文。");
       setFailed(true);
       return;
     }
     issueExtensionNonce(extension.id, assistantId)
-      .then((value) => { if (!cancelled) setNonce(value); })
-      .catch(() => { if (!cancelled) setFailed(true); });
+      .then(async (value) => {
+        const candidate = resourceUrl(extension.resourceBaseUrl, extension.id, entry, value);
+        if (!candidate) throw new Error("扩展入口无效");
+        const response = await fetch(candidate, { cache: "no-store" });
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!response.ok || !contentType.includes("text/html")) throw new Error(`扩展入口返回 ${response.status || "非 HTML"}`);
+        if (!cancelled) setNonce(value);
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setFailureReason(reason instanceof Error ? reason.message : String(reason));
+          setFailed(true);
+        }
+      });
     return () => { cancelled = true; };
-  }, [assistantId, extension.id]);
+  }, [assistantId, entry, extension.id, extension.resourceBaseUrl, retryKey]);
 
   const respond = useCallback((response: ExtensionBridgeResponse) => {
     iframeRef.current?.contentWindow?.postMessage(response, "*");
@@ -81,14 +101,6 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
       const request = event.data;
       if (!nonce || request.extensionId !== extension.id || request.nonce !== nonce) return;
 
-      const ok = (result?: JsonValue): ExtensionBridgeResponse => ({
-        type: "wuxianpi_bridge_response",
-        requestId: request.requestId,
-        extensionId: extension.id,
-        nonce,
-        ok: true,
-        ...(result !== undefined ? { result } : {}),
-      });
       const fail = (reason: unknown): ExtensionBridgeResponse => ({
         type: "wuxianpi_bridge_response",
         requestId: request.requestId,
@@ -98,25 +110,21 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
         error: { code: "BRIDGE_FAILED", message: reason instanceof Error ? reason.message : String(reason) },
       });
 
-      if (request.method === "ui.resize") {
-        const params = request.params && typeof request.params === "object" && !Array.isArray(request.params) ? request.params : {};
-        const requested = Number((params as Record<string, JsonValue>).height);
-        if (Number.isFinite(requested)) setHeight(Math.min(1200, Math.max(120, requested)));
-        respond(ok());
-        return;
-      }
-      if (request.method === "ui.close") {
-        onClose?.();
-        respond(ok());
-        return;
-      }
-      if (request.method === "ui.notify") {
-        const params = request.params && typeof request.params === "object" && !Array.isArray(request.params) ? request.params : {};
-        const message = String((params as Record<string, JsonValue>).message ?? "");
-        if (message) onNotify?.(message);
-      }
-
-      void bridgeExtension(extension.id, request).then(respond).catch((error) => respond(fail(error)));
+      void bridgeExtension(extension.id, request).then((response) => {
+        if (response.ok) {
+          const params = request.params && typeof request.params === "object" && !Array.isArray(request.params) ? request.params : {};
+          if (request.method === "ui.resize") {
+            const requested = Number((params as Record<string, JsonValue>).height);
+            if (Number.isFinite(requested)) setHeight(Math.min(1200, Math.max(120, requested)));
+          } else if (request.method === "ui.close") {
+            onClose?.();
+          } else if (request.method === "ui.notify") {
+            const message = String((params as Record<string, JsonValue>).message ?? "");
+            if (message) onNotify?.(message);
+          }
+        }
+        respond(response);
+      }).catch((error) => respond(fail(error)));
     };
     window.addEventListener("message", listener);
     return () => window.removeEventListener("message", listener);
@@ -126,9 +134,9 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
     return (
       <div className={["wuxianpi-extension-fallback", className].filter(Boolean).join(" ")}>
         <strong>{title ?? extension.manifest.name}</strong>
-        <span>扩展界面无法加载，已切换到通用显示。</span>
+        <span>{failureReason}</span>
         {fallback}
-        <button type="button" onClick={() => { setFailed(false); setReady(false); }}>重试</button>
+        <button type="button" onClick={() => { setFailed(false); setReady(false); setRetryKey((value) => value + 1); }}>重试</button>
       </div>
     );
   }
