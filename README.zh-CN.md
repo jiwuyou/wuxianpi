@@ -1,22 +1,18 @@
-# pi-web
+# Pi MyWeb
 
 [English](./README.md)
 
-[pi 编程智能体](https://github.com/badlogic/pi-mono) 的本地网页界面。它会读取本机的 pi 会话文件，在浏览器里提供会话管理、实时对话、模型配置、技能管理和项目文件预览。
+Pi MyWeb 是基于 [Pi](https://github.com/badlogic/pi-mono) 的移动优先个人助手工作台。项目当前以 `jiwuyou/pi-web` 为可运行基线，后续将围绕助手目录、角色定义、全局能力中心、TTS、MCP 和 HTML WebUI 扩展逐步重构。
+
+产品边界与演进方向见 [`docs/PRODUCT.md`](./docs/PRODUCT.md)。Pi 作为上游运行时保持不修改。
 
 ## 快速开始
 
-**无需安装，直接运行：**
+当前从源码运行：
 
 ```bash
-npx @agegr/pi-web@latest
-```
-
-**或全局安装后使用：**
-
-```bash
-npm install -g @agegr/pi-web
-pi-web
+npm install
+npm run dev
 ```
 
 启动后打开 [http://localhost:30141](http://localhost:30141)。命令行版本会在服务就绪后尝试自动打开浏览器。
@@ -24,11 +20,11 @@ pi-web
 **可选参数：**
 
 ```bash
-pi-web --port 8080              # 自定义端口
-pi-web --hostname 127.0.0.1     # 仅本机访问
-pi-web -p 8080 -H 127.0.0.1     # 组合使用
+pi-myweb --port 8080              # 自定义端口
+pi-myweb --hostname 127.0.0.1     # 仅本机访问
+pi-myweb -p 8080 -H 127.0.0.1     # 组合使用
 
-PORT=8080 pi-web                # 也支持环境变量
+PORT=8080 pi-myweb                # 也支持环境变量
 ```
 
 ## 功能介绍

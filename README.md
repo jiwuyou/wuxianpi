@@ -1,26 +1,22 @@
-# pi-web
+# Pi MyWeb
 
 [中文文档](./README.zh-CN.md)
 
-Local web UI for the [pi coding agent](https://github.com/badlogic/pi-mono). pi-web reads your local pi session files and gives you a browser workspace for session browsing, real-time chat, model configuration, skill management, and project file preview.
+Pi MyWeb is a mobile-first personal assistant workspace powered by [Pi](https://github.com/badlogic/pi-mono). The project currently keeps `jiwuyou/pi-web` as its runnable baseline and will evolve around assistant directories, role definitions, a global capability center, TTS, MCP, and optional HTML WebUI extensions.
+
+See [`docs/PRODUCT.md`](./docs/PRODUCT.md) for the product boundary and implementation direction. Pi remains an unmodified upstream runtime.
 
 ![Pi Web shows the same pi session with structured Markdown, tool calls, and project navigation beside the CLI](./docs/screenshot2.png)
 
-The same pi session in CLI and pi-web: structured tool calls, readable Markdown, session browsing, and cleaner results.
+The current baseline retains pi-web session compatibility while the mobile assistant experience is developed.
 
 ## Quick Start
 
-**Run without installing:**
+Run from source:
 
 ```bash
-npx @agegr/pi-web@latest
-```
-
-**Or install globally:**
-
-```bash
-npm install -g @agegr/pi-web
-pi-web
+npm install
+npm run dev
 ```
 
 Then open [http://localhost:30141](http://localhost:30141). The CLI will try to open the browser automatically after the server is ready.
@@ -28,11 +24,11 @@ Then open [http://localhost:30141](http://localhost:30141). The CLI will try to 
 **Options:**
 
 ```bash
-pi-web --port 8080              # custom port
-pi-web --hostname 127.0.0.1     # local access only
-pi-web -p 8080 -H 127.0.0.1     # combine options
+pi-myweb --port 8080              # custom port
+pi-myweb --hostname 127.0.0.1     # local access only
+pi-myweb -p 8080 -H 127.0.0.1     # combine options
 
-PORT=8080 pi-web                # environment variable is also supported
+PORT=8080 pi-myweb                # environment variable is also supported
 ```
 
 ## Features
@@ -45,7 +41,7 @@ PORT=8080 pi-web                # environment variable is also supported
 
 ## Notes
 
-- **Data directory**: pi-web reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
+- **Data directory**: Pi MyWeb reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
 - **Session files**: files are stored as `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
 - **Model config**: the Models panel reads and writes `models.json` in the pi agent directory. Model lists and defaults come from pi's config.
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.

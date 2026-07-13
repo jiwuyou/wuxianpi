@@ -1,10 +1,11 @@
 {
-  "name": "@agegr/pi-web",
-  "version": "0.7.0",
-  "description": "Web UI for the pi coding agent",
+  "name": "@jiwuyou/pi-myweb",
+  "version": "0.1.0",
+  "description": "Mobile-first personal assistant web UI powered by Pi",
   "license": "MIT",
   "bin": {
-    "pi-web": "bin/pi-web.js"
+    "pi-myweb": "bin/pi-myweb.js",
+    "pi-web": "bin/pi-myweb.js"
   },
   "files": [
     "bin",
