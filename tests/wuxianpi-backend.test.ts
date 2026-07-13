@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import test from "node:test";
@@ -10,13 +10,12 @@ const bundled = process.env.WUXIANPI_BACKEND_TEST_BUNDLE === "1";
 
 if (!bundled) {
   test("WuxianPi backend bundled test suite", async () => {
-    const { resolveWuxianPiRuntimeTempDir } = await import("../lib/wuxianpi/paths");
+    const { resolveWuxianPiRuntimeTempDir } = await import("../lib/wuxianpi/runtime-temp");
     const temporaryRoot = await resolveWuxianPiRuntimeTempDir();
-    const suiteDirectory = path.join(temporaryRoot, `wuxianpi-backend-tests-${process.pid}`);
-    await mkdir(suiteDirectory, { recursive: true, mode: 0o700 });
-    await symlink(path.join(process.cwd(), "node_modules"), path.join(suiteDirectory, "node_modules"), "dir");
+    const suiteDirectory = await mkdtemp(path.join(temporaryRoot, "wuxianpi-backend-tests-"));
     const output = path.join(suiteDirectory, "backend-tests.mjs");
     try {
+      await symlink(path.join(process.cwd(), "node_modules"), path.join(suiteDirectory, "node_modules"), "dir");
       execFileSync(path.join(process.cwd(), "node_modules/.bin/esbuild"), [
         path.join(process.cwd(), "tests/wuxianpi-backend.test.ts"), "--bundle", "--platform=node", "--format=esm", "--packages=external",
         `--outfile=${output}`,
