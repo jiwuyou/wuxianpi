@@ -6,6 +6,7 @@ import type { NewAgentSessionRequest } from "@/lib/wuxianpi/contracts";
 import { resolveAssistantRuntime } from "@/lib/wuxianpi/runtime-resolver";
 import { createMcpToolDefinitions } from "@/lib/wuxianpi/mcp-manager";
 import { readWuxianPiConfig } from "@/lib/wuxianpi/config-store";
+import { createUbuntuToolDefinitions } from "@/lib/wuxianpi/ubuntu-bridge";
 
 const DEFAULT_TOOL_NAMES = ["read", "bash", "edit", "write"];
 const FULL_TOOL_NAMES = ["bash", "read", "edit", "write", "grep", "find", "ls"];
@@ -48,8 +49,12 @@ export async function POST(req: Request) {
     const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = command;
     const selectedModel = resolved?.model ?? (provider && modelId ? { provider, modelId } : undefined);
     const selectedThinkingLevel = resolved?.thinkingLevel ?? thinkingLevel;
-    const startupToolNames = resolved?.toolNames ?? normalizeNewSessionToolNames(toolNames);
-    const customTools = resolved?.mcpServerIds.length ? await createMcpToolDefinitions(resolved.mcpServerIds) : [];
+    const selectedToolNames = resolved?.toolNames ?? normalizeNewSessionToolNames(toolNames);
+    const startupToolNames = selectedToolNames.filter((name) => name !== "ubuntu:worker");
+    const mcpRuntime = resolved?.mcpServerIds.length ? await createMcpToolDefinitions(resolved.mcpServerIds, assistantId) : { tools: [], diagnostics: [] };
+    const ubuntuRuntime = assistantId && selectedToolNames.includes("ubuntu:worker") ? await createUbuntuToolDefinitions(assistantId) : { tools: [], diagnostics: [] };
+    const customTools = [...mcpRuntime.tools, ...ubuntuRuntime.tools];
+    const runtimeDiagnostics = [...(resolved?.diagnostics ?? []), ...mcpRuntime.diagnostics, ...ubuntuRuntime.diagnostics];
     const runtimeConfig = await readWuxianPiConfig();
 
     const tempKey = `__new__${Date.now()}`;
@@ -61,6 +66,8 @@ export async function POST(req: Request) {
       maxLiveSessions: runtimeConfig.defaults.maxLiveSessions,
       strictToolSelection: Boolean(resolved),
       assistantContextFiles: resolved ? ["MEMORY.md", "WORKSPACES.md"] : [],
+      permissionAssistantId: assistantId,
+      runtimeDiagnostics,
     });
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
@@ -79,12 +86,12 @@ export async function POST(req: Request) {
     }
 
     if (promptCommand.type === "ensure_session") {
-      return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
+      return NextResponse.json({ success: true, sessionId: realSessionId, data: null, diagnostics: runtimeDiagnostics });
     }
 
     const result = await session.send(promptCommand);
 
-    return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+    return NextResponse.json({ success: true, sessionId: realSessionId, data: result, diagnostics: runtimeDiagnostics });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

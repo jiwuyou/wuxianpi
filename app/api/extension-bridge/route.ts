@@ -1,17 +1,12 @@
-import type { ExtensionBridgePermission, ExtensionBridgeRequest, ExtensionBridgeResponse, JsonValue, TtsSpeakRequest } from "@/lib/wuxianpi/contracts";
+import type { ExtensionBridgeRequest, ExtensionBridgeResponse, JsonValue, TtsSpeakRequest } from "@/lib/wuxianpi/contracts";
 import { apiFailure, apiSuccess } from "@/lib/wuxianpi/api";
 import { getAssistant } from "@/lib/wuxianpi/assistant-manager";
 import { callMcpTool } from "@/lib/wuxianpi/mcp-manager";
 import { speak } from "@/lib/wuxianpi/tts-manager";
-import { extensionStorageGet, extensionStorageSet, getWebExtensionSummary, validateBridgeNonce } from "@/lib/wuxianpi/web-extension-manager";
+import { assertWebExtensionBridgePermission, extensionStorageGet, extensionStorageSet, getWebExtensionSummary, validateBridgeNonce } from "@/lib/wuxianpi/web-extension-manager";
 import { callUbuntuTool } from "@/lib/wuxianpi/ubuntu-bridge";
 import { resolveAssistantRuntime } from "@/lib/wuxianpi/runtime-resolver";
-import { getPermissionDecision } from "@/lib/wuxianpi/permission-manager";
-
-const permissionForMethod: Record<ExtensionBridgeRequest["method"], ExtensionBridgePermission> = {
-  "assistant.get": "assistant.read", "storage.get": "storage.read", "storage.set": "storage.write", "tts.speak": "tts.speak", "tools.call": "tools.call",
-  "ui.notify": "ui.notify", "ui.resize": "ui.resize", "ui.close": "ui.close",
-};
+import { getPermissionDecision, requireExecutionPermission } from "@/lib/wuxianpi/permission-manager";
 
 function success(request: ExtensionBridgeRequest, result: JsonValue): ExtensionBridgeResponse {
   return { type: "wuxianpi_bridge_response", requestId: request.requestId, extensionId: request.extensionId, nonce: request.nonce, ok: true, result };
@@ -23,8 +18,17 @@ export async function POST(httpRequest: Request) {
     request = await httpRequest.json() as ExtensionBridgeRequest;
     const { assistantId } = validateBridgeNonce(request.nonce, request.extensionId);
     const extension = await getWebExtensionSummary(request.extensionId);
-    const required = permissionForMethod[request.method];
-    if (!extension.manifest.permissions?.includes(required)) throw new Error(`Extension did not declare ${required}`);
+    const required = assertWebExtensionBridgePermission(extension.manifest, request.method);
+    const extensionCapabilityId = `web-extension:${request.extensionId}`;
+    const extensionDecision = await getPermissionDecision(assistantId, extensionCapabilityId);
+    if (extensionDecision === "deny") throw new Error(`Permission denied for ${extensionCapabilityId}`);
+    if (["storage.write", "tts.speak", "tools.call"].includes(required)) {
+      await requireExecutionPermission(assistantId, extensionCapabilityId, {
+        title: `Use ${extension.manifest.name}`,
+        description: `Allow ${extension.manifest.name} to perform ${required}`,
+        risk: required === "storage.write" ? ["write"] : required === "tts.speak" ? ["audio", "network"] : ["execute", "external"],
+      });
+    }
     const params = (request.params && typeof request.params === "object" && !Array.isArray(request.params) ? request.params : {}) as Record<string, JsonValue>;
     let result: JsonValue = null;
     if (request.method === "assistant.get") result = JSON.parse(JSON.stringify(await getAssistant(assistantId))) as JsonValue;
@@ -41,7 +45,7 @@ export async function POST(httpRequest: Request) {
         const serverId = String(params.serverId ?? "");
         const runtime = await resolveAssistantRuntime(assistantId);
         if (!runtime.mcpServerIds.includes(serverId)) throw new Error(`MCP server ${serverId} is not enabled or approved for this assistant`);
-        result = await callMcpTool(serverId, toolName, params.arguments);
+        result = await callMcpTool(serverId, toolName, params.arguments, { assistantId });
       }
     } else result = params;
     return apiSuccess(success(request, result));

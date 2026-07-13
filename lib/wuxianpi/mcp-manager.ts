@@ -4,9 +4,10 @@ import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotoc
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { CapabilityDescriptor, JsonValue, McpServerConfig } from "./contracts";
+import type { CapabilityDescriptor, CapabilityDiagnostic, JsonValue, McpServerConfig } from "./contracts";
 import { readWuxianPiConfig } from "./config-store";
 import { resolveSecretMap } from "./secret-store";
+import { requireExecutionPermission } from "./permission-manager";
 
 interface ManagedMcpClient {
   client: Client;
@@ -17,12 +18,12 @@ interface ManagedMcpClient {
 
 declare global {
   var __wuxianpiMcpClients: Map<string, ManagedMcpClient> | undefined;
-  var __wuxianpiMcpCalls: Map<string, AbortController> | undefined;
+  var __wuxianpiMcpCalls: Map<string, { controller: AbortController; assistantId?: string; serverId: string }> | undefined;
   var __wuxianpiMcpClientLocks: Map<string, Promise<{ client: Client; config: McpServerConfig }>> | undefined;
 }
 
 const clients = () => globalThis.__wuxianpiMcpClients ??= new Map();
-const calls = () => globalThis.__wuxianpiMcpCalls ??= new Map();
+const calls = () => globalThis.__wuxianpiMcpCalls ??= new Map<string, { controller: AbortController; assistantId?: string; serverId: string }>();
 const clientLocks = () => globalThis.__wuxianpiMcpClientLocks ??= new Map();
 
 function normalizeJson(value: unknown): JsonValue {
@@ -82,6 +83,7 @@ async function connectClient(serverId: string): Promise<{ client: Client; config
   if (existing) await closeMcpClient(serverId);
   const client = new Client({ name: "wuxianpi", version: "1.0.0" }, { capabilities: {} });
   const transport = await createTransport(config);
+  if (transport instanceof StdioClientTransport) transport.stderr?.on("data", () => undefined);
   let connectTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
@@ -117,13 +119,13 @@ export async function closeMcpClient(serverId: string): Promise<void> {
 }
 
 export async function testMcpServer(serverId: string): Promise<void> {
-  const { client } = await getClient(serverId);
-  await client.ping();
+  const { client, config } = await getClient(serverId);
+  await client.ping({ signal: AbortSignal.timeout(config.timeoutMs ?? 30_000) });
 }
 
 export async function listMcpTools(serverId: string): Promise<CapabilityDescriptor[]> {
-  const { client } = await getClient(serverId);
-  const result = await client.listTools();
+  const { client, config } = await getClient(serverId);
+  const result = await client.listTools(undefined, { signal: AbortSignal.timeout(config.timeoutMs ?? 30_000) });
   return result.tools.map((tool) => ({
     id: `mcp:${serverId}:${tool.name}`,
     name: tool.name,
@@ -140,14 +142,22 @@ export async function callMcpTool(
   serverId: string,
   toolName: string,
   args: JsonValue | undefined,
-  options: { callId?: string; signal?: AbortSignal } = {},
+  options: { callId?: string; signal?: AbortSignal; assistantId?: string } = {},
 ): Promise<JsonValue> {
+  const callId = options.callId ?? `${serverId}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  if (calls().has(callId)) throw new Error(`MCP callId already exists: ${callId}`);
+  if (options.assistantId) {
+    await requireExecutionPermission(options.assistantId, `mcp:${serverId}`, {
+      title: "Use MCP server",
+      description: `Allow this assistant to call ${serverId}`,
+      risk: ["network", "external", "write"],
+    });
+  }
   const { client, config } = await getClient(serverId);
-  const callId = options.callId ?? `${serverId}:${Date.now()}`;
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
-  calls().set(callId, controller);
+  calls().set(callId, { controller, assistantId: options.assistantId, serverId });
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs ?? 60_000);
   try {
     const result = await client.callTool(
@@ -163,10 +173,10 @@ export async function callMcpTool(
   }
 }
 
-export function cancelMcpCall(callId: string): boolean {
-  const controller = calls().get(callId);
-  if (!controller) return false;
-  controller.abort();
+export function cancelMcpCall(callId: string, assistantId?: string): boolean {
+  const call = calls().get(callId);
+  if (!call || (call.assistantId && call.assistantId !== assistantId)) return false;
+  call.controller.abort();
   return true;
 }
 
@@ -175,11 +185,20 @@ function piToolName(serverId: string, toolName: string): string {
   return `mcp__${serverId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24)}__${toolName.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32)}__${hash}`;
 }
 
-export async function createMcpToolDefinitions(serverIds: string[]): Promise<ToolDefinition[]> {
+export interface McpToolDefinitionsResult { tools: ToolDefinition[]; diagnostics: CapabilityDiagnostic[] }
+
+export async function createMcpToolDefinitions(serverIds: string[], assistantId?: string): Promise<McpToolDefinitionsResult> {
   const definitions: ToolDefinition[] = [];
+  const diagnostics: CapabilityDiagnostic[] = [];
   for (const serverId of serverIds) {
-    const { client } = await getClient(serverId);
-    const result = await client.listTools();
+    let result: Awaited<ReturnType<Client["listTools"]>>;
+    try {
+      const { client, config } = await getClient(serverId);
+      result = await client.listTools(undefined, { signal: AbortSignal.timeout(config.timeoutMs ?? 30_000) });
+    } catch (error) {
+      diagnostics.push({ capabilityId: `mcp:${serverId}`, level: "error", code: "mcp.connection_failed", message: error instanceof Error ? error.message : String(error) });
+      continue;
+    }
     for (const tool of result.tools) {
       const schema = Type.Unsafe<Record<string, unknown>>(tool.inputSchema);
       definitions.push({
@@ -189,7 +208,7 @@ export async function createMcpToolDefinitions(serverIds: string[]): Promise<Too
         promptSnippet: `${tool.name}: ${tool.description ?? "MCP tool"}`,
         parameters: schema,
         execute: async (toolCallId, params, signal) => {
-          const resultValue = await callMcpTool(serverId, tool.name, normalizeJson(params), { callId: toolCallId, signal });
+          const resultValue = await callMcpTool(serverId, tool.name, normalizeJson(params), { callId: toolCallId, signal, assistantId });
           const raw = resultValue as { content?: unknown[]; isError?: boolean };
           const supportedContent = Array.isArray(raw.content) ? raw.content.filter((item): item is { type: "text"; text: string } | { type: "image"; data: string; mimeType: string } => {
             if (!item || typeof item !== "object") return false;
@@ -202,5 +221,5 @@ export async function createMcpToolDefinitions(serverIds: string[]): Promise<Too
       });
     }
   }
-  return definitions;
+  return { tools: definitions, diagnostics };
 }

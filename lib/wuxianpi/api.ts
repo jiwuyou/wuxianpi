@@ -12,6 +12,11 @@ export function apiSuccess<T>(data: T, init?: ResponseInit): NextResponse<ApiRes
 export function apiFailure(error: unknown): NextResponse<ApiFailure> {
   const apiError = error instanceof WuxianPiApiError ? error : undefined;
   const nodeError = error as NodeJS.ErrnoException;
-  const status = apiError?.status ?? (nodeError?.code === "ENOENT" ? 404 : nodeError?.code === "EEXIST" ? 409 : 500);
-  return NextResponse.json({ success: false, error: error instanceof Error ? error.message : String(error), code: apiError?.code, details: apiError?.details }, { status });
+  const shaped = error as { status?: number; code?: string; details?: JsonValue };
+  const message = error instanceof Error ? error.message : String(error);
+  const invalid = /\b(invalid|unsafe|required|must|exceed|unsupported|cannot|missing)\b/i.test(message);
+  const conflict = /\b(already exists|duplicate|conflict)\b/i.test(message);
+  const notFound = /\b(not found|unknown)\b/i.test(message);
+  const status = apiError?.status ?? shaped.status ?? (nodeError?.code === "ENOENT" || notFound ? 404 : nodeError?.code === "EEXIST" || conflict ? 409 : error instanceof SyntaxError || invalid ? 400 : 500);
+  return NextResponse.json({ success: false, error: message, code: apiError?.code ?? shaped.code, details: apiError?.details ?? shaped.details }, { status });
 }

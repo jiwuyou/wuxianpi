@@ -4,6 +4,10 @@ import path from "node:path";
 import readline from "node:readline";
 import type { CapabilityDescriptor, JsonValue, UbuntuStatusData } from "./contracts";
 import { readWuxianPiConfig } from "./config-store";
+import { getWuxianPiPaths } from "./paths";
+import { requireExecutionPermission } from "./permission-manager";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 interface RpcResponse { id: string; result?: JsonValue; error?: { code: number; message: string } }
 interface Pending { resolve: (value: JsonValue) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
@@ -17,17 +21,25 @@ class UbuntuBridge {
   private pending = new Map<string, Pending>();
   private stderr = "";
   private idleTimer?: ReturnType<typeof setTimeout>;
+  private startPromise?: Promise<void>;
 
   isRunning(): boolean { return Boolean(this.process && !this.process.killed && this.process.exitCode === null); }
 
   async start(): Promise<void> {
     if (this.isRunning()) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startProcess().finally(() => { this.startPromise = undefined; });
+    return this.startPromise;
+  }
+
+  private async startProcess(): Promise<void> {
     const config = (await readWuxianPiConfig()).ubuntu;
     if (!config?.enabled) throw new Error("Ubuntu worker is disabled");
     const workerPath = process.env.WUXIANPI_UBUNTU_WORKER ?? path.join(process.cwd(), "workers", "ubuntu-worker.mjs");
     const childEnv: NodeJS.ProcessEnv = {
       NODE_ENV: process.env.NODE_ENV ?? "production",
       ...Object.fromEntries(["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "PREFIX", "LD_PRELOAD"].flatMap((key) => process.env[key] ? [[key, process.env[key]!]] : [])),
+      WUXIANPI_ASSISTANTS_ROOT: getWuxianPiPaths().assistants,
     };
     const child = spawn("proot-distro", ["login", config.distro ?? "ubuntu", "--", config.nodePath ?? "node", workerPath], {
       stdio: ["pipe", "pipe", "pipe"] as const, env: { ...childEnv, WUXIANPI_UBUNTU_WORKER_CHILD: "1" },
@@ -43,7 +55,12 @@ class UbuntuBridge {
       for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
       this.pending.clear();
     });
-    await this.request("health", {}, 15_000);
+    try { await this.request("health", {}, 15_000); }
+    catch (error) {
+      child.kill("SIGTERM");
+      this.process = undefined;
+      throw error;
+    }
   }
 
   private onLine(line: string): void {
@@ -62,12 +79,24 @@ class UbuntuBridge {
     this.resetIdleTimer();
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Ubuntu RPC timed out: ${method}`)); }, timeoutMs);
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        if (method === "tools/call" && params && typeof params === "object" && !Array.isArray(params)) {
+          const call = params as Record<string, JsonValue>;
+          this.sendCancellation(String(call.assistantId ?? ""), String(call.callId ?? ""));
+        }
+        reject(new Error(`Ubuntu RPC timed out: ${method}`));
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.process!.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`, (error) => {
         if (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
       });
     });
+  }
+
+  private sendCancellation(assistantId: string, callId: string): void {
+    if (!this.process || !assistantId || !callId) return;
+    this.process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: randomUUID(), method: "cancel", params: { assistantId, callId } })}\n`);
   }
 
   async shutdown(): Promise<void> {
@@ -81,7 +110,11 @@ class UbuntuBridge {
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     void readWuxianPiConfig().then((config) => {
-      this.idleTimer = setTimeout(() => void this.shutdown(), config.ubuntu?.idleTimeoutMs ?? 5 * 60 * 1000);
+      const timeout = config.ubuntu?.idleTimeoutMs ?? 5 * 60 * 1000;
+      this.idleTimer = setTimeout(() => {
+        if (this.pending.size > 0) this.resetIdleTimer();
+        else void this.shutdown();
+      }, timeout);
     });
   }
 }
@@ -101,8 +134,34 @@ export async function getUbuntuStatus(includeTools = false): Promise<UbuntuStatu
 }
 
 export async function startUbuntuWorker(): Promise<void> { await bridge().start(); }
-export async function callUbuntuTool(toolName: string, args: JsonValue | undefined, callId?: string, assistantId?: string): Promise<JsonValue> {
-  return bridge().request("tools/call", { toolName, arguments: args ?? {}, callId: callId ?? randomUUID(), ...(assistantId ? { assistantId } : {}) });
+export async function callUbuntuTool(toolName: string, args: JsonValue | undefined, callId: string | undefined, assistantId: string): Promise<JsonValue> {
+  await requireExecutionPermission(assistantId, "ubuntu:worker", {
+    title: "Use Ubuntu worker",
+    description: `Allow this assistant to call ${toolName} in its Ubuntu workspace`,
+    risk: ["execute", "write"],
+  });
+  return bridge().request("tools/call", { toolName, arguments: args ?? {}, callId: callId ?? randomUUID(), assistantId });
 }
-export async function cancelUbuntuCall(callId: string): Promise<JsonValue> { return bridge().request("cancel", { callId }, 10_000); }
+export async function cancelUbuntuCall(callId: string, assistantId: string): Promise<JsonValue> { return bridge().request("cancel", { callId, assistantId }, 10_000); }
 export async function shutdownUbuntuWorker(): Promise<void> { await bridge().shutdown(); }
+
+export interface UbuntuToolDefinitionsResult { tools: ToolDefinition[]; diagnostics: UbuntuStatusData["diagnostics"] }
+
+export async function createUbuntuToolDefinitions(assistantId: string): Promise<UbuntuToolDefinitionsResult> {
+  const status = await getUbuntuStatus(true);
+  if (!status.tools?.length) return { tools: [], diagnostics: status.diagnostics };
+  const tools = status.tools.map<ToolDefinition>((tool) => ({
+    name: `ubuntu__${tool.name.replace(/^ubuntu\./, "").replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+    label: tool.name,
+    description: tool.description ?? tool.name,
+    promptSnippet: `${tool.name}: ${tool.description ?? "Ubuntu workspace tool"}`,
+    parameters: Type.Unsafe<Record<string, unknown>>((tool.metadata?.inputSchema ?? { type: "object" }) as Record<string, unknown>),
+    execute: async (toolCallId, params) => {
+      const result = await callUbuntuTool(tool.name, JSON.parse(JSON.stringify(params)) as JsonValue, toolCallId, assistantId);
+      const raw = result as { content?: unknown[]; isError?: boolean };
+      const content = Array.isArray(raw.content) ? raw.content.filter((item): item is { type: "text"; text: string } => Boolean(item && typeof item === "object" && (item as Record<string, unknown>).type === "text" && typeof (item as Record<string, unknown>).text === "string")) : [];
+      return { content: content.length ? content : [{ type: "text" as const, text: JSON.stringify(result) }], details: result, isError: Boolean(raw.isError) };
+    },
+  }));
+  return { tools, diagnostics: status.diagnostics };
+}

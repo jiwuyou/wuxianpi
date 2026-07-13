@@ -216,17 +216,25 @@ export async function renameAssistant(id: string, newId: string): Promise<Assist
   return getAssistant(newId);
 }
 
-async function collectRegularFiles(root: string, current: string, output: Record<string, Uint8Array>): Promise<void> {
+async function collectRegularFiles(
+  root: string,
+  current: string,
+  output: Record<string, Uint8Array>,
+  state: { count: number; totalBytes: number } = { count: 0, totalBytes: 0 },
+): Promise<void> {
   for (const entry of await readdir(current, { withFileTypes: true })) {
     const absolute = path.join(current, entry.name);
     if (!isPathInside(root, absolute) || entry.isSymbolicLink()) continue;
-    if (entry.isDirectory()) await collectRegularFiles(root, absolute, output);
+    if (entry.isDirectory()) await collectRegularFiles(root, absolute, output, state);
     else if (entry.isFile()) {
       const data = new Uint8Array(await readFile(absolute));
       if (data.byteLength > 10 * 1024 * 1024) throw new Error(`Assistant file exceeds 10 MiB: ${path.relative(root, absolute)}`);
+      state.count += 1;
+      state.totalBytes += data.byteLength;
+      if (state.count > 2_000) throw new Error("Assistant contains more than 2,000 files");
+      if (state.totalBytes > 50 * 1024 * 1024) throw new Error("Assistant export exceeds 50 MiB expanded size");
       output[path.relative(root, absolute).split(path.sep).join("/")] = data;
     }
-    if (Object.keys(output).length > 2_000) throw new Error("Assistant contains more than 2,000 files");
   }
 }
 

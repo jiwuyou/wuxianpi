@@ -2,16 +2,20 @@ import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { strFromU8, unzipSync } from "fflate";
-import type { CapabilityDiagnostic, JsonValue, WebExtensionManifestV1, WebExtensionSummary } from "./contracts";
+import type { CapabilityDiagnostic, ExtensionBridgePermission, ExtensionBridgeRequest, JsonValue, WebExtensionManifestV1, WebExtensionSummary } from "./contracts";
 import { WUXIANPI_SCHEMA_VERSION } from "./contracts";
 import { assertSafeId, getWuxianPiPaths, isPathInside, webExtensionPath } from "./paths";
 import { ensurePrivateDir, readJsonFile, removeIfExists, writeJsonAtomic } from "./storage";
 
 declare global {
   var __wuxianpiBridgeNonces: Map<string, { extensionId: string; assistantId: string; expiresAt: number }> | undefined;
+  var __wuxianpiExtensionStorageLocks: Map<string, Promise<void>> | undefined;
 }
 
 const nonces = () => globalThis.__wuxianpiBridgeNonces ??= new Map();
+const storageLocks = () => globalThis.__wuxianpiExtensionStorageLocks ??= new Map();
+const MAX_STORAGE_ITEM_BYTES = 256 * 1024;
+const MAX_STORAGE_TOTAL_BYTES = 1024 * 1024;
 
 function validateManifest(manifest: WebExtensionManifestV1): WebExtensionManifestV1 {
   if (manifest.schemaVersion !== WUXIANPI_SCHEMA_VERSION || manifest.apiVersion !== "1") throw new Error("Unsupported web extension schema or API version");
@@ -41,7 +45,8 @@ export async function listWebExtensionSummaries(): Promise<WebExtensionSummary[]
     const diagnostics: CapabilityDiagnostic[] = [];
     try {
       const manifest = await readManifest(directory);
-      output.push({ id: manifest.id, path: directory, manifest, enabled: true, resourceBaseUrl: `/api/web-extensions/${encodeURIComponent(manifest.id)}/assets/`, diagnostics });
+      if (manifest.id !== entry.name) throw new Error(`Extension manifest id ${manifest.id} does not match directory ${entry.name}`);
+      output.push({ id: entry.name, path: directory, manifest, enabled: true, resourceBaseUrl: `/api/web-extensions/${encodeURIComponent(entry.name)}/assets/`, diagnostics });
     } catch (error) {
       output.push({ id: entry.name, path: directory, manifest: { schemaVersion: 1, apiVersion: "1", id: entry.name, name: entry.name, version: "invalid" }, enabled: false, resourceBaseUrl: `/api/web-extensions/${encodeURIComponent(entry.name)}/assets/`, diagnostics: [{ level: "error", code: "extension.invalid", message: String(error) }] });
     }
@@ -60,6 +65,7 @@ export async function listWebExtensions(): Promise<WebExtensionManifestV1[]> {
 }
 
 export async function installWebExtensionZip(bytes: Uint8Array): Promise<WebExtensionSummary> {
+  await ensurePrivateDir(getWuxianPiPaths().webExtensions);
   if (bytes.byteLength > 25 * 1024 * 1024) throw new Error("Web extension bundle exceeds 25 MiB");
   let expandedBytes = 0;
   let fileCount = 0;
@@ -128,17 +134,48 @@ export function validateBridgeNonce(nonce: string, extensionId: string): { assis
 export async function extensionStorageGet(extensionId: string, assistantId: string, key: string): Promise<JsonValue | undefined> {
   assertSafeId(extensionId, "extension id"); assertSafeId(assistantId, "assistant id"); assertStorageKey(key);
   const file = path.join(getWuxianPiPaths().extensionStorage, extensionId, `${assistantId}.json`);
-  return (await readJsonFile<Record<string, JsonValue>>(file, {}))[key];
+  const value = (await readJsonFile<Record<string, JsonValue>>(file, {}))[key];
+  if (value !== undefined && Buffer.byteLength(JSON.stringify(value)) > MAX_STORAGE_ITEM_BYTES) throw new Error("Stored extension value exceeds item limit");
+  return value;
 }
 
 export async function extensionStorageSet(extensionId: string, assistantId: string, key: string, value: JsonValue): Promise<void> {
   assertSafeId(extensionId, "extension id"); assertSafeId(assistantId, "assistant id"); assertStorageKey(key);
   const file = path.join(getWuxianPiPaths().extensionStorage, extensionId, `${assistantId}.json`);
-  const data = await readJsonFile<Record<string, JsonValue>>(file, {});
-  data[key] = value;
-  await writeJsonAtomic(file, data);
+  const serializedValue = JSON.stringify(value);
+  if (Buffer.byteLength(serializedValue) > MAX_STORAGE_ITEM_BYTES) throw new Error("Extension storage item exceeds 256 KiB");
+  await withStorageLock(file, async () => {
+    const data = await readJsonFile<Record<string, JsonValue>>(file, {});
+    data[key] = value;
+    if (Buffer.byteLength(JSON.stringify(data)) > MAX_STORAGE_TOTAL_BYTES) throw new Error("Extension storage exceeds 1 MiB per assistant");
+    await writeJsonAtomic(file, data);
+  });
 }
 
 function assertStorageKey(key: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(key)) throw new Error("Invalid extension storage key");
+}
+
+const bridgePermissionByMethod: Record<ExtensionBridgeRequest["method"], ExtensionBridgePermission> = {
+  "assistant.get": "assistant.read", "storage.get": "storage.read", "storage.set": "storage.write", "tts.speak": "tts.speak", "tools.call": "tools.call",
+  "ui.notify": "ui.notify", "ui.resize": "ui.resize", "ui.close": "ui.close",
+};
+
+export function assertWebExtensionBridgePermission(manifest: WebExtensionManifestV1, method: ExtensionBridgeRequest["method"]): ExtensionBridgePermission {
+  const required = bridgePermissionByMethod[method];
+  if (!manifest.permissions?.includes(required)) throw new Error(`Extension did not declare ${required}`);
+  return required;
+}
+
+async function withStorageLock(file: string, operation: () => Promise<void>): Promise<void> {
+  const previous = storageLocks().get(file) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  storageLocks().set(file, current);
+  await previous;
+  try { await operation(); }
+  finally {
+    release();
+    if (storageLocks().get(file) === current) storageLocks().delete(file);
+  }
 }

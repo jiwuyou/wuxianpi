@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { JsonValue } from "./contracts";
+import type { GlobalWuxianPiConfigV1, JsonValue, McpServerConfig, TtsProfile } from "./contracts";
 import { getWuxianPiPaths } from "./paths";
 import { readJsonFile, writeJsonAtomic } from "./storage";
 
@@ -71,4 +71,40 @@ export function redactSecrets<T extends JsonValue | Record<string, unknown>>(val
 
 export function createBridgeNonce(): string {
   return randomBytes(24).toString("base64url");
+}
+
+const maskValues = (values: Record<string, string> | undefined): Record<string, string> | undefined => values
+  ? Object.fromEntries(Object.keys(values).map((key) => [key, "***"]))
+  : undefined;
+
+/** Public API projection: never returns inline env/header values. Secret refs remain visible. */
+export function maskWuxianPiConfig(config: GlobalWuxianPiConfigV1): GlobalWuxianPiConfigV1 {
+  return {
+    ...config,
+    mcpServers: config.mcpServers.map((server) => ({ ...server, env: maskValues(server.env), headers: maskValues(server.headers) })),
+    ttsProfiles: config.ttsProfiles.map((profile) => ({ ...profile, headers: maskValues(profile.headers) })),
+  };
+}
+
+function restoreMaskedRecord(next: Record<string, string> | undefined, previous: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (!next) return next;
+  return Object.fromEntries(Object.entries(next).map(([key, value]) => {
+    if (value !== "***") return [key, value];
+    if (previous?.[key] === undefined) throw new Error(`Masked value for ${key} has no existing secret to preserve`);
+    return [key, previous[key]];
+  }));
+}
+
+export function restoreMaskedMcpServers(next: McpServerConfig[], previous: McpServerConfig[]): McpServerConfig[] {
+  return next.map((server) => {
+    const old = previous.find((item) => item.id === server.id);
+    return { ...server, env: restoreMaskedRecord(server.env, old?.env), headers: restoreMaskedRecord(server.headers, old?.headers) };
+  });
+}
+
+export function restoreMaskedTtsProfiles(next: TtsProfile[], previous: TtsProfile[]): TtsProfile[] {
+  return next.map((profile) => {
+    const old = previous.find((item) => item.id === profile.id);
+    return { ...profile, headers: restoreMaskedRecord(profile.headers, old?.headers) };
+  });
 }

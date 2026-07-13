@@ -8,6 +8,7 @@ const TOOL_RISKS: Record<string, Array<"read" | "write" | "execute" | "network">
   read: ["read"], grep: ["read"], find: ["read"], ls: ["read"],
   write: ["write"], edit: ["write"], bash: ["execute", "write", "network"],
 };
+const BUILTIN_TOOL_NAMES = new Set(Object.keys(TOOL_RISKS));
 
 function runtimeToolName(configuredName: string): string {
   return configuredName.replace(/^pi-extension:/, "").replace(/^pi:/, "").replace(/^builtin:/, "");
@@ -33,7 +34,7 @@ export async function resolveAssistantRuntime(
 
   for (const tool of selectedTools) {
     const normalizedTool = runtimeToolName(tool);
-    const capabilityId = tool.includes(":") ? tool : `pi:${tool}`;
+    const capabilityId = tool.includes(":") ? tool : `${BUILTIN_TOOL_NAMES.has(normalizedTool) ? "pi" : "pi-extension"}:${normalizedTool}`;
     const decision = await getPermissionDecision(assistantId, capabilityId);
     if (decision === "deny") {
       diagnostics.push({ capabilityId, level: "warning", code: "permission.denied", message: `${tool} is denied for this assistant` });
