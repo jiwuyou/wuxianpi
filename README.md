@@ -104,5 +104,5 @@ hooks/
   useDragDrop.ts      # image drag/drop
   useTheme.ts         # theme switching
 bin/
-  pi-web.js           # npm CLI entrypoint
+  wuxianpi.js         # npm CLI entrypoint
 ```

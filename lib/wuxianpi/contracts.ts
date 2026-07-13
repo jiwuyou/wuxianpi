@@ -5,6 +5,15 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 
 export type CapabilityRisk = "read" | "write" | "execute" | "network" | "external" | "audio";
 export type PermissionDecision = "once" | "assistant" | "deny";
+export type ExtensionBridgePermission =
+  | "assistant.read"
+  | "storage.read"
+  | "storage.write"
+  | "tts.speak"
+  | "tools.call"
+  | "ui.notify"
+  | "ui.resize"
+  | "ui.close";
 export type CapabilitySource = "pi-builtin" | "pi-extension" | "skill" | "mcp" | "tts" | "web-extension" | "ubuntu";
 export type CapabilityStatus = "available" | "unavailable" | "error";
 export type RuntimeLocation = "termux" | "ubuntu";
@@ -107,7 +116,7 @@ export interface WebExtensionManifestV1 {
   apiVersion: "1";
   description?: string;
   entry?: string;
-  permissions?: CapabilityRisk[];
+  permissions?: ExtensionBridgePermission[];
   contributes?: WebExtensionContribution;
 }
 
@@ -235,14 +244,14 @@ export interface NewAgentSessionRequest {
   assistantId?: string;
   cwd?: string;
   overrides?: SessionRuntimeOverrides;
-  type: string;
+  type: "ensure_session" | "prompt";
   message?: string;
   images?: unknown[];
+  streamingBehavior?: "steer" | "followUp";
   provider?: string;
   modelId?: string;
   thinkingLevel?: string;
   toolNames?: string[];
-  [key: string]: unknown;
 }
 
 export interface ApiSuccess<T> {
@@ -263,11 +272,13 @@ export const WUXIANPI_API_ROUTES = {
   assistants: "/api/assistants",
   assistant: (id: string) => `/api/assistants/${encodeURIComponent(id)}`,
   assistantResolved: (id: string) => `/api/assistants/${encodeURIComponent(id)}/resolved`,
+  assistantCopy: (id: string) => `/api/assistants/${encodeURIComponent(id)}/copy`,
   assistantExport: (id: string) => `/api/assistants/${encodeURIComponent(id)}/export`,
   assistantImport: "/api/assistants/import",
   capabilities: "/api/capabilities",
   capabilityConfig: "/api/capabilities/config",
   secrets: "/api/secrets",
+  permissions: "/api/permissions",
   mcp: "/api/mcp",
   tts: "/api/tts",
   webExtensions: "/api/web-extensions",
@@ -290,7 +301,6 @@ export interface AssistantMutationData {
 }
 
 export interface AssistantCopyRequest {
-  sourceId: string;
   targetId: string;
   name?: string;
 }
@@ -357,11 +367,26 @@ export interface PermissionResponseRequest {
   decision: PermissionDecision;
 }
 
+export interface PermissionRevokeRequest {
+  assistantId: string;
+  capabilityId: string;
+}
+
+export type PermissionMutationRequest =
+  | { action: "decide"; request: PermissionResponseRequest }
+  | { action: "revoke"; request: PermissionRevokeRequest };
+
+export interface PermissionStateData {
+  pending: PermissionRequest[];
+  grants: PermissionGrant[];
+}
+
 export interface WebExtensionSummary {
   id: string;
   path: string;
   manifest: WebExtensionManifestV1;
   enabled: boolean;
+  resourceBaseUrl: string;
   diagnostics: CapabilityDiagnostic[];
 }
 
@@ -383,4 +408,24 @@ export interface UbuntuStatusData {
   distro?: string;
   tools?: CapabilityDescriptor[];
   diagnostics: CapabilityDiagnostic[];
+}
+
+export interface UbuntuRpcRequest {
+  jsonrpc: "2.0";
+  id: string;
+  method: "health" | "tools/list" | "tools/call" | "cancel" | "shutdown";
+  params?: {
+    assistantId?: string;
+    toolName?: string;
+    arguments?: JsonValue;
+    callId?: string;
+    relativePath?: string;
+  };
+}
+
+export interface UbuntuRpcResponse {
+  jsonrpc: "2.0";
+  id: string;
+  result?: JsonValue;
+  error?: { code: number; message: string; data?: JsonValue };
 }

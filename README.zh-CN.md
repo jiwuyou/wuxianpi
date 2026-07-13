@@ -100,5 +100,5 @@ hooks/
   useDragDrop.ts      # 图片拖拽
   useTheme.ts         # 主题切换
 bin/
-  pi-web.js           # npm CLI 入口
+  wuxianpi.js         # npm CLI 入口
 ```
