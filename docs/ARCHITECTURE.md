@@ -95,4 +95,3 @@ the assistant directory remains active in chat-only sessions.
 - Minimap and file browsing are absent from the initial mobile render.
 - Heavy Markdown renderers and document viewers are loaded on demand.
 - Only a small bounded set of non-streaming AgentSession instances stays live.
-

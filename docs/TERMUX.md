@@ -31,4 +31,3 @@ paths. WuxianPi resolves those paths against fixed assistant roots and applies
 the same permission checks used by native tools.
 
 Ubuntu unavailability is a capability diagnostic, not a chat startup failure.
-
