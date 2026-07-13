@@ -13,6 +13,8 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { PermissionDecision, PermissionRequest } from "@/lib/wuxianpi/contracts";
+import { getPermissionState, mutatePermission } from "@/components/wuxianpi/api";
 
 export interface SessionData {
   sessionId: string;
@@ -127,6 +129,7 @@ export type BuiltinSlashCommandResult =
   | { handled: true; message?: string; error?: string; action?: "openSessionStats" };
 
 export interface UseAgentSessionOptions {
+  assistantId?: string;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   onAgentEnd?: () => void;
@@ -244,7 +247,7 @@ type SlashCommandsResponse = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+    assistantId, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
@@ -283,6 +286,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
+  const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
@@ -299,11 +303,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   const promptRunIdRef = useRef(0);
+  const pendingStreamMessageRef = useRef<Partial<AgentMessage> | null>(null);
+  const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
   const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
+
+  const flushStreamingMessage = useCallback(() => {
+    if (streamFlushTimerRef.current) clearTimeout(streamFlushTimerRef.current);
+    streamFlushTimerRef.current = null;
+    const message = pendingStreamMessageRef.current;
+    pendingStreamMessageRef.current = null;
+    if (message) dispatch({ type: "update", message });
+  }, []);
+
+  const queueStreamingMessage = useCallback((message: Partial<AgentMessage>) => {
+    pendingStreamMessageRef.current = message;
+    if (streamFlushTimerRef.current) return;
+    streamFlushTimerRef.current = setTimeout(flushStreamingMessage, 72);
+  }, [flushStreamingMessage]);
 
   const sessionStats = (() => {
     if (sessionStatsOverride) return sessionStatsOverride;
@@ -440,11 +460,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...(assistantId ? { assistantId } : {}),
           cwd: newSessionCwd,
           type: "ensure_session",
-          toolNames,
-          ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+          ...(!assistantId ? { toolNames } : {}),
+          ...(selectedModel && !assistantId ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
+          ...(thinkingLevel !== "auto" && !assistantId ? { thinkingLevel } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -460,7 +481,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+
+  const respondToPermission = useCallback(async (decision: PermissionDecision) => {
+    const request = permissionRequest;
+    if (!request) return;
+    setPermissionRequest(null);
+    try {
+      const state = await mutatePermission({ action: "decide", request: { requestId: request.id, decision } });
+      const next = state.pending.find((item) => item.assistantId === (assistantId ?? request.assistantId));
+      setPermissionRequest(next ?? null);
+    } catch (reason) {
+      dispatchNotice({
+        type: "add",
+        notice: { id: createNoticeId(), type: "error", message: reason instanceof Error ? reason.message : String(reason) },
+      });
+    }
+  }, [assistantId, permissionRequest]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
@@ -681,12 +718,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           break;
         }
         if (msg) {
-          dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
+          queueStreamingMessage(normalizeToolCalls(msg as AgentMessage));
         }
         setAgentPhase(null);
         break;
       }
       case "message_end": {
+        flushStreamingMessage();
         const completed = event.message as AgentMessage | undefined;
         if (completed && completed.role !== "user") {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
@@ -741,8 +779,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "extension_ui_request":
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
+      case "permission_request": {
+        const request = (event.request ?? event) as PermissionRequest;
+        if (request.id && request.capabilityId) setPermissionRequest(request);
+        break;
+      }
     }
-  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd]);
+  }, [addNotice, finishPromptWithoutStream, flushStreamingMessage, handleExtensionUiRequest, loadSession, onAgentEnd, queueStreamingMessage]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -798,11 +841,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              ...(assistantId ? { assistantId } : {}),
               cwd: newSessionCwd,
               type: "ensure_session",
-              toolNames,
-              ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-              ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+              ...(!assistantId ? { toolNames } : {}),
+              ...(selectedModel && !assistantId ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
+              ...(thinkingLevel !== "auto" && !assistantId ? { thinkingLevel } : {}),
             }),
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -837,7 +881,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, promoteNewSession, waitForPromptSettlement]);
+  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, promoteNewSession, waitForPromptSettlement]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1151,9 +1195,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      if (streamFlushTimerRef.current) clearTimeout(streamFlushTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!assistantId) return;
+    let cancelled = false;
+    getPermissionState().then((state) => {
+      if (!cancelled) setPermissionRequest(state.pending.find((item) => item.assistantId === assistantId) ?? null);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [assistantId]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -1270,6 +1324,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading,
     notices: noticeState.visible, extensionDialog, extensionStatuses, extensionWidgets, respondToExtensionUi,
+    permissionRequest, respondToPermission,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     isNew,

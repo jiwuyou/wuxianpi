@@ -1,17 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import type { AgentMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { AssistantSummary, PermissionDecision, PermissionRequest, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
-import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
+import { useTts } from "@/hooks/useTts";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { STARTER_PROMPTS } from "@/lib/starter-prompts";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 
 interface Props {
+  assistantId?: string;
+  assistant?: AssistantSummary;
+  webExtensions?: WebExtensionSummary[];
   session: SessionInfo | null;
   newSessionCwd: string | null;
   onAgentEnd?: () => void;
@@ -54,9 +59,7 @@ const TYPEWRITER_PHRASES = [
   "把功能做到可验证。",
 ];
 
-const CHAT_MINIMAP_WIDTH = 36;
 const CHAT_COLUMN_PADDING = 16;
-const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
 
 function Typewriter({ phrases }: { phrases: string[] }) {
   const [phraseIdx, setPhraseIdx] = useState(() => Math.floor(Math.random() * phrases.length));
@@ -92,7 +95,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenModelsConfig, onContextUsageChange, initialPrompt, initialPromptKey, onInitialPromptQueued }: Props) {
+export function ChatWindow({ assistantId, assistant, webExtensions = [], session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenModelsConfig, onContextUsageChange, initialPrompt, initialPromptKey, onInitialPromptQueued }: Props) {
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
@@ -100,6 +103,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading,
     notices, extensionDialog, extensionStatuses, extensionWidgets, respondToExtensionUi,
+    permissionRequest, respondToPermission,
     isAutoModelSelection,
     agentPhase,
     isNew,
@@ -110,11 +114,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     handleBuiltinSlashCommand,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, handleAgentEventRef,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+    assistantId, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
 
   const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
+  const ttsConfig = assistant?.manifest.tts;
+  const { speak, stop: stopSpeaking, speaking, error: ttsError } = useTts(assistantId, ttsConfig);
   const playDoneSoundRef = useRef(playDoneSound);
   playDoneSoundRef.current = playDoneSound;
   const soundEnabledRef = useRef(soundEnabled);
@@ -175,18 +181,51 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
-  const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
-  const messageRefs = useMessageRefs(visibleMessages.length);
+  const rows = useMemo(() => messages.map((message, index) => ({ message, index })).filter(({ message }) => message.role !== "toolResult"), [messages]);
+  const toolResultsMap = useMemo(() => {
+    const map = new Map<string, import("@/lib/types").ToolResultMessage>();
+    for (const message of messages) if (message.role === "toolResult") map.set(message.toolCallId, message);
+    return map;
+  }, [messages]);
+  const lastUserIndex = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) if (messages[index].role === "user") return index;
+    return -1;
+  }, [messages]);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: (index) => rows[index]?.message.role === "user" ? 96 : 180,
+    overscan: 6,
+  });
   const defaultFullToolsAppliedRef = useRef(false);
   const initialPromptSentKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!isNew || defaultFullToolsAppliedRef.current) return;
+    if (!isNew || assistantId || defaultFullToolsAppliedRef.current) return;
     defaultFullToolsAppliedRef.current = true;
     if (toolPreset !== "full") void handleToolPresetChange("full");
-  }, [isNew, toolPreset, handleToolPresetChange]);
+  }, [assistantId, isNew, toolPreset, handleToolPresetChange]);
+
+  const latestAssistantText = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role !== "assistant") continue;
+      return message.content.filter((block): block is import("@/lib/types").TextContent => block.type === "text").map((block) => block.text).join("\n");
+    }
+    return "";
+  }, [messages]);
+  const autoSpokenRef = useRef("");
+  useEffect(() => {
+    const autoSpeak = ttsConfig !== "inherit" && ttsConfig?.autoSpeak;
+    if (!autoSpeak || agentRunning || streamState.isStreaming || !latestAssistantText || autoSpokenRef.current === latestAssistantText) return;
+    autoSpokenRef.current = latestAssistantText;
+    void speak(latestAssistantText);
+  }, [agentRunning, latestAssistantText, speak, streamState.isStreaming, ttsConfig]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
+  const quickPrompts = assistant?.manifest.starterPrompts?.length
+    ? assistant.manifest.starterPrompts.map((prompt) => ({ title: prompt, prompt, description: "开始这个话题" }))
+    : STARTER_PROMPTS;
   const handleQuickStartPrompt = useCallback((prompt: string) => {
     chatInputRef?.current?.insertIfEmpty(prompt);
   }, [chatInputRef]);
@@ -321,6 +360,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         />
       )}
 
+      {permissionRequest && (
+        <PermissionDialog request={permissionRequest} onRespond={respondToPermission} />
+      )}
+
       {isEmptyNew ? (
         <div className="flex flex-1 flex-col overflow-hidden">
           <div
@@ -342,9 +385,9 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               >
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
                   <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0, flex: 1 }}>
-                    <span style={{ fontSize: 30, lineHeight: 1.2, fontWeight: 750, letterSpacing: 0, color: "var(--text)", flexShrink: 0 }}>π</span>
+                    <span style={{ fontSize: 30, lineHeight: 1.2, fontWeight: 750, letterSpacing: 0, color: "var(--text)", flexShrink: 0 }}>∞π</span>
                     <h1 style={{ margin: 0, fontSize: 28, lineHeight: 1.25, color: "var(--text)", fontWeight: 720, letterSpacing: 0, overflow: "visible" }}>
-                      今天想让 Pi 做什么？
+                      {assistant?.manifest.greeting || `今天想和${assistant?.manifest.name ?? "助手"}聊什么？`}
                     </h1>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0, fontFamily: "var(--font-mono)" }}>
@@ -357,7 +400,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                   </div>
                 </div>
                 <div style={{ fontSize: 14, color: "var(--text-muted)", lineHeight: 1.6, minHeight: 24 }}>
-                  <Typewriter phrases={TYPEWRITER_PHRASES} />
+                  <Typewriter phrases={assistant?.manifest.description ? [assistant.manifest.description] : TYPEWRITER_PHRASES} />
                 </div>
               </div>
             </div>
@@ -374,7 +417,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 padding: "0 52px 10px 16px",
               }}
             >
-              {STARTER_PROMPTS.map((action) => (
+              {quickPrompts.map((action) => (
                 <button
                   key={action.title}
                   type="button"
@@ -436,7 +479,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             position: "absolute",
             top: 12,
             left: 0,
-            right: CHAT_MINIMAP_WIDTH,
+            right: 0,
             zIndex: 40,
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
             pointerEvents: "none",
@@ -452,68 +495,52 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
-            {(() => {
-              const toolResultsMap = new Map<string, import("@/lib/types").ToolResultMessage>();
-              for (const msg of messages) {
-                if (msg.role === "toolResult") {
-                  toolResultsMap.set((msg as import("@/lib/types").ToolResultMessage).toolCallId, msg as import("@/lib/types").ToolResultMessage);
-                }
-              }
-              let lastUserIdx = -1;
-              for (let i = messages.length - 1; i >= 0; i--) {
-                if (messages[i].role === "user") { lastUserIdx = i; break; }
-              }
-              let refIdx = 0;
-              return messages.map((msg, idx) => {
-                const prevAssistantEntryId =
-                  msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
-                    ? entryIds[idx - 1]
-                    : undefined;
-                const isVisible = msg.role === "user" || msg.role === "assistant";
-                const currentRefIdx = isVisible ? refIdx++ : -1;
-                let showTimestamp = false;
-                if (msg.role === "assistant") {
-                  showTimestamp = true;
-                  for (let j = idx + 1; j < messages.length; j++) {
-                    const r = messages[j].role;
-                    if (r === "user") break;
-                    if (r === "assistant") { showTimestamp = false; break; }
-                  }
-                  // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp)
-                  if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
-                    showTimestamp = false;
+            <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+              {virtualizer.getVirtualItems().map((virtualRow) => {
+                const row = rows[virtualRow.index];
+                const message = row.message;
+                const index = row.index;
+                const prevAssistantEntryId = message.role === "user" && index > 0 && messages[index - 1].role === "assistant" ? entryIds[index - 1] : undefined;
+                let showTimestamp = message.role === "assistant";
+                if (showTimestamp) {
+                  for (let next = index + 1; next < messages.length; next += 1) {
+                    if (messages[next].role === "user") break;
+                    if (messages[next].role === "assistant") { showTimestamp = false; break; }
                   }
                 }
-                const view = (
-                  <MessageView
-                    key={idx}
-                    message={msg}
-                    toolResults={toolResultsMap}
-                    modelNames={modelNames}
-                    entryId={entryIds[idx]}
-                    onFork={agentRunning || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
-                    forking={forkingEntryId === entryIds[idx]}
-                    onNavigate={agentRunning ? undefined : handleNavigate}
-                    prevAssistantEntryId={agentRunning ? undefined : prevAssistantEntryId}
-                    onEditContent={(content) => chatInputRef?.current?.insertIfEmpty(content)}
-                    showTimestamp={showTimestamp}
-                    prevTimestamp={idx > 0 ? (messages[idx - 1] as import("@/lib/types").AgentMessage & { timestamp?: number }).timestamp : undefined}
-                  />
-                );
-                if (!isVisible) return view;
                 return (
-                  <div key={idx} ref={(el) => {
-                    messageRefs.current[currentRefIdx] = el;
-                    if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
-                  }}>
-                    {view}
+                  <div
+                    key={`${entryIds[index] ?? index}`}
+                    data-index={virtualRow.index}
+                    ref={(element) => {
+                      virtualizer.measureElement(element);
+                      if (index === lastUserIndex) (lastUserMsgRef as { current: HTMLDivElement | null }).current = element;
+                    }}
+                    style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start}px)` }}
+                  >
+                    <MessageView
+                      message={message}
+                      toolResults={toolResultsMap}
+                      modelNames={modelNames}
+                      entryId={entryIds[index]}
+                      onFork={agentRunning || isNew || (index === 0 && message.role === "user") ? undefined : handleFork}
+                      forking={forkingEntryId === entryIds[index]}
+                      onNavigate={agentRunning ? undefined : handleNavigate}
+                      prevAssistantEntryId={agentRunning ? undefined : prevAssistantEntryId}
+                      onEditContent={(content) => chatInputRef?.current?.insertIfEmpty(content)}
+                      showTimestamp={showTimestamp && !(streamState.isStreaming && index === messages.length - 1)}
+                      prevTimestamp={index > 0 ? messages[index - 1].timestamp : undefined}
+                      assistantId={assistantId}
+                      sessionId={session?.id}
+                      webExtensions={webExtensions}
+                    />
                   </div>
                 );
-              });
-            })()}
+              })}
+            </div>
 
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} assistantId={assistantId} sessionId={session?.id} webExtensions={webExtensions} />
             )}
 
             {agentRunning && !streamState.streamingMessage && (
@@ -530,23 +557,24 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             </div>
           </div>
         </div>
-        <ChatMinimap
-          messages={messages}
-          streamingMessage={streamState.streamingMessage}
-          scrollContainer={scrollContainerRef}
-          messageRefs={messageRefs}
-        />
       </div>
 
       <div className="relative">
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
-            paddingRight: CHAT_INPUT_RIGHT_PADDING,
           }}
         >
           <div style={{ maxWidth: 820, margin: "0 auto" }}>
             <ExtensionWidgets widgets={belowEditorWidgets} />
+            {(latestAssistantText || speaking || ttsError) && (
+              <div className="chat-tts-bar">
+                <button type="button" onClick={() => speaking ? stopSpeaking() : void speak(latestAssistantText)} disabled={!latestAssistantText && !speaking}>
+                  {speaking ? "■ 停止朗读" : "🔊 朗读最后回复"}
+                </button>
+                {ttsError && <span>{ttsError}</span>}
+              </div>
+            )}
           </div>
         </div>
         {chatInputElement}
@@ -676,6 +704,20 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function PermissionDialog({ request, onRespond }: { request: PermissionRequest; onRespond: (decision: PermissionDecision) => void }) {
+  return (
+    <div className="wuxianpi-modal-backdrop permission-backdrop">
+      <section className="permission-dialog" role="alertdialog" aria-modal="true" aria-label={request.title}>
+        <span className="permission-icon">!</span>
+        <div><span className="eyebrow">CAPABILITY REQUEST</span><h2>{request.title}</h2><p>{request.description}</p></div>
+        <div className="risk-chips">{request.risk.map((risk) => <span key={risk}>{risk}</span>)}</div>
+        <dl><div><dt>助手</dt><dd>{request.assistantId}</dd></div><div><dt>能力</dt><dd>{request.capabilityId}</dd></div></dl>
+        <footer><button className="danger-button" onClick={() => onRespond("deny")}>拒绝</button><button className="secondary-button" onClick={() => onRespond("once")}>仅本次允许</button><button className="primary-button" onClick={() => onRespond("assistant")}>始终允许此助手</button></footer>
+      </section>
     </div>
   );
 }

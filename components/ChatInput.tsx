@@ -631,11 +631,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   return (
     <div
+      className="wuxianpi-chat-input"
       style={{
         flexShrink: 0,
         background: "transparent",
         padding: "0 16px 8px",
-        paddingRight: 52, // 16px base + 36px for ChatMinimap alignment
+        paddingRight: 16,
       }}
     >
       {/* Hidden file input */}
@@ -911,6 +912,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </div>
           )}
           <div
+            className="wuxianpi-composer"
             style={{
               display: "flex",
               gap: 8,
@@ -943,7 +945,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               isStreaming && (onSteer || onFollowUp)
                 ? "输入后发送到待处理…"
                 : isStreaming ? "Pi 正在运行…"
-                : "直接问 Pi，或输入 / 使用命令"
+                : "输入消息，或输入 / 使用命令"
             }
             rows={1}
             style={{
@@ -1044,7 +1046,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         </div>
 
         {/* Bottom bar: left | center (context) | right */}
-        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+        <div className="wuxianpi-input-controls" style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
           <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 2 }}>

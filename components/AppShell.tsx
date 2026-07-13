@@ -1,1270 +1,341 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { SessionSidebar } from "./SessionSidebar";
-import { ChatWindow } from "./ChatWindow";
-import { FileViewer } from "./FileViewer";
-import { TabBar, type Tab } from "./TabBar";
-import { ModelsConfig } from "./ModelsConfig";
-import { SkillsConfig } from "./SkillsConfig";
-import { BranchNavigator } from "./BranchNavigator";
+import type { AssistantSummary, CapabilityCatalog, GlobalWuxianPiConfigV1, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
+import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
+import type { SessionInfo } from "@/lib/types";
 import { useTheme } from "@/hooks/useTheme";
-import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import { ChatWindow } from "./ChatWindow";
 import type { ChatInputHandle } from "./ChatInput";
-import type { SessionStatsInfo } from "@/lib/pi-types";
-import { fetchOpenHouseDefaultCwd } from "@/lib/default-cwd-client";
+import { ModelsConfig } from "./ModelsConfig";
+import { AssistantEditor } from "./wuxianpi/AssistantEditor";
+import { CapabilityCenter } from "./wuxianpi/CapabilityCenter";
+import {
+  cloneAssistant,
+  exportAssistant,
+  getCapabilityCatalog,
+  getGlobalConfig,
+  importAssistant,
+  isUnavailableError,
+  listAssistants,
+  listWebExtensions,
+  setAssistantArchived,
+} from "./wuxianpi/api";
 
-type SessionCopyField = "file" | "id";
+type MainView = "assistants" | "chats" | "capabilities" | "settings";
 
-type ModelConfigStatus = {
-  hasUsableModel?: boolean;
-  modelCount?: number;
-  defaultModel?: { provider?: string; modelId?: string } | null;
-  missingReasons?: string[];
-};
+function avatarText(assistant: AssistantSummary): string {
+  return assistant.manifest.name.trim().slice(0, 1).toUpperCase() || "π";
+}
 
-type OpenHouseFirstConfigState = {
-  started: boolean;
-  completed: boolean;
-  startedAt?: string;
-  completedAt?: string;
-  updatedAt?: string;
-};
+function basename(path: string): string {
+  const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts.at(-1) ?? path;
+}
 
-type OpenHouseFirstConfigResponse = {
-  state?: OpenHouseFirstConfigState;
-  prompt?: string;
-  error?: string;
-};
+function formatTime(value?: string): string {
+  if (!value) return "尚未对话";
+  const date = new Date(value);
+  const delta = Date.now() - date.getTime();
+  if (delta < 60_000) return "刚刚";
+  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)} 分钟前`;
+  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)} 小时前`;
+  return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+}
 
-type InitialPromptLaunch = {
-  key: string;
-  prompt: string;
-};
-
-type ModelsConfigFlowProps = {
-  onClose: () => void;
-  onModelsChanged?: () => void;
-  initialNoModelMode?: boolean;
-  onAddAppAndStartChat?: () => void | Promise<void>;
-  canAddAppAndStartChat?: boolean;
-  addAppAndStartChatDisabledReason?: string;
-};
-
-const ModelsConfigWithFlow = ModelsConfig as ComponentType<ModelsConfigFlowProps>;
-
-function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-    return Promise.resolve();
-  } catch {
-    return Promise.reject();
-  }
+function virtualAssistant(cwd: string, sessions: SessionInfo[]): AssistantSummary {
+  const encoded = encodeURIComponent(cwd).replace(/%/g, "").slice(-40) || "default";
+  const latest = [...sessions].sort((a, b) => b.modified.localeCompare(a.modified))[0];
+  return {
+    id: `legacy-${encoded}`,
+    path: cwd,
+    manifest: {
+      schemaVersion: WUXIANPI_SCHEMA_VERSION,
+      name: basename(cwd) || "通用助手",
+      description: "旧版工作区会话（兼容模式）",
+      model: "inherit",
+      tools: "inherit",
+    },
+    sessionCount: sessions.length,
+    lastActiveAt: latest?.modified,
+    diagnostics: [{ level: "info", code: "LEGACY_WORKSPACE", message: "该工作区尚未转换为助手目录" }],
+  };
 }
 
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { isDark, toggleTheme } = useTheme();
+  const [view, setView] = useState<MainView>("assistants");
+  const [assistants, setAssistants] = useState<AssistantSummary[]>([]);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [extensions, setExtensions] = useState<WebExtensionSummary[]>([]);
+  const [catalog, setCatalog] = useState<CapabilityCatalog | null>(null);
+  const [globalConfig, setGlobalConfig] = useState<GlobalWuxianPiConfigV1 | null>(null);
+  const [selectedAssistant, setSelectedAssistant] = useState<AssistantSummary | null>(null);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
-  // When user clicks +, we only store the cwd — no fake session id
-  const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [sessionKey, setSessionKey] = useState(0);
-  const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
-  const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
-  const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
-  const [modelConfigStatus, setModelConfigStatus] = useState<ModelConfigStatus | null>(null);
-  const [modelConfigStatusError, setModelConfigStatusError] = useState<string | null>(null);
-  const [noModelConfigDismissed, setNoModelConfigDismissed] = useState(false);
-  const [openHouseFirstConfigState, setOpenHouseFirstConfigState] = useState<OpenHouseFirstConfigState | null>(null);
-  const [openHouseFirstConfigError, setOpenHouseFirstConfigError] = useState<string | null>(null);
-  const [openHouseFirstConfigStarting, setOpenHouseFirstConfigStarting] = useState(false);
-  const [openHouseInitialPrompt, setOpenHouseInitialPrompt] = useState<InitialPromptLaunch | null>(null);
-  const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatKey, setChatKey] = useState(0);
+  const [initialPrompt, setInitialPrompt] = useState<string | null>(null);
+  const [editorAssistant, setEditorAssistant] = useState<AssistantSummary | null | undefined>(undefined);
+  const [modelsOpen, setModelsOpen] = useState(false);
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [platformUnavailable, setPlatformUnavailable] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const importRef = useRef<HTMLInputElement | null>(null);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
-  const topBarRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const media = window.matchMedia("(max-width: 640px)");
-    const syncSidebarMode = () => {
-      setSidebarOpen(!media.matches);
-    };
-
-    syncSidebarMode();
-    media.addEventListener("change", syncSidebarMode);
-    return () => media.removeEventListener("change", syncSidebarMode);
+  const loadSessions = useCallback(async () => {
+    const response = await fetch("/api/sessions");
+    if (!response.ok) throw new Error(`无法读取历史对话（HTTP ${response.status}）`);
+    const data = await response.json() as { sessions?: SessionInfo[] };
+    setSessions(data.sessions ?? []);
+    return data.sessions ?? [];
   }, []);
 
-  // Branch navigator state — populated by ChatWindow via onBranchDataChange
-  const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
-  const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
-  const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
-
-  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
-    setBranchTree(tree);
-    setBranchActiveLeafId(activeLeafId);
-    branchLeafChangeFnRef.current = onLeafChange;
-  }, []);
-
-  const handleBranchLeafChange = useCallback((leafId: string | null) => {
-    branchLeafChangeFnRef.current?.(leafId);
-  }, []);
-
-  const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
-  const systemBtnRef = useRef<HTMLButtonElement>(null);
-
-  const handleSystemPromptChange = useCallback((prompt: string | null) => {
-    setSystemPrompt(prompt);
-  }, []);
-
-  // Session stats (tokens + cost) — populated by ChatWindow, displayed in top bar
-  const [sessionStats, setSessionStats] = useState<SessionStatsInfo | null>(null);
-  const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
-    setSessionStats(stats);
-  }, []);
-  const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
-  const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
-    void copyText(value).then(() => {
-      if (sessionCopyTimerRef.current) clearTimeout(sessionCopyTimerRef.current);
-      setCopiedSessionField(field);
-      sessionCopyTimerRef.current = setTimeout(() => setCopiedSessionField(null), 1400);
-    });
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (sessionCopyTimerRef.current) clearTimeout(sessionCopyTimerRef.current);
-    };
-  }, []);
-
-  // Context usage — populated by ChatWindow, displayed in top bar
-  const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
-  const handleContextUsageChange = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => {
-    setContextUsage(usage);
-  }, []);
-
-  // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | null>(null);
-  const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
-
-  const toggleTopPanel = useCallback((panel: "branches" | "system" | "session") => {
-    setActiveTopPanel((cur) => cur === panel ? null : panel);
-  }, []);
-
-  const openSessionStatsPanel = useCallback(() => {
-    setActiveTopPanel("session");
-  }, []);
-
-  useEffect(() => {
-    if (!activeTopPanel || !topBarRef.current) return;
-    const update = () => {
-      const rect = topBarRef.current!.getBoundingClientRect();
-      setTopPanelPos({ top: rect.bottom, left: rect.left, width: rect.width });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(topBarRef.current);
-    return () => ro.disconnect();
-  }, [activeTopPanel]);
-
-  // Right panel — file tabs only
-  const [fileTabs, setFileTabs] = useState<Tab[]>([]);
-  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
-  const [rightPanelOpen, setRightPanelOpen] = useState(false);
-
-  const handleAtMention = useCallback((relativePath: string) => {
-    chatInputRef.current?.insertText("`" + relativePath + "`");
-  }, []);
-
-  const initialSessionParam = searchParams?.get("session") ?? null;
-  const [initialSessionId] = useState<string | null>(() => initialSessionParam);
-  const [activeCwd, setActiveCwd] = useState<string | null>(null);
-  // True once the initial ?session= URL param has been resolved (or confirmed absent)
-  const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionParam);
-  // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
-  const suppressCwdBumpRef = useRef(false);
-
-  const handleCwdChange = useCallback((cwd: string | null) => {
-    setActiveCwd(cwd);
-    // Skip if cwd is null (initial mount) or during the initial URL restore.
-    if (!cwd) return;
-    if (suppressCwdBumpRef.current) {
-      suppressCwdBumpRef.current = false;
-      return;
-    }
-    // Close any session that belongs to a different cwd — it no longer
-    // matches the selected project directory.
-    setSelectedSession((prev) => {
-      if (prev && prev.cwd !== cwd) return null;
-      return prev;
-    });
-    setNewSessionCwd((prev) => {
-      if (prev && prev !== cwd) return null;
-      return prev;
-    });
-    setSessionKey((k) => k + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
-    router.replace("/", { scroll: false });
-  }, [router]);
-
-  const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
-    setNewSessionCwd(null);
-    setSelectedSession(session);
-    setSessionKey((k) => k + 1);
-    setSystemPrompt(null);
-    setInitialSessionRestored(true);
-    if (isRestore) {
-      // Suppress the redundant sessionKey bump that would come from the
-      // onCwdChange effect firing after setSelectedCwd in the sidebar
-      suppressCwdBumpRef.current = true;
-    }
-    // Skip router.replace when restoring from URL — the param is already correct
-    // and calling replace in production Next.js triggers a Suspense remount loop
-    if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-    }
-  }, [router]);
-
-  const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
-    setSelectedSession(null);
-    setNewSessionCwd(cwd);
-    setSessionKey((k) => k + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
-    router.replace("/", { scroll: false });
-  }, [router]);
-
-  // Called by ChatWindow when a new session gets its real id from pi
-  const handleSessionCreated = useCallback((session: SessionInfo) => {
-    setNewSessionCwd(null);
-    setSelectedSession(session);
-    setRefreshKey((k) => k + 1);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [router]);
-
-  const handleAgentEnd = useCallback(() => {
-    setRefreshKey((k) => k + 1);
-    setExplorerRefreshKey((k) => k + 1);
-  }, []);
-
-  const handleSessionForked = useCallback((newSessionId: string) => {
-    setRefreshKey((k) => k + 1);
-    setSessionKey((k) => k + 1);
-    setNewSessionCwd(null);
-    setSelectedSession((prev) => ({
-      ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
-      id: newSessionId,
-    }));
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [router]);
-
-  const handleInitialRestoreDone = useCallback(() => {
-    setInitialSessionRestored(true);
-  }, []);
-
-  const refreshModelConfigStatus = useCallback(async () => {
+  const loadPlatform = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      const res = await fetch("/api/models-config/status", { cache: "no-store" });
-      if (!res.ok) {
-        setModelConfigStatus(null);
-        setModelConfigStatusError("无法确认模型配置状态，请保存配置后重试。");
-        return null;
+      const loadedSessions = await loadSessions();
+      try {
+        const [assistantList, capabilityCatalog, config, extensionList] = await Promise.all([
+          listAssistants({ includeArchived: true }),
+          getCapabilityCatalog(),
+          getGlobalConfig(),
+          listWebExtensions(),
+        ]);
+        setAssistants(assistantList);
+        setCatalog(capabilityCatalog);
+        setGlobalConfig(config);
+        setExtensions(extensionList);
+        setPlatformUnavailable(false);
+      } catch (reason) {
+        if (!isUnavailableError(reason)) throw reason;
+        const byCwd = new Map<string, SessionInfo[]>();
+        for (const session of loadedSessions) byCwd.set(session.cwd, [...(byCwd.get(session.cwd) ?? []), session]);
+        setAssistants([...byCwd.entries()].map(([cwd, items]) => virtualAssistant(cwd, items)));
+        setPlatformUnavailable(true);
       }
-      const status = await res.json() as ModelConfigStatus;
-      setModelConfigStatus(status);
-      setModelConfigStatusError(null);
-      return status;
-    } catch {
-      setModelConfigStatus(null);
-      setModelConfigStatusError("无法连接模型配置状态接口，请稍后重试。");
-      return null;
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshModelConfigStatus();
-  }, [modelsRefreshKey, refreshModelConfigStatus]);
-
-  useEffect(() => {
-    if (modelConfigStatus?.hasUsableModel === true) {
-      setNoModelConfigDismissed(false);
-    }
-  }, [modelConfigStatus?.hasUsableModel]);
-
-  useEffect(() => {
-    if (modelConfigStatus?.hasUsableModel !== false) return;
-    if (modelsConfigOpen || noModelConfigDismissed) return;
-    setModelsConfigOpen(true);
-  }, [modelConfigStatus?.hasUsableModel, modelsConfigOpen, noModelConfigDismissed]);
-
-  const refreshOpenHouseFirstConfigState = useCallback(async () => {
-    try {
-      const res = await fetch("/api/openhouse-first-config", { cache: "no-store" });
-      if (!res.ok) {
-        setOpenHouseFirstConfigError("无法读取 OpenHouse 首次配置状态。");
-        return null;
-      }
-      const data = await res.json() as OpenHouseFirstConfigResponse;
-      const state = data.state ?? null;
-      setOpenHouseFirstConfigState(state);
-      setOpenHouseFirstConfigError(null);
-      return state;
-    } catch {
-      setOpenHouseFirstConfigError("无法连接 OpenHouse 首次配置状态接口。");
-      return null;
-    }
-  }, []);
-
-  useEffect(() => {
-    if (modelConfigStatus?.hasUsableModel !== true) return;
-    void refreshOpenHouseFirstConfigState();
-  }, [modelConfigStatus?.hasUsableModel, refreshOpenHouseFirstConfigState]);
-
-  const handleOpenModelsConfig = useCallback(() => {
-    setModelsConfigOpen(true);
-  }, []);
-
-  const handleModelsChanged = useCallback(() => {
-    setModelsRefreshKey((k) => k + 1);
-  }, []);
-
-  const handleModelsConfigClose = useCallback(() => {
-    setModelsConfigOpen(false);
-    if (modelConfigStatus?.hasUsableModel !== true) {
-      setNoModelConfigDismissed(true);
-    }
-    handleModelsChanged();
-    void refreshModelConfigStatus();
-  }, [handleModelsChanged, modelConfigStatus?.hasUsableModel, refreshModelConfigStatus]);
-
-  const handleAddAppAndStartChat = useCallback(async () => {
-    handleModelsChanged();
-    const status = await refreshModelConfigStatus();
-    if (status?.hasUsableModel !== true) {
-      setModelsConfigOpen(true);
-      setNoModelConfigDismissed(false);
-      return;
-    }
-    setModelsConfigOpen(false);
-    setNoModelConfigDismissed(false);
-    const cwd = activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? await fetchOpenHouseDefaultCwd();
-    handleNewSession("__model_config_ready__", cwd);
-  }, [activeCwd, handleModelsChanged, handleNewSession, newSessionCwd, refreshModelConfigStatus, selectedSession?.cwd]);
-
-  const handleStartOpenHouseFirstConfig = useCallback(async () => {
-    if (openHouseFirstConfigStarting) return;
-    setOpenHouseFirstConfigStarting(true);
-    setOpenHouseFirstConfigError(null);
-    try {
-      const status = await refreshModelConfigStatus();
-      if (status?.hasUsableModel !== true) {
-        setModelsConfigOpen(true);
-        setNoModelConfigDismissed(false);
-        setOpenHouseFirstConfigError("请先完成可用模型配置。");
-        return;
-      }
-
-      const res = await fetch("/api/openhouse-first-config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "start" }),
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = await res.json() as OpenHouseFirstConfigResponse;
-      if (!data.prompt || !data.state) {
-        throw new Error(data.error ?? "OpenHouse 首次配置任务不可用。");
-      }
-      setOpenHouseFirstConfigState(data.state);
-      setOpenHouseInitialPrompt({ key: `${Date.now()}`, prompt: data.prompt });
-      setModelsConfigOpen(false);
-      setNoModelConfigDismissed(false);
-      handleNewSession("__openhouse_first_config__", await fetchOpenHouseDefaultCwd());
-    } catch (error) {
-      setOpenHouseFirstConfigError(error instanceof Error ? error.message : String(error));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      setOpenHouseFirstConfigStarting(false);
+      setLoading(false);
     }
-  }, [handleNewSession, openHouseFirstConfigStarting, refreshModelConfigStatus]);
+  }, [loadSessions]);
 
-  const handleOpenHouseInitialPromptQueued = useCallback(() => {
-    setOpenHouseInitialPrompt(null);
-  }, []);
+  useEffect(() => { void loadPlatform(); }, [loadPlatform]);
 
-  const handleSessionDeleted = useCallback((sessionId: string) => {
-    setRefreshKey((k) => k + 1);
-    if (selectedSession?.id === sessionId) {
-      const cwd = selectedSession.cwd;
-      setSelectedSession(null);
-      setNewSessionCwd(cwd ?? null);
-      setSessionKey((k) => k + 1);
-      setBranchTree([]);
-      setBranchActiveLeafId(null);
-      setSystemPrompt(null);
-      setActiveTopPanel(null);
-      router.replace("/", { scroll: false });
+  useEffect(() => {
+    if (!sessions.length || chatOpen) return;
+    const requested = searchParams.get("session");
+    if (!requested) return;
+    const target = sessions.find((session) => session.id === requested);
+    if (!target) return;
+    const owner = assistants.find((assistant) => assistant.path === target.cwd) ?? virtualAssistant(target.cwd, sessions.filter((session) => session.cwd === target.cwd));
+    setSelectedAssistant(owner);
+    setSelectedSession(target);
+    setChatOpen(true);
+  }, [assistants, chatOpen, searchParams, sessions]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timeout = window.setTimeout(() => setNotice(null), 3200);
+    return () => window.clearTimeout(timeout);
+  }, [notice]);
+
+  const sessionsByAssistant = useMemo(() => {
+    const map = new Map<string, SessionInfo[]>();
+    for (const assistant of assistants) map.set(assistant.id, []);
+    const legacy: SessionInfo[] = [];
+    for (const session of sessions) {
+      const owner = assistants.find((assistant) => assistant.path === session.cwd);
+      if (owner) map.get(owner.id)?.push(session);
+      else legacy.push(session);
     }
-  }, [selectedSession, router]);
+    for (const items of map.values()) items.sort((a, b) => b.modified.localeCompare(a.modified));
+    legacy.sort((a, b) => b.modified.localeCompare(a.modified));
+    return { map, legacy };
+  }, [assistants, sessions]);
 
-  const handleOpenFile = useCallback((filePath: string, fileName: string) => {
-    const tabId = `file:${filePath}`;
-    setFileTabs((prev) => {
-      if (prev.find((t) => t.id === tabId)) return prev;
-      return [...prev, { id: tabId, label: fileName, filePath }];
-    });
-    setActiveFileTabId(tabId);
-    setRightPanelOpen(true);
-  }, []);
+  const visibleAssistants = useMemo(() => assistants
+    .filter((assistant) => includeArchived || !assistant.manifest.archived)
+    .filter((assistant) => !search || `${assistant.manifest.name} ${assistant.manifest.description ?? ""}`.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => (b.lastActiveAt ?? "").localeCompare(a.lastActiveAt ?? "")), [assistants, includeArchived, search]);
 
-  const handleCloseFileTab = useCallback((tabId: string) => {
-    setFileTabs((prev) => {
-      const next = prev.filter((t) => t.id !== tabId);
-      if (next.length === 0) setRightPanelOpen(false);
-      return next;
-    });
-    setActiveFileTabId((cur) => {
-      if (cur !== tabId) return cur;
-      const remaining = fileTabs.filter((t) => t.id !== tabId);
-      return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
-    });
-  }, [fileTabs]);
+  const openNewChat = (assistant: AssistantSummary, prompt?: string) => {
+    setSelectedAssistant(assistant);
+    setSelectedSession(null);
+    setInitialPrompt(prompt ?? null);
+    setChatKey((key) => key + 1);
+    setChatOpen(true);
+    router.replace("/");
+  };
 
-  const handleExportSession = useCallback(() => {
-    if (!selectedSession) return;
-    window.location.href = `/api/sessions/${encodeURIComponent(selectedSession.id)}/export`;
-  }, [selectedSession]);
+  const openSession = (session: SessionInfo) => {
+    const owner = assistants.find((assistant) => assistant.path === session.cwd) ?? virtualAssistant(session.cwd, sessions.filter((item) => item.cwd === session.cwd));
+    setSelectedAssistant(owner);
+    setSelectedSession(session);
+    setInitialPrompt(null);
+    setChatKey((key) => key + 1);
+    setChatOpen(true);
+    router.replace(`/?session=${encodeURIComponent(session.id)}`);
+  };
 
-  // Show chat area if a session is selected, or if we have a cwd to start a new session in
-  const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
-  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
-  // While restoring initial session from URL, don't show the placeholder
-  const showPlaceholder = initialSessionRestored && !showChat;
+  const closeChat = () => {
+    setChatOpen(false);
+    setSelectedSession(null);
+    setInitialPrompt(null);
+    router.replace("/");
+    void loadSessions();
+  };
 
-  const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
-  const canAddAppAndStartChat = modelConfigStatus?.hasUsableModel === true;
-  const addAppAndStartChatDisabledReason = canAddAppAndStartChat
-    ? undefined
-    : (
-      modelConfigStatus?.missingReasons?.find((reason) => reason.trim().length > 0)
-      ?? modelConfigStatusError
-      ?? "请先保存一个可用模型配置。"
+  const handleImport = async (file: File) => {
+    try {
+      const defaultId = file.name.replace(/\.(zip|wuxianpi)$/i, "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || "imported-assistant";
+      const requested = window.prompt("助手 ID", defaultId);
+      if (!requested) return;
+      const assistant = await importAssistant(file, requested);
+      setAssistants((current) => [assistant, ...current.filter((item) => item.id !== assistant.id)]);
+      setNotice(`已导入 ${assistant.manifest.name}`);
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const handleClone = async (assistant: AssistantSummary) => {
+    const targetId = window.prompt("新助手 ID", `${assistant.id}-copy`);
+    if (!targetId) return;
+    try {
+      const copy = await cloneAssistant(assistant.id, targetId);
+      setAssistants((current) => [copy, ...current]);
+      setNotice(`已复制为 ${copy.manifest.name}`);
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const handleArchive = async (assistant: AssistantSummary) => {
+    try {
+      const next = await setAssistantArchived(assistant.id, !assistant.manifest.archived);
+      setAssistants((current) => current.map((item) => item.id === next.id ? next : item));
+      setNotice(next.manifest.archived ? "助手已归档" : "助手已恢复");
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const selectedExtensions = useMemo(() => {
+    if (!selectedAssistant) return [];
+    const ids = selectedAssistant.manifest.webExtensions;
+    if (ids === "inherit" || ids === undefined) {
+      const defaults = globalConfig?.defaults.webExtensions ?? [];
+      return extensions.filter((extension) => extension.enabled && defaults.includes(extension.id));
+    }
+    return extensions.filter((extension) => extension.enabled && ids.includes(extension.id));
+  }, [extensions, globalConfig?.defaults.webExtensions, selectedAssistant]);
+
+  if (chatOpen && selectedAssistant) {
+    return (
+      <main className="wuxianpi-app chat-mode">
+        <header className="mobile-chat-header">
+          <button className="icon-button" type="button" onClick={closeChat} aria-label="返回">‹</button>
+          <div className="assistant-mini-avatar">{selectedAssistant.manifest.avatar ? <span style={{ backgroundImage: `url(${selectedAssistant.manifest.avatar})` }} /> : avatarText(selectedAssistant)}</div>
+          <div className="mobile-chat-title"><strong>{selectedAssistant.manifest.name}</strong><small>{selectedSession?.name || selectedAssistant.manifest.description || "WuxianPi 助手"}</small></div>
+          <button className="icon-button" type="button" onClick={() => setEditorAssistant(selectedAssistant.id.startsWith("legacy-") ? undefined : selectedAssistant)} disabled={selectedAssistant.id.startsWith("legacy-")} aria-label="助手设置">⋯</button>
+        </header>
+        <div className="mobile-chat-body">
+          <ChatWindow
+            key={chatKey}
+            session={selectedSession}
+            newSessionCwd={selectedSession ? null : selectedAssistant.path}
+            assistantId={selectedAssistant.id.startsWith("legacy-") ? undefined : selectedAssistant.id}
+            assistant={selectedAssistant}
+            webExtensions={selectedExtensions}
+            onAgentEnd={() => void loadSessions()}
+            onSessionCreated={(session) => { setSelectedSession(session); router.replace(`/?session=${encodeURIComponent(session.id)}`); void loadSessions(); }}
+            onSessionForked={(id) => { void loadSessions().then((items) => { const target = items.find((item) => item.id === id); if (target) openSession(target); }); }}
+            chatInputRef={chatInputRef}
+            initialPrompt={initialPrompt}
+            initialPromptKey={initialPrompt ? `${selectedAssistant.id}:${initialPrompt}` : null}
+            onInitialPromptQueued={() => setInitialPrompt(null)}
+            onOpenModelsConfig={() => setModelsOpen(true)}
+          />
+        </div>
+        {editorAssistant !== undefined && <AssistantEditor assistant={editorAssistant} catalog={catalog} config={globalConfig} onClose={() => setEditorAssistant(undefined)} onSaved={(assistant) => { setAssistants((current) => current.map((item) => item.id === assistant.id ? assistant : item)); setSelectedAssistant(assistant); setEditorAssistant(undefined); }} />}
+        {modelsOpen && <ModelsConfig onClose={() => setModelsOpen(false)} />}
+      </main>
     );
-  const showOpenHouseFirstConfigEntry =
-    modelConfigStatus?.hasUsableModel === true
-    && openHouseFirstConfigState !== null
-    && openHouseFirstConfigState.started !== true
-    && openHouseFirstConfigState.completed !== true;
-
-  const sidebarContent = (
-    <>
-      <SessionSidebar
-        selectedSessionId={selectedSession?.id ?? null}
-        onSelectSession={handleSelectSession}
-        onNewSession={handleNewSession}
-        initialSessionId={initialSessionId}
-        onInitialRestoreDone={handleInitialRestoreDone}
-        refreshKey={refreshKey}
-        onSessionDeleted={handleSessionDeleted}
-        selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
-        onCwdChange={handleCwdChange}
-        onOpenFile={handleOpenFile}
-        explorerRefreshKey={explorerRefreshKey}
-        onAtMention={handleAtMention}
-      />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
-        {([
-          {
-            label: "模型",
-            onClick: handleOpenModelsConfig,
-            disabled: false,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
-                <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-              </svg>
-            ),
-          },
-          {
-            label: "技能",
-            onClick: () => setSkillsConfigOpen(true),
-            disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            ),
-          },
-        ] as { label: string; onClick: () => void; disabled: boolean; icon: React.ReactNode }[]).map(({ label, onClick, disabled, icon }) => (
-          <button
-            key={label}
-            onClick={onClick}
-            disabled={disabled}
-            title={label}
-            style={{
-              flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              height: 32, padding: 0, background: "none", border: "none",
-              borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-              fontSize: 12, opacity: disabled ? 0.35 : 1,
-              transition: "background 0.12s, color 0.12s",
-            }}
-            onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {icon}
-            {label}
-          </button>
-        ))}
-      </div>
-    </>
-  );
+  }
 
   return (
-    <>
-    <style>{`
-      @keyframes session-info-pop {
-        0% {
-          opacity: 0;
-          transform: translateY(-24px);
-          filter: blur(6px);
-          box-shadow: 0 2px 8px rgba(0,0,0,0);
-        }
-        55% {
-          opacity: 1;
-          transform: translateY(0);
-          filter: blur(0);
-          background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));
-          box-shadow: 0 18px 44px rgba(37,99,235,0.16);
-        }
-        100% {
-          opacity: 1;
-          transform: translateY(0);
-          filter: blur(0);
-          background: var(--bg-panel);
-          box-shadow: 0 10px 28px rgba(0,0,0,0.10);
-        }
-      }
-      @keyframes session-info-light-wash {
-        0% {
-          opacity: 0;
-          transform: translateX(-110%) skewX(-16deg);
-        }
-        24% {
-          opacity: 0.42;
-        }
-        100% {
-          opacity: 0;
-          transform: translateX(115%) skewX(-16deg);
-        }
-      }
-      .session-info-popover {
-        position: relative;
-        overflow: hidden;
-        transform-origin: top right;
-        animation: session-info-pop 360ms ease-out both;
-        will-change: transform, opacity, filter, background, box-shadow;
-      }
-      .session-info-popover::after {
-        content: "";
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 0;
-        width: 44%;
-        pointer-events: none;
-        background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 24%, transparent), transparent);
-        animation: session-info-light-wash 620ms ease-out both;
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .session-info-popover,
-        .session-info-popover::after {
-          animation: none;
-        }
-      }
-    `}</style>
-    <div style={{ display: "flex", height: "100%", minHeight: "100vh", overflow: "hidden", background: "var(--bg)" }}>
-      {/* Mobile overlay backdrop */}
-      <div
-        className="sidebar-overlay-backdrop"
-        onClick={() => setSidebarOpen(false)}
-        style={{
-          position: "fixed",
-          inset: 0,
-          zIndex: 199,
-          background: "rgba(0,0,0,0.4)",
-          opacity: sidebarOpen ? 1 : 0,
-          pointerEvents: sidebarOpen ? "auto" : "none",
-          transition: "opacity 0.25s ease",
-        }}
-      />
-
-      {/* Left sidebar */}
-      <div
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}`}
-        style={{
-          background: "var(--bg-panel)",
-          borderRight: "1px solid var(--border)",
-          display: "flex",
-          flexDirection: "column",
-          flexShrink: 0,
-          zIndex: 200,
-        }}
-      >
-        {sidebarContent}
-      </div>
-
-      {/* Center: chat */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-        {/* Top bar with sidebar toggle */}
-        <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
-          <button
-            onClick={() => setSidebarOpen((v) => !v)}
-            title={sidebarOpen ? "隐藏侧边栏" : "显示侧边栏"}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 42, height: 36, padding: 0,
-              background: "none", border: "none", borderRight: "1px solid var(--border)",
-              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {sidebarOpen ? (
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
-              </svg>
-            ) : (
-              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-                <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-              </svg>
-            )}
-          </button>
-          <button
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-            }}
-            title={isDark ? "切换到浅色模式" : "切换到深色模式"}
-            aria-label={isDark ? "切换到浅色模式" : "切换到深色模式"}
-            aria-pressed={isDark}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 36, height: 36, padding: 0,
-              background: "none", border: "none", borderRight: "1px solid var(--border)",
-              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {isDark ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="5" />
-                <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
-            )}
-          </button>
-          {showChat && (
-            <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
-              <button
-                onClick={handleExportSession}
-                disabled={!selectedSession}
-                title={selectedSession ? "导出 HTML" : "会话保存后才可导出"}
-                aria-label="导出 HTML"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  height: "100%",
-                  padding: "0 12px",
-                  background: "none",
-                  border: "none",
-                  borderTop: "2px solid transparent",
-                  borderRight: "1px solid var(--border)",
-                  color: selectedSession ? "var(--text-muted)" : "var(--text-dim)",
-                  cursor: selectedSession ? "pointer" : "not-allowed",
-                  opacity: selectedSession ? 1 : 0.45,
-                  flexShrink: 0,
-                  fontSize: 11,
-                  whiteSpace: "nowrap",
-                  transition: "color 0.1s, background 0.1s, opacity 0.1s",
-                }}
-                onMouseEnter={(e) => {
-                  if (!selectedSession) return;
-                  e.currentTarget.style.color = "var(--text)";
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = selectedSession ? "var(--text-muted)" : "var(--text-dim)";
-                  e.currentTarget.style.background = "none";
-                }}
-              >
-                <span style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 18,
-                  height: 18,
-                  borderRadius: 5,
-                  background: "transparent",
-                  color: selectedSession ? "var(--text-muted)" : "var(--text-dim)",
-                  flexShrink: 0,
-                }}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
-                </span>
-                <span>导出</span>
-              </button>
-              <BranchNavigator
-                tree={branchTree}
-                activeLeafId={branchActiveLeafId}
-                onLeafChange={handleBranchLeafChange}
-                inline
-                containerRef={topBarRef}
-                open={activeTopPanel === "branches"}
-                onToggle={() => toggleTopPanel("branches")}
-                hasSession
-              />
-              <button
-                ref={systemBtnRef}
-                onClick={() => toggleTopPanel("system")}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  height: "100%", padding: "0 12px",
-                  background: activeTopPanel === "system" ? "var(--bg-selected)" : "none",
-                  border: "none",
-                  borderTop: activeTopPanel === "system" ? "2px solid var(--accent)" : "2px solid transparent",
-                  borderRight: "1px solid var(--border)",
-                  cursor: "pointer",
-                  color: activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)",
-                  fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)"; }}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                  <polyline points="14 2 14 8 20 8" />
-                  <line x1="8" y1="13" x2="16" y2="13" />
-                  <line x1="8" y1="17" x2="13" y2="17" />
-                </svg>
-                <span>系统</span>
-              </button>
+    <main className="wuxianpi-app">
+      <div className="wuxianpi-content">
+        {view === "assistants" && (
+          <div className="wuxianpi-page assistants-page">
+            <header className="wuxianpi-page-header home-header"><div><span className="brand-mark">∞π</span><h1>WuxianPi</h1><p>你的本地角色助手</p></div><button type="button" className="round-add" onClick={() => setEditorAssistant(null)} disabled={platformUnavailable} aria-label="创建助手">＋</button></header>
+            <div className="assistant-toolbar"><label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索助手" /></label><button type="button" className="secondary-button compact" onClick={() => importRef.current?.click()} disabled={platformUnavailable}>导入</button><input ref={importRef} hidden type="file" accept="application/zip,.zip,.wuxianpi" onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleImport(file); event.target.value = ""; }} /></div>
+            {platformUnavailable && <div className="wuxianpi-state warning"><span>助手 API 尚未启用，当前以兼容模式展示旧工作区。聊天仍然可用。</span></div>}
+            {loading && <AssistantSkeleton />}
+            {error && <div className="wuxianpi-state error"><span>{error}</span><button onClick={() => void loadPlatform()}>重试</button></div>}
+            {!loading && !error && visibleAssistants.length === 0 && <div className="empty-hero"><div>∞</div><h2>创建你的第一个助手</h2><p>角色、记忆、知识和 Skills 都保存在它自己的目录中。</p><button className="primary-button" disabled={platformUnavailable} onClick={() => setEditorAssistant(null)}>创建助手</button></div>}
+            <div className="assistant-grid">
+              {visibleAssistants.map((assistant) => (
+                <article key={assistant.id} className={`assistant-card ${assistant.manifest.archived ? "archived" : ""}`}>
+                  <button type="button" className="assistant-card-main" onClick={() => openNewChat(assistant)}>
+                    <span className="assistant-avatar">{assistant.manifest.avatar ? <span style={{ backgroundImage: `url(${assistant.manifest.avatar})` }} /> : avatarText(assistant)}</span>
+                    <span className="assistant-card-copy"><strong>{assistant.manifest.name}</strong><small>{assistant.manifest.description || "私人助手"}</small><em>{assistant.sessionCount} 个对话 · {formatTime(assistant.lastActiveAt)}</em></span><span className="assistant-card-arrow">›</span>
+                  </button>
+                  {(assistant.manifest.starterPrompts ?? []).length > 0 && <div className="starter-chip-row">{assistant.manifest.starterPrompts?.slice(0, 3).map((prompt) => <button key={prompt} onClick={() => openNewChat(assistant, prompt)}>{prompt}</button>)}</div>}
+                  {!assistant.id.startsWith("legacy-") && <div className="assistant-card-actions"><button onClick={() => setEditorAssistant(assistant)}>编辑</button><button onClick={() => void handleClone(assistant)}>复制</button><button onClick={() => void exportAssistant(assistant.id).catch((reason) => setNotice(String(reason)))}>导出</button><button onClick={() => void handleArchive(assistant)}>{assistant.manifest.archived ? "恢复" : "归档"}</button></div>}
+                </article>
+              ))}
             </div>
-          )}
-          {/* Session stats — right-aligned in top bar */}
-          {showChat && (sessionStats || contextUsage) && (() => {
-            const t = sessionStats?.tokens;
-            const c = sessionStats?.cost ?? 0;
-            const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
-            const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(2)}` : `<$0.01`) : null;
-
-            let ctxColor = "var(--text-muted)";
-            let ctxStr: string | null = null;
-            if (contextUsage?.contextWindow) {
-              const pct = contextUsage.percent;
-              if (pct !== null && pct > 90) ctxColor = "#ef4444";
-              else if (pct !== null && pct > 70) ctxColor = "rgba(234,179,8,0.95)";
-              ctxStr = pct !== null ? `${pct.toFixed(0)}% / ${fmt(contextUsage.contextWindow)}` : `? / ${fmt(contextUsage.contextWindow)}`;
-            }
-
-            const tooltipParts: string[] = [];
-            if (t) {
-              tooltipParts.push(`输入：${t.input.toLocaleString()}`);
-              tooltipParts.push(`输出：${t.output.toLocaleString()}`);
-              tooltipParts.push(`缓存读取：${t.cacheRead.toLocaleString()}`);
-              tooltipParts.push(`缓存写入：${t.cacheWrite.toLocaleString()}`);
-              if (c > 0) tooltipParts.push(`费用：$${c.toFixed(4)}`);
-            }
-            if (contextUsage?.contextWindow) {
-              const pct = contextUsage.percent;
-              tooltipParts.push(`上下文：${pct !== null ? pct.toFixed(1) + "%" : "未知"} / ${contextUsage.contextWindow.toLocaleString()} Token`);
-            }
-            const tooltip = tooltipParts.join("  |  ");
-
-            return (
-              <button
-                type="button"
-                onClick={() => toggleTopPanel("session")}
-                title={tooltip || "会话信息"}
-                style={{
-                  marginLeft: "auto",
-                  display: "flex", alignItems: "center", gap: 10,
-                  paddingLeft: 12,
-                  paddingRight: rightPanelOpen ? 12 : 48,
-                  height: "100%",
-                  background: activeTopPanel === "session" ? "var(--bg-selected)" : "none",
-                  border: "none",
-                  borderTop: activeTopPanel === "session" ? "2px solid var(--accent)" : "2px solid transparent",
-                  fontSize: 11, color: "var(--text-muted)",
-                  whiteSpace: "nowrap", cursor: "pointer",
-                  fontVariantNumeric: "tabular-nums",
-                  transition: "color 0.1s, background 0.1s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "session" ? "var(--text)" : "var(--text-muted)"; }}
-              >
-                {t && t.input > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
-                    </svg>
-                    {fmt(t.input)}
-                  </span>
-                )}
-                {t && t.output > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
-                    </svg>
-                    {fmt(t.output)}
-                  </span>
-                )}
-                {t && t.cacheRead > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
-                    </svg>
-                    {fmt(t.cacheRead)}
-                  </span>
-                )}
-                {costStr && (
-                  <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 500 }}>
-                    {costStr}
-                  </span>
-                )}
-                {ctxStr && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, color: ctxColor }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M1 9 L1 5 Q1 1 5 1 Q9 1 9 5 L9 9" /><line x1="1" y1="9" x2="9" y2="9" />
-                    </svg>
-                    {ctxStr}
-                  </span>
-                )}
-              </button>
-            );
-          })()}
-          {/* Top panel dropdown — shared, only one active at a time */}
-          {activeTopPanel && topPanelPos && (
-            <div style={{
-              position: "fixed",
-              top: topPanelPos.top,
-              left: topPanelPos.left,
-              width: topPanelPos.width,
-              zIndex: 500,
-            }}>
-              {activeTopPanel === "system" && (
-                <div style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                }}>
-                  {systemPrompt ? (
-                    <div style={{
-                      maxHeight: "min(600px, 75vh)",
-                      overflowY: "auto",
-                      padding: "12px 16px",
-                      color: "var(--text-muted)",
-                      fontSize: 12,
-                      lineHeight: 1.6,
-                      whiteSpace: "pre-wrap",
-                      fontFamily: "var(--font-mono)",
-                    }}>
-                      {systemPrompt}
-                    </div>
-                  ) : systemPrompt === "" ? (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      系统提示词为空（工具已禁用）
-                    </div>
-                  ) : (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      发送消息后加载系统提示词
-                    </div>
-                  )}
-                </div>
-              )}
-              {activeTopPanel === "session" && (
-                <div className="session-info-popover" style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                  boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
-                  padding: "12px 16px",
-                }}>
-                  {sessionStats ? (() => {
-                    const sessionRows = [
-                      ...(sessionStats.sessionName ? [{ label: "名称", value: sessionStats.sessionName, copyField: null }] : []),
-                      { label: "文件", value: sessionStats.sessionFile ?? "内存会话", copyField: "file" as const },
-                      { label: "ID", value: sessionStats.sessionId, copyField: "id" as const },
-                    ];
-                    const messageRows = [
-                      ["用户", sessionStats.userMessages.toLocaleString()],
-                      ["助手", sessionStats.assistantMessages.toLocaleString()],
-                      ["工具调用", sessionStats.toolCalls.toLocaleString()],
-                      ["工具结果", sessionStats.toolResults.toLocaleString()],
-                      ["总计", sessionStats.totalMessages.toLocaleString()],
-                    ];
-                    const tokenRows = [
-                      ["输入", sessionStats.tokens.input.toLocaleString()],
-                      ["输出", sessionStats.tokens.output.toLocaleString()],
-                      ...(sessionStats.tokens.cacheRead > 0 ? [["缓存读取", sessionStats.tokens.cacheRead.toLocaleString()]] : []),
-                      ...(sessionStats.tokens.cacheWrite > 0 ? [["缓存写入", sessionStats.tokens.cacheWrite.toLocaleString()]] : []),
-                      ["总计", sessionStats.tokens.total.toLocaleString()],
-                    ];
-                    const ctx = contextUsage ?? sessionStats.contextUsage;
-                    const formatCompact = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
-                    const extraTokenRows = [
-                      ...(sessionStats.cost > 0 ? [["费用", `$${sessionStats.cost.toFixed(4)}`]] : []),
-                      ...(ctx?.contextWindow ? [["上下文", `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompact(ctx.contextWindow)}`]] : []),
-                    ];
-                    const section = (
-                      title: string,
-                      sectionRows: string[][],
-                      valueAlign: "left" | "right" = "left",
-                      compact = false,
-                    ) => (
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{title}</div>
-                          <div style={{
-                            display: "grid",
-                            gridTemplateColumns: compact ? "max-content max-content" : "auto minmax(0, 1fr)",
-                            columnGap: compact ? 14 : 12,
-                            rowGap: 4,
-                            justifyContent: compact ? "start" : undefined,
-                          }}>
-                            {sectionRows.map(([label, value]) => (
-                              <div key={`${title}:${label}`} style={{ display: "contents" }}>
-                                <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{label}</div>
-                                <div style={{
-                                  color: "var(--text-muted)",
-                                  minWidth: 0,
-                                  overflowWrap: compact ? "normal" : "anywhere",
-                                  textAlign: valueAlign,
-                                  whiteSpace: valueAlign === "right" ? "nowrap" : "normal",
-                                }}>{value}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    const copyButton = (field: SessionCopyField, value: string) => {
-                      const copied = copiedSessionField === field;
-                      return (
-                        <button
-                          type="button"
-                          title={copied ? "已复制" : `复制${field === "file" ? "文件路径" : "会话 ID"}`}
-                          onClick={() => handleCopySessionField(field, value)}
-                          style={{
-                            alignSelf: "start",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            width: 22,
-                            height: 22,
-                            marginTop: -2,
-                            color: copied ? "var(--accent)" : "var(--text-dim)",
-                            background: "transparent",
-                            border: "1px solid var(--border)",
-                            borderRadius: 4,
-                            cursor: "pointer",
-                            flex: "0 0 auto",
-                            transition: "color 0.12s, border-color 0.12s, background 0.12s",
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.color = "var(--accent)";
-                            e.currentTarget.style.borderColor = "var(--accent)";
-                            e.currentTarget.style.background = "var(--bg-hover)";
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.color = copied ? "var(--accent)" : "var(--text-dim)";
-                            e.currentTarget.style.borderColor = "var(--border)";
-                            e.currentTarget.style.background = "transparent";
-                          }}
-                        >
-                          {copied ? (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                          ) : (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                            </svg>
-                          )}
-                        </button>
-                      );
-                    };
-                    const sessionInfoSection = (
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>会话信息</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: 12, rowGap: 8, alignItems: "start" }}>
-                          {sessionRows.map((row) => (
-                            <div key={`session-info:${row.label}`} style={{ display: "contents" }}>
-                              <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{row.label}</div>
-                              <div style={{
-                                color: "var(--text-muted)",
-                                minWidth: 0,
-                                overflowWrap: "anywhere",
-                                wordBreak: "break-word",
-                                whiteSpace: "normal",
-                              }}>{row.value}</div>
-                              <div>{row.copyField ? copyButton(row.copyField, row.value) : null}</div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-
-                    return (
-                      <div style={{
-                        display: "grid",
-                        gridTemplateColumns: "minmax(360px, 1.7fr) minmax(140px, 0.55fr) minmax(190px, 0.75fr)",
-                        gap: 24,
-                        fontSize: 12,
-                        lineHeight: 1.5,
-                        fontFamily: "var(--font-mono)",
-                      }}>
-                        {sessionInfoSection}
-                        {section("消息", messageRows)}
-                        {section("Token", [...tokenRows, ...extraTokenRows], "right", true)}
-                      </div>
-                    );
-                  })() : (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      发送消息或运行 /session 后加载会话信息
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-        </div>
-
-        {showOpenHouseFirstConfigEntry && (
-          <div style={{
-            flexShrink: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            padding: "9px 12px",
-            borderBottom: "1px solid color-mix(in srgb, var(--accent) 30%, var(--border))",
-            background: "color-mix(in srgb, var(--accent) 10%, var(--bg-panel))",
-            color: "var(--text-muted)",
-            fontSize: 12,
-            lineHeight: 1.5,
-          }}>
-            <div style={{ minWidth: 0 }}>
-              <span style={{ color: "var(--text)", fontWeight: 700 }}>首次使用 OpenHouse，看到我，请点击我，完成首次配置。</span>
-              {openHouseFirstConfigError && (
-                <span style={{ color: "var(--danger, #ef4444)", marginLeft: 8 }}>{openHouseFirstConfigError}</span>
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={handleStartOpenHouseFirstConfig}
-              disabled={openHouseFirstConfigStarting}
-              style={{
-                flexShrink: 0,
-                height: 30,
-                padding: "0 11px",
-                borderRadius: 7,
-                border: "1px solid color-mix(in srgb, var(--accent) 50%, var(--border))",
-                background: openHouseFirstConfigStarting ? "var(--bg-hover)" : "var(--accent)",
-                color: openHouseFirstConfigStarting ? "var(--text-muted)" : "white",
-                cursor: openHouseFirstConfigStarting ? "default" : "pointer",
-                fontSize: 12,
-                fontWeight: 650,
-              }}
-            >
-              {openHouseFirstConfigStarting ? "正在开启..." : "开始首次配置"}
-            </button>
           </div>
         )}
-
-        {modelConfigStatus?.hasUsableModel === false && !modelsConfigOpen && (
-          <div style={{
-            flexShrink: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            padding: "9px 12px",
-            borderBottom: "1px solid color-mix(in srgb, var(--accent) 28%, var(--border))",
-            background: "color-mix(in srgb, var(--accent) 8%, var(--bg-panel))",
-            color: "var(--text-muted)",
-            fontSize: 12,
-            lineHeight: 1.5,
-          }}>
-            <div style={{ minWidth: 0 }}>
-              <span style={{ color: "var(--text)", fontWeight: 650 }}>还没有可用模型。</span>
-              <span> 配置一个模型后就可以开启新对话。</span>
-            </div>
-            <button
-              type="button"
-              onClick={handleOpenModelsConfig}
-              style={{
-                flexShrink: 0,
-                height: 30,
-                padding: "0 11px",
-                borderRadius: 7,
-                border: "1px solid color-mix(in srgb, var(--accent) 50%, var(--border))",
-                background: "var(--accent)",
-                color: "white",
-                cursor: "pointer",
-                fontSize: 12,
-                fontWeight: 650,
-              }}
-            >
-              配置模型
-            </button>
-          </div>
-        )}
-
-        {/* Chat content */}
-        <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {showChat ? (
-            <ChatWindow
-              key={sessionKey}
-              session={selectedSession}
-              newSessionCwd={effectiveNewSessionCwd}
-              onAgentEnd={handleAgentEnd}
-              onSessionCreated={handleSessionCreated}
-              onSessionForked={handleSessionForked}
-              modelsRefreshKey={modelsRefreshKey}
-              chatInputRef={chatInputRef}
-              onBranchDataChange={handleBranchDataChange}
-              onSystemPromptChange={handleSystemPromptChange}
-              onSessionStatsChange={handleSessionStatsChange}
-              onSessionStatsPanelOpen={openSessionStatsPanel}
-              onOpenModelsConfig={handleOpenModelsConfig}
-              onContextUsageChange={handleContextUsageChange}
-              initialPrompt={openHouseInitialPrompt?.prompt ?? null}
-              initialPromptKey={openHouseInitialPrompt?.key ?? null}
-              onInitialPromptQueued={handleOpenHouseInitialPromptQueued}
-            />
-          ) : showPlaceholder ? (
-            activeCwd ? (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 15 }}>
-                请从侧边栏选择一个会话
-              </div>
-            ) : (
-              <div style={{ position: "absolute", top: 12, left: 12, display: "flex", alignItems: "flex-start", gap: 8, userSelect: "none", pointerEvents: "none" }}>
-                <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7, flexShrink: 0 }}>
-                  <line x1="20" y1="12" x2="4" y2="12" /><polyline points="10 6 4 12 10 18" />
-                </svg>
-                <div>
-                  <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>开始使用</div>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.8 }}>
-                    <span style={{ color: "var(--text-dim)", marginRight: 6 }}>1.</span>先在侧边栏选择项目目录<br />
-                    <span style={{ color: "var(--text-dim)", marginRight: 6 }}>2.</span>点击底部 <strong style={{ color: "var(--text)" }}>模型</strong> 配置大模型
-                  </div>
-                </div>
-              </div>
-            )
-          ) : null}
-        </div>
+        {view === "chats" && <ChatsPage assistants={assistants} grouped={sessionsByAssistant} onOpen={openSession} onNew={openNewChat} />}
+        {view === "capabilities" && <CapabilityCenter catalog={catalog} config={globalConfig} extensions={extensions} hostAssistantId={assistants.find((assistant) => !assistant.id.startsWith("legacy-") && !assistant.manifest.archived)?.id} loading={loading} error={error} onReload={() => void loadPlatform()} onConfigChanged={setGlobalConfig} onOpenModels={() => setModelsOpen(true)} />}
+        {view === "settings" && <SettingsPage isDark={isDark} toggleTheme={toggleTheme} includeArchived={includeArchived} setIncludeArchived={setIncludeArchived} platformUnavailable={platformUnavailable} onOpenModels={() => setModelsOpen(true)} />}
       </div>
-
-      {/* Right panel: file viewer — always mounted, width animated via CSS */}
-      <div
-        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          borderLeft: "1px solid var(--border)",
-          background: "var(--bg)",
-        }}
-      >
-        {/* Right panel tab bar */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <TabBar
-              tabs={fileTabs}
-              activeTabId={activeFileTabId ?? ""}
-              onSelectTab={setActiveFileTabId}
-              onCloseTab={handleCloseFileTab}
-            />
-          </div>
-
-        </div>
-
-        {/* File content */}
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          {activeFileTab?.filePath ? (
-            <FileViewer filePath={activeFileTab.filePath} cwd={activeCwd ?? undefined} />
-          ) : (
-            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
-              未打开文件
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-    {/* File panel toggle — always visible at top-right */}
-    <button
-      onClick={() => setRightPanelOpen((v) => !v)}
-      title={rightPanelOpen ? "隐藏文件面板" : "显示文件面板"}
-      style={{
-        position: "fixed", top: 0, right: 0, zIndex: 300,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        width: 36, height: 36, padding: 0,
-        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-        cursor: "pointer", transition: "color 0.12s",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-      </svg>
-    </button>
-    {modelsConfigOpen && (
-      <ModelsConfigWithFlow
-        onClose={handleModelsConfigClose}
-        onModelsChanged={handleModelsChanged}
-        initialNoModelMode={modelConfigStatus?.hasUsableModel === false}
-        onAddAppAndStartChat={handleAddAppAndStartChat}
-        canAddAppAndStartChat={canAddAppAndStartChat}
-        addAppAndStartChatDisabledReason={addAppAndStartChatDisabledReason}
-      />
-    )}
-    {skillsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
-      <SkillsConfig cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!} onClose={() => setSkillsConfigOpen(false)} />
-    )}
-    </>
+      <nav className="mobile-bottom-nav" aria-label="主导航">
+        <NavButton active={view === "assistants"} icon="∞" label="助手" onClick={() => setView("assistants")} />
+        <NavButton active={view === "chats"} icon="◌" label="对话" onClick={() => setView("chats")} />
+        <NavButton active={view === "capabilities"} icon="⌁" label="能力" onClick={() => setView("capabilities")} />
+        <NavButton active={view === "settings"} icon="⚙" label="设置" onClick={() => setView("settings")} />
+      </nav>
+      {editorAssistant !== undefined && <AssistantEditor assistant={editorAssistant} catalog={catalog} config={globalConfig} onClose={() => setEditorAssistant(undefined)} onSaved={(assistant) => { setAssistants((current) => [assistant, ...current.filter((item) => item.id !== assistant.id)]); setEditorAssistant(undefined); setNotice("助手已保存"); }} />}
+      {modelsOpen && <ModelsConfig onClose={() => setModelsOpen(false)} onModelsChanged={() => void loadPlatform()} />}
+      {notice && <div className="wuxianpi-toast" role="status">{notice}</div>}
+    </main>
   );
+}
+
+function NavButton({ active, icon, label, onClick }: { active: boolean; icon: string; label: string; onClick: () => void }) {
+  return <button type="button" className={active ? "active" : ""} onClick={onClick}><span>{icon}</span><small>{label}</small></button>;
+}
+
+function AssistantSkeleton() {
+  return <div className="assistant-grid">{[0, 1, 2].map((item) => <div key={item} className="assistant-card skeleton"><span /><div><i /><i /><i /></div></div>)}</div>;
+}
+
+function ChatsPage({ assistants, grouped, onOpen, onNew }: { assistants: AssistantSummary[]; grouped: { map: Map<string, SessionInfo[]>; legacy: SessionInfo[] }; onOpen: (session: SessionInfo) => void; onNew: (assistant: AssistantSummary) => void }) {
+  const groups = assistants.map((assistant) => ({ assistant, sessions: grouped.map.get(assistant.id) ?? [] })).filter((group) => group.sessions.length > 0);
+  return <div className="wuxianpi-page chats-page"><header className="wuxianpi-page-header"><div><span className="eyebrow">HISTORY</span><h1>对话</h1><p>历史按助手目录归组；旧项目会话保留在兼容分组。</p></div></header>
+    {groups.length === 0 && grouped.legacy.length === 0 && <div className="empty-hero"><div>◌</div><h2>还没有对话</h2><p>从助手首页开始一段新对话。</p></div>}
+    <div className="conversation-groups">{groups.map(({ assistant, sessions }) => <section key={assistant.id}><header><div className="assistant-mini-avatar">{avatarText(assistant)}</div><div><strong>{assistant.manifest.name}</strong><small>{sessions.length} 个对话</small></div><button onClick={() => onNew(assistant)}>新对话</button></header><div>{sessions.map((session) => <ConversationRow key={session.id} session={session} onOpen={onOpen} />)}</div></section>)}
+      {grouped.legacy.length > 0 && <section><header><div className="assistant-mini-avatar muted">L</div><div><strong>旧版工作区</strong><small>{grouped.legacy.length} 个未归属对话</small></div></header><div>{grouped.legacy.map((session) => <ConversationRow key={session.id} session={session} onOpen={onOpen} />)}</div></section>}
+    </div>
+  </div>;
+}
+
+function ConversationRow({ session, onOpen }: { session: SessionInfo; onOpen: (session: SessionInfo) => void }) {
+  return <button className="conversation-row" onClick={() => onOpen(session)}><span><strong>{session.name || session.firstMessage || "新对话"}</strong><small>{basename(session.cwd)} · {session.messageCount} 条消息</small></span><time>{formatTime(session.modified)}</time><em>›</em></button>;
+}
+
+function SettingsPage({ isDark, toggleTheme, includeArchived, setIncludeArchived, platformUnavailable, onOpenModels }: { isDark: boolean; toggleTheme: () => void; includeArchived: boolean; setIncludeArchived: (value: boolean) => void; platformUnavailable: boolean; onOpenModels: () => void }) {
+  return <div className="wuxianpi-page settings-page"><header className="wuxianpi-page-header"><div><span className="eyebrow">SETTINGS</span><h1>设置</h1><p>WuxianPi 运行在 Termux；Pi Runtime 保持原样。</p></div></header><div className="settings-stack"><section className="settings-card list"><button onClick={onOpenModels}><span><strong>模型服务</strong><small>Provider、API Key 与默认模型</small></span><em>›</em></button><label><span><strong>深色模式</strong><small>跟随你的阅读环境</small></span><input type="checkbox" checked={isDark} onChange={toggleTheme} /></label><label><span><strong>显示已归档助手</strong><small>在助手首页显示归档卡片</small></span><input type="checkbox" checked={includeArchived} onChange={(event) => setIncludeArchived(event.target.checked)} /></label></section><section className="settings-card"><header><div><strong>运行信息</strong><small>WuxianPi v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.1.0"} · Pi v{process.env.NEXT_PUBLIC_PI_VERSION ?? "unknown"}</small></div><span className={`status-pill ${platformUnavailable ? "warning" : "success"}`}>{platformUnavailable ? "兼容模式" : "能力层在线"}</span></header></section></div></div>;
 }

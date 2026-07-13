@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
 import "katex/dist/katex.min.css";
 import "./globals.css";
@@ -11,7 +11,20 @@ const notoSansMono = Noto_Sans_Mono({
 
 export const metadata: Metadata = {
   title: "WuxianPi",
-  description: "Mobile-first personal assistant web UI powered by Pi",
+  description: "手机优先、本地优先、由 Pi Runtime 驱动的个人角色助手平台",
+  applicationName: "WuxianPi",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, title: "WuxianPi", statusBarStyle: "default" },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#1a1a1a" },
+  ],
 };
 
 export default function RootLayout({
@@ -20,7 +33,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={notoSansMono.variable} suppressHydrationWarning>
+    <html lang="zh-CN" className={notoSansMono.variable} suppressHydrationWarning>
       <head>
         <script
           dangerouslySetInnerHTML={{

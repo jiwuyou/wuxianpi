@@ -2,6 +2,8 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { MarkdownBody } from "./MarkdownBody";
+import type { JsonValue, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
+import { ExtensionHost, matchToolPattern } from "./wuxianpi/ExtensionHost";
 import type {
   AgentMessage,
   UserMessage,
@@ -28,6 +30,9 @@ interface Props {
   onEditContent?: (content: string) => void;
   showTimestamp?: boolean;
   prevTimestamp?: number;
+  assistantId?: string;
+  sessionId?: string;
+  webExtensions?: WebExtensionSummary[];
 }
 
 function formatTime(ts?: number): string | null {
@@ -62,12 +67,12 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-export function MessageView({ message, isStreaming, toolResults, modelNames, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp }: Props) {
+export function MessageView({ message, isStreaming, toolResults, modelNames, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, assistantId, sessionId, webExtensions }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} assistantId={assistantId} sessionId={sessionId} webExtensions={webExtensions} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -284,6 +289,9 @@ function AssistantMessageView({
   modelNames,
   showTimestamp,
   prevTimestamp,
+  assistantId,
+  sessionId,
+  webExtensions,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -291,6 +299,9 @@ function AssistantMessageView({
   modelNames?: Record<string, string>;
   showTimestamp?: boolean;
   prevTimestamp?: number;
+  assistantId?: string;
+  sessionId?: string;
+  webExtensions?: WebExtensionSummary[];
 }) {
   const time = showTimestamp ? formatTime(message.timestamp) : null;
   const blocks = message.content ?? [];
@@ -450,7 +461,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {blocks.map((block, i) => (
-          <BlockView key={i} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} />
+          <BlockView key={i} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} assistantId={assistantId} sessionId={sessionId} webExtensions={webExtensions} />
         ))}
       </div>
 
@@ -503,7 +514,7 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number> }) {
+function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, assistantId, sessionId, webExtensions }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; assistantId?: string; sessionId?: string; webExtensions?: WebExtensionSummary[] }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} />;
   }
@@ -514,7 +525,7 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} assistantId={assistantId} sessionId={sessionId} webExtensions={webExtensions} />;
   }
   return null;
 }
@@ -575,7 +586,7 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
 }
 
 
-function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
+function ToolCallBlock({ block, result, duration, assistantId, sessionId, webExtensions = [] }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; assistantId?: string; sessionId?: string; webExtensions?: WebExtensionSummary[] }) {
   const [expanded, setExpanded] = useState(false);
   const inputStr = JSON.stringify(block.input, null, 2);
 
@@ -585,6 +596,14 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
     : null;
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = result?.isError ?? false;
+  const renderer = useMemo(() => {
+    for (const extension of webExtensions) {
+      for (const contribution of extension.manifest.contributes?.toolRenderers ?? []) {
+        if (matchToolPattern(contribution.toolPattern, block.toolName)) return { extension, contribution };
+      }
+    }
+    return null;
+  }, [block.toolName, webExtensions]);
 
   return (
     <div
@@ -649,13 +668,22 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
       )}
 
       {/* ── Paired result — only shown when expanded ── */}
-      {expanded && result && (
-        <PairedResult
-          text={resultText ?? ""}
-          isEmpty={resultIsEmpty}
-          isError={isError}
+      {expanded && result && (renderer ? (
+        <ExtensionHost
+          extension={renderer.extension}
+          entry={renderer.contribution.entry}
+          assistantId={assistantId}
+          sessionId={sessionId}
+          initialHeight={300}
+          initialData={{
+            toolName: block.toolName,
+            input: (block.input ?? null) as JsonValue,
+            result: resultText ?? "",
+            isError,
+          }}
+          fallback={<PairedResult text={resultText ?? ""} isEmpty={resultIsEmpty} isError={isError} />}
         />
-      )}
+      ) : <PairedResult text={resultText ?? ""} isEmpty={resultIsEmpty} isError={isError} />)}
     </div>
   );
 }

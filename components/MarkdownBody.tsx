@@ -1,10 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { useTheme } from "@/hooks/useTheme";
 import { markdownRehypePlugins, markdownRemarkPlugins } from "@/lib/markdown";
 
@@ -13,6 +10,29 @@ interface MarkdownBodyProps {
   className?: string;
   isStreaming?: boolean;
 }
+
+const LazySyntaxHighlighter = lazy(async () => {
+  const [{ Prism }, lightTheme, darkTheme] = await Promise.all([
+    import("react-syntax-highlighter"),
+    import("react-syntax-highlighter/dist/cjs/styles/prism/vs"),
+    import("react-syntax-highlighter/dist/cjs/styles/prism/vsc-dark-plus"),
+  ]);
+  function DeferredHighlighter({ code, lang, dark }: { code: string; lang: string; dark: boolean }) {
+    return (
+      <Prism
+        language={lang || "text"}
+        style={dark ? darkTheme.default : lightTheme.default}
+        showLineNumbers
+        lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
+        customStyle={{ margin: 0, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.62, borderRadius: 0, background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))" }}
+        codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+      >
+        {code}
+      </Prism>
+    );
+  }
+  return { default: DeferredHighlighter };
+});
 
 function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -50,7 +70,7 @@ export function MarkdownBody({ children, className, isStreaming }: MarkdownBodyP
               if (lang === "mermaid") {
                 return <MermaidBlock code={raw.replace(/\n$/, "")} isStreaming={isStreaming} />;
               }
-              return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
+              return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} isStreaming={isStreaming} />;
             }
             return (
               <code
@@ -166,7 +186,7 @@ function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boole
   );
 
   if (!showPreview || isStreaming) {
-    return <CodeBlock code={code} lang="mermaid" headerAction={previewButton} />;
+    return <CodeBlock code={code} lang="mermaid" headerAction={previewButton} isStreaming={isStreaming} />;
   }
 
   const body =
@@ -192,9 +212,10 @@ function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boole
   );
 }
 
-function CodeBlock({ code, lang, headerAction }: { code: string; lang: string; headerAction?: ReactNode }) {
+function CodeBlock({ code, lang, headerAction, isStreaming }: { code: string; lang: string; headerAction?: ReactNode; isStreaming?: boolean }) {
   const { isDark } = useTheme();
   const [copied, setCopied] = useState(false);
+  const [highlight, setHighlight] = useState(false);
 
   const copy = () => {
     copyText(code).then(() => {
@@ -209,6 +230,11 @@ function CodeBlock({ code, lang, headerAction }: { code: string; lang: string; h
         <span className="markdown-code-lang">{lang || "text"}</span>
         <div className="markdown-code-actions">
           {headerAction}
+          {lang && lang !== "text" && (
+            <button onClick={() => setHighlight((value) => !value)} disabled={isStreaming} className={["markdown-code-action", highlight ? "is-active" : ""].filter(Boolean).join(" ")}>
+              {highlight ? "plain" : "highlight"}
+            </button>
+          )}
           <button
             onClick={copy}
             className="markdown-code-action"
@@ -217,23 +243,9 @@ function CodeBlock({ code, lang, headerAction }: { code: string; lang: string; h
           </button>
         </div>
       </div>
-      <SyntaxHighlighter
-        language={lang || "text"}
-        style={isDark ? vscDarkPlus : vs}
-        showLineNumbers
-        lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
-        customStyle={{
-          margin: 0,
-          padding: "11px 13px",
-          fontSize: 12.5,
-          lineHeight: 1.62,
-          borderRadius: 0,
-          background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
-        }}
-        codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-      >
-        {code}
-      </SyntaxHighlighter>
+      {highlight && !isStreaming ? (
+        <Suspense fallback={<pre className="markdown-code-plain"><code>{code}</code></pre>}><LazySyntaxHighlighter code={code} lang={lang} dark={isDark} /></Suspense>
+      ) : <pre className="markdown-code-plain"><code>{code}</code></pre>}
     </div>
   );
 }
