@@ -14,15 +14,15 @@ and CSS.
 
 ```text
 extension-id/
-├── myweb-extension.json
+├── wuxianpi-extension.json
 └── ui/
     ├── index.html
     ├── app.js
     └── style.css
 ```
 
-The legacy manifest filename is retained for compatibility, while all runtime
-protocol and product identifiers use WuxianPi.
+The manifest must be named `wuxianpi-extension.json` and live at the extension
+root. Installation rejects archives that use another manifest filename.
 
 Supported contribution types include full pages, settings panels, assistant
 editor tabs, chat actions, and tool-result renderers.
@@ -55,4 +55,3 @@ Tool calls still pass through the normal capability and permission broker.
 An invalid manifest, missing asset, denied permission, crashed iframe, or failed
 renderer must not break chat. WuxianPi falls back to its generic text/JSON tool
 result renderer and reports a capability diagnostic.
-
