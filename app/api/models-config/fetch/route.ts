@@ -447,7 +447,7 @@ export async function POST(req: Request) {
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       ...(providerId === "openrouter" ? {
         "HTTP-Referer": "http://localhost:30141",
-        "X-Title": "pi-web",
+        "X-Title": "WuxianPi",
       } : {}),
     };
     parser = parseOpenAiModels;

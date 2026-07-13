@@ -507,7 +507,7 @@ export class AgentSessionWrapper {
       get theme() { return undefined; },
       getAllThemes: () => [],
       getTheme: () => undefined,
-      setTheme: () => ({ success: false, error: "Theme switching is not supported in pi-web extension UI yet" }),
+      setTheme: () => ({ success: false, error: "Theme switching is not supported in WuxianPi extension UI yet" }),
       getToolsExpanded: () => false,
       setToolsExpanded: () => {},
     };
