@@ -1,0 +1,7 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+: "${HOME:?HOME is required}"
+root=${WUXIANPI_INSTALL_ROOT:-$HOME/.local/share/wuxianpi}
+exec node "$root/runtime/dist/index.js" "$@"
+

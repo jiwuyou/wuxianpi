@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "product": "wuxianpi",
+  "hostContractVersion": 1,
+  "minHostVersion": 1,
+  "runtime": {
+    "serviceId": "pi-agent",
+    "origin": "http://127.0.0.1:8765",
+    "listen": "127.0.0.1:8765",
+    "commands": {
+      "cli": "wuxianpi",
+      "runtime": "wuxianpi-node",
+      "start": "wuxianpi-node-start"
+    }
+  },
+  "protocol": {
+    "name": "wuxianpi-sdk-v1",
+    "version": 2,
+    "websocketPath": "/v1/ws"
+  },
+  "http": {
+    "healthPath": "/health",
+    "statusPath": "/v1/status",
+    "uiMetadataPath": "/v1/ui/metadata",
+    "webRootPath": "/",
+    "webApiBasePath": "/api/web/v1",
+    "modelSetup": [
+      { "method": "GET", "path": "/api/web/v1/models/setup" },
+      { "method": "POST", "path": "/api/web/v1/models/fetch" },
+      { "method": "POST", "path": "/api/web/v1/models/test" },
+      { "method": "POST", "path": "/api/web/v1/models/apply" }
+    ]
+  },
+  "storage": {
+    "agentDir": "$HOME/.pi/agent",
+    "sessionsDir": "$HOME/.pi/agent/sessions",
+    "workspaceDir": "$HOME/workspace",
+    "productDir": "$HOME/.local/share/wuxianpi",
+    "serviceSpec": "$HOME/.config/openhouseai/service-manager/services.d/pi-agent.json"
+  },
+  "serviceManager": {
+    "provider": "termux-process",
+    "workingDirectory": "$HOME/workspace",
+    "restartMode": "always",
+    "health": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/health",
+      "interval": "15s",
+      "timeout": "3s"
+    }
+  },
+  "release": {
+    "manifestSchemaVersion": 1,
+    "platform": "termux-android-arm64",
+    "artifactKinds": ["web", "runtime", "base", "install-arm64"]
+  }
+}
+

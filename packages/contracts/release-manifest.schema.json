@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wuxianpi.local/contracts/release-manifest.schema.json",
+  "title": "WuxianPi Release Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "product",
+    "version",
+    "channel",
+    "releasedAt",
+    "minHostVersion",
+    "hostContractVersion",
+    "protocol",
+    "service",
+    "versions",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "product": { "const": "wuxianpi" },
+    "version": { "type": "string", "minLength": 1 },
+    "channel": { "type": "string", "minLength": 1 },
+    "releasedAt": { "type": "string", "format": "date-time" },
+    "minHostVersion": { "type": "integer", "minimum": 1 },
+    "hostContractVersion": { "const": 1 },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "wuxianpi-sdk-v1" },
+        "version": { "const": 2 }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "origin", "healthPath", "uiMetadataPath", "websocketPath", "webApiBasePath"],
+      "properties": {
+        "id": { "const": "pi-agent" },
+        "origin": { "const": "http://127.0.0.1:8765" },
+        "healthPath": { "const": "/health" },
+        "uiMetadataPath": { "const": "/v1/ui/metadata" },
+        "websocketPath": { "const": "/v1/ws" },
+        "webApiBasePath": { "const": "/api/web/v1" }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["web", "runtime", "base"],
+      "properties": {
+        "web": { "type": "string", "minLength": 1 },
+        "runtime": { "type": "string", "minLength": 1 },
+        "base": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["web", "runtime", "base", "install-arm64"],
+      "properties": {
+        "web": { "$ref": "#/$defs/artifact" },
+        "runtime": { "$ref": "#/$defs/artifact" },
+        "base": { "$ref": "#/$defs/artifact" },
+        "install-arm64": { "$ref": "#/$defs/artifact" }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "url", "size", "sha256"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}
+

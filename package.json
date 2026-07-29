@@ -25,6 +25,15 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/**/*.test.ts",
+    "web:dev": "npm --prefix apps/web run dev",
+    "web:build": "npm --prefix apps/web run build",
+    "web:typecheck": "npm --prefix apps/web run typecheck",
+    "web:test": "npm --prefix apps/web run test",
+    "runtime:build": "npm --prefix runtime/wuxianpi-node run build",
+    "runtime:typecheck": "npm --prefix runtime/wuxianpi-node run typecheck",
+    "runtime:test": "npm --prefix runtime/wuxianpi-node run test",
+    "contracts:check": "python3 -m json.tool packages/contracts/runtime-manifest.v1.json >/dev/null && python3 -m json.tool packages/contracts/release-manifest.schema.json >/dev/null && bash packaging/termux/build-release.sh --help >/dev/null",
+    "product:check": "npm run web:typecheck && npm run web:test && npm run runtime:typecheck && npm run contracts:check",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {
