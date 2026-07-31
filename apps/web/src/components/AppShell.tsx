@@ -1,6 +1,7 @@
 "use client";
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Store } from "lucide-react";
 import type { AssistantSummary, CapabilityCatalog, GlobalWuxianPiConfigV1, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
 import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
@@ -25,13 +26,14 @@ import {
 const ModelsConfig = lazy(() => import("./ModelsConfig").then((module) => ({ default: module.ModelsConfig })));
 const AssistantEditor = lazy(() => import("./wuxianpi/AssistantEditor").then((module) => ({ default: module.AssistantEditor })));
 const CapabilityCenter = lazy(() => import("./wuxianpi/CapabilityCenter").then((module) => ({ default: module.CapabilityCenter })));
+const Marketplace = lazy(() => import("./wuxianpi/Marketplace").then((module) => ({ default: module.Marketplace })));
 const BranchNavigator = lazy(() => import("./BranchNavigator").then((module) => ({ default: module.BranchNavigator })));
 
 const LAST_SESSION_KEY = "wuxianpi:last-session-id";
 const LAST_ASSISTANT_KEY = "wuxianpi:last-assistant-id";
 const DEFAULT_ASSISTANT_ID = "wuxianpi";
 
-type PanelView = "assistants" | "capabilities" | "settings" | null;
+type PanelView = "assistants" | "capabilities" | "marketplace" | "settings" | null;
 type ShellOverlayContext = {
   panel: PanelView;
   l1Open: boolean;
@@ -498,6 +500,7 @@ export function AppShell() {
           <button type="button" onClick={() => openPanel("assistants")}><span>∞</span><div><strong>助手库</strong><small>创建、编辑、导入导出</small></div><em>›</em></button>
           <button type="button" onClick={() => { setL2Open(true); setL1Open(false); }}><span>◌</span><div><strong>全部对话</strong><small>按助手分组的历史列表</small></div><em>›</em></button>
           <button type="button" onClick={() => openPanel("capabilities")}><span>⌁</span><div><strong>能力中心</strong><small>模型默认、工具、MCP、TTS</small></div><em>›</em></button>
+          <button type="button" onClick={() => openPanel("marketplace")}><span><Store size={18} /></span><div><strong>WuxianPi 市场</strong><small>Package、更新与助手绑定</small></div><em>›</em></button>
           <button type="button" onClick={() => openPanel("settings")}><span>⚙</span><div><strong>设置</strong><small>主题、模型服务、运行信息</small></div><em>›</em></button>
         </nav>
         <footer className="shell-drawer-footer">
@@ -546,7 +549,7 @@ export function AppShell() {
         <div className="shell-panel-layer" role="dialog" aria-modal="true">
           <header className="shell-panel-header">
             <button type="button" className="icon-button" onClick={() => setPanel(null)} aria-label="返回">‹</button>
-            <strong>{panel === "assistants" ? "助手库" : panel === "capabilities" ? "能力中心" : "设置"}</strong>
+            <strong>{panel === "assistants" ? "助手库" : panel === "capabilities" ? "能力中心" : panel === "marketplace" ? "WuxianPi 市场" : "设置"}</strong>
             <span className="shell-panel-header-spacer" />
           </header>
           <div className="shell-panel-body">
@@ -582,6 +585,11 @@ export function AppShell() {
                   onConfigChanged={setGlobalConfig}
                   onOpenModels={openModelsPage}
                 />
+              </Suspense>
+            )}
+            {panel === "marketplace" && (
+              <Suspense fallback={<div className="wuxianpi-state">正在加载 WuxianPi 市场…</div>}>
+                <Marketplace assistants={assistants} />
               </Suspense>
             )}
             {panel === "settings" && (

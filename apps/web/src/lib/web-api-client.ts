@@ -1,4 +1,17 @@
 import type { AgentMessage, SessionInfo, SessionTreeNode } from "@/lib/types";
+import type {
+  InstalledPackageListResponse,
+  LocalContribution,
+  LocalPackage,
+  MarketCategory,
+  MarketPackageDetailPayload,
+  PackageAssistantBinding,
+  PackageListResponse,
+  PackageOperation,
+  PackageOperationListResponse,
+  PublisherSubmission,
+  PublisherSubmissionInput,
+} from "@/lib/package-market";
 
 export const WEB_API_BASE = "/api/web/v1";
 
@@ -72,6 +85,162 @@ export function normalizeSessionList(body: unknown): SessionInfo[] {
       parentSessionId: text(row.parentSessionId) || idByPath.get(parentPath) || undefined,
     };
   }).filter((session) => session.id.length > 0);
+}
+
+function recordArray(value: unknown): JsonRecord[] {
+  return Array.isArray(value) ? value.map(record) : [];
+}
+
+function packageStatus(value: unknown): LocalPackage["status"] {
+  switch (text(value)) {
+    case "merge_conflict": return "merge_conflict";
+    case "build_failed": return "build_failed";
+    case "test_failed": return "test_failed";
+    case "activation_failed": return "activation_failed";
+    case "disabled": return "disabled";
+    case "revoked": return "revoked";
+    case "update_available": return "update_available";
+    case "ready":
+    case "active": return "active";
+    default: return "installed";
+  }
+}
+
+function normalizeLocalContribution(value: unknown): LocalContribution | null {
+  const row = record(value);
+  const contribution = record(row.contribution ?? row);
+  const id = optionalText(row.id ?? contribution.id);
+  const type = optionalText(contribution.type);
+  if (!id || !type) return null;
+  return {
+    id,
+    type: type as LocalContribution["type"],
+    name: optionalText(contribution.name) ?? id,
+    ...(optionalText(contribution.description) ? { description: optionalText(contribution.description) } : {}),
+    enabled: row.enabled === true,
+    ...(typeof contribution.assistantSelectable === "boolean" ? { assistantSelectable: contribution.assistantSelectable } : {}),
+    ...(row.selfRelated === true ? { selfRelated: true } : {}),
+    ...(optionalText(contribution.experienceSpaceId) ? { defaultExperienceSpaceId: optionalText(contribution.experienceSpaceId) } : {}),
+  };
+}
+
+export function normalizeLocalPackage(value: unknown, update?: unknown): LocalPackage {
+  const row = record(value);
+  const updateRow = record(update);
+  const git = record(row.git);
+  const lastError = record(row.lastError);
+  const sourceStatus = row.sourceStatus ?? git.sourceStatus;
+  const baseCommit = text(row.baseCommit);
+  const localHead = text(row.localHead, baseCommit);
+  const targetCommit = optionalText(updateRow.targetCommit ?? row.targetCommit);
+  const activeRevision = optionalText(row.activeRevisionId ?? row.activeRevision);
+  const contributionRows = recordArray(row.contributions);
+  const contributions = contributionRows.flatMap((item) => {
+    const normalized = normalizeLocalContribution(item);
+    return normalized ? [normalized] : [];
+  });
+  const enabledIds = new Set(stringArray(row.enabledContributionIds));
+  for (const contribution of contributions) {
+    if (enabledIds.has(contribution.id)) contribution.enabled = true;
+  }
+  const bindings = recordArray(row.bindings).flatMap((binding) => {
+    const assistantId = optionalText(binding.assistantId);
+    if (!assistantId) return [];
+    return [{
+      assistantId,
+      enabledContributionIds: stringArray(binding.enabledContributionIds),
+      experienceSpaces: Object.fromEntries(Object.entries(record(binding.experienceSpaces)).flatMap(([id, space]) => optionalText(space) ? [[id, optionalText(space)!]] : [])),
+    }];
+  });
+  const conflicts = stringArray(git.conflicts ?? record(lastError.details).conflicts);
+  const status = updateRow.available === true ? "update_available" : packageStatus(sourceStatus);
+  const errorMessage = optionalText(lastError.message);
+  const stage = status === "merge_conflict" ? "merge" : status === "test_failed" ? "test" : status === "activation_failed" ? "activate" : "build";
+  const gitStatus = stringArray(git.status);
+  return {
+    packageId: text(row.packageId),
+    name: text(row.name, text(row.packageId)),
+    version: text(row.version, "0.0.0"),
+    status,
+    baseCommit,
+    localHead,
+    ...(targetCommit ? { targetCommit } : {}),
+    activeCommit: activeRevision ?? (status === "active" ? localHead : baseCommit),
+    ...(optionalText(row.knownGoodRevisionId ?? row.knownGoodCommit) ? { knownGoodCommit: optionalText(row.knownGoodRevisionId ?? row.knownGoodCommit) } : {}),
+    ...(activeRevision ? { activeRevision } : {}),
+    hasLocalChanges: localHead !== baseCommit || gitStatus.length > 0,
+    ...(updateRow.available === true && optionalText(updateRow.releaseId) ? { updateReleaseId: optionalText(updateRow.releaseId) } : {}),
+    ...(updateRow.available === true && optionalText(updateRow.version) ? { updateVersion: optionalText(updateRow.version) } : {}),
+    currentActivePreserved: status === "merge_conflict" || status === "build_failed" || status === "test_failed" || status === "activation_failed" ? true : undefined,
+    ...(row.selfRelated === true ? { selfRelated: true } : {}),
+    ...(optionalText(row.maintenanceRecordPath) ? { maintenanceRecordPath: optionalText(row.maintenanceRecordPath) } : {}),
+    contributions,
+    assistantBindings: bindings,
+    failure: errorMessage ? {
+      stage,
+      message: errorMessage,
+      ...(optionalText(lastError.logPath) ? { logPath: optionalText(lastError.logPath) } : {}),
+      ...(conflicts.length ? { conflicts } : {}),
+    } : null,
+    ...(optionalText(row.installedAt) ? { installedAt: optionalText(row.installedAt) } : {}),
+    ...(optionalText(row.updatedAt) ? { updatedAt: optionalText(row.updatedAt) } : {}),
+  };
+}
+
+function normalizePackageOperation(value: unknown): PackageOperation {
+  const row = record(value);
+  const details = record(row.details);
+  const phase = text(row.phase ?? row.status);
+  const type = text(row.type, "update");
+  const status: PackageOperation["status"] = phase === "succeeded" || phase === "success" ? "success"
+    : phase === "failed" ? "failed"
+      : phase === "started" || phase === "running" || phase === "progress" ? "running"
+        : phase === "cancelled" ? "cancelled" : "queued";
+  const events = recordArray(row.events).flatMap((value) => {
+    const event = record(value);
+    const at = optionalText(event.at);
+    const message = optionalText(event.message);
+    if (!at || !message) return [];
+    const level = text(event.level);
+    const normalizedLevel: "info" | "warning" | "error" = level === "warning" || level === "error" ? level : "info";
+    return [{ at, level: normalizedLevel, message }];
+  });
+  return {
+    operationId: text(row.operationId, `operation-${Date.now()}`),
+    packageId: text(row.packageId, "system"),
+    ...(optionalText(row.packageName) ? { packageName: optionalText(row.packageName) } : {}),
+    type: (type === "commit-local" ? "commit" : type.includes("contribution") ? (type.startsWith("disable") ? "disable" : "enable") : type) as PackageOperation["type"],
+    status,
+    summary: text(row.summary ?? row.message, type),
+    selfRelated: row.selfRelated === true || details.selfRelated === true || Boolean(optionalText(row.maintenanceRecordPath ?? details.maintenanceRecordPath)),
+    ...(optionalText(row.maintenanceRecordPath ?? details.maintenanceRecordPath) ? { maintenanceRecordPath: optionalText(row.maintenanceRecordPath ?? details.maintenanceRecordPath) } : {}),
+    activePackagePreserved: details.activePackagePreserved === true || text(row.message).includes("active revision was not changed"),
+    ...(optionalText(row.fromCommit ?? details.fromCommit) ? { fromCommit: optionalText(row.fromCommit ?? details.fromCommit) } : {}),
+    ...(optionalText(row.toCommit ?? details.toCommit) ? { toCommit: optionalText(row.toCommit ?? details.toCommit) } : {}),
+    ...(optionalText(row.logPath ?? details.logPath) ? { logPath: optionalText(row.logPath ?? details.logPath) } : {}),
+    ...(status === "failed" ? { error: text(row.error ?? row.message, "Package operation failed") } : {}),
+    ...(events.length ? { events } : {}),
+    startedAt: text(row.startedAt ?? row.time, new Date().toISOString()),
+    ...(optionalText(row.completedAt) ? { completedAt: optionalText(row.completedAt) } : {}),
+  };
+}
+
+function successfulPackageOperation(type: PackageOperation["type"], packageId: string, value: unknown): PackageOperation {
+  const row = record(value);
+  const nestedOperation = record(row.operation);
+  const operation = Object.keys(nestedOperation).length > 0 ? nestedOperation : row;
+  if (optionalText(operation.operationId)) {
+    return normalizePackageOperation({ ...operation, packageId: operation.packageId ?? packageId, type: operation.type ?? type });
+  }
+  return normalizePackageOperation({
+    operationId: row.operationId ?? `completed-${Date.now()}`,
+    packageId,
+    type,
+    phase: "succeeded",
+    message: `${type} completed`,
+    details: row,
+    time: new Date().toISOString(),
+  });
 }
 
 export interface NormalizedModels {
@@ -699,7 +868,114 @@ export class WebApiClient {
     return this.request<JsonRecord>("/skills/install", { method: "POST", body: JSON.stringify({ source, ...options }) });
   }
 
-  endpoint(group: "assistants" | "files" | "skills" | "extensions" | "capabilities", suffix = "") {
+  marketPackages(options: { q?: string; category?: MarketCategory | ""; contributionType?: string; cursor?: string; limit?: number } = {}) {
+    return this.request<PackageListResponse>("/market/packages", {}, { ...options, category: options.category || undefined });
+  }
+
+  async marketPackage(packageId: string, releaseId?: string): Promise<MarketPackageDetailPayload> {
+    const encoded = encodeURIComponent(packageId);
+    const [marketResult, releasesResult, planResult, localResult] = await Promise.allSettled([
+      this.request<{ package: MarketPackageDetailPayload["package"] }>(`/market/packages/${encoded}`),
+      this.request<{ releases: MarketPackageDetailPayload["releases"] }>(`/market/packages/${encoded}/releases`),
+      this.request<MarketPackageDetailPayload["installPlan"]>(`/market/packages/${encoded}/install-plan`, {}, releaseId ? { releaseId } : undefined),
+      this.request<{ package: unknown }>(`/packages/${encoded}`),
+    ]);
+    const unavailable = [marketResult, releasesResult, planResult].find((result) => result.status === "rejected" && (
+      result.reason instanceof TypeError || (result.reason instanceof WebApiError && [502, 503, 504].includes(result.reason.status))
+    ));
+    if (unavailable?.status === "rejected" && localResult.status === "rejected") throw unavailable.reason;
+    if (marketResult.status === "rejected" && localResult.status === "rejected") throw marketResult.reason;
+    return {
+      package: marketResult.status === "fulfilled" ? marketResult.value.package : null,
+      releases: releasesResult.status === "fulfilled" ? releasesResult.value.releases : [],
+      installPlan: planResult.status === "fulfilled" ? planResult.value : null,
+      installed: localResult.status === "fulfilled" ? normalizeLocalPackage(localResult.value.package) : null,
+      ...(unavailable?.status === "rejected" ? {
+        hubOffline: true,
+        hubError: unavailable.reason instanceof Error ? unavailable.reason.message : String(unavailable.reason),
+      } : {}),
+    };
+  }
+
+  async installedPackages(): Promise<InstalledPackageListResponse> {
+    const payload = await this.request<{ packages: unknown[] }>("/packages");
+    return { packages: (payload.packages ?? []).map((item) => normalizeLocalPackage(item)) };
+  }
+
+  async packageUpdates(): Promise<InstalledPackageListResponse> {
+    const [installed, updates] = await Promise.all([
+      this.installedPackages(),
+      this.request<{ updates: unknown[] }>("/packages/updates"),
+    ]);
+    const updatesById = new Map((updates.updates ?? []).map((item) => [text(record(item).packageId), item]));
+    return {
+      packages: installed.packages.flatMap((item) => {
+        const update = updatesById.get(item.packageId);
+        return record(update).available === true ? [normalizeLocalPackage(item, update)] : [];
+      }),
+    };
+  }
+
+  async packageOperations(options: { packageId?: string; cursor?: string; limit?: number } = {}): Promise<PackageOperationListResponse> {
+    const payload = await this.request<{ operations: unknown[] }>("/packages/operations", {}, options);
+    return { operations: (payload.operations ?? []).map(normalizePackageOperation) };
+  }
+
+  async packageAssistantBinding(assistantId: string): Promise<PackageAssistantBinding> {
+    const payload = await this.request<{ binding: PackageAssistantBinding }>(`/packages/bindings/${encodeURIComponent(assistantId)}`);
+    return payload.binding;
+  }
+
+  async installMarketPackage(packageId: string, releaseId?: string) {
+    const result = await this.request<unknown>("/packages", {
+      method: "POST",
+      body: JSON.stringify({ packageId, ...(releaseId ? { releaseId } : {}) }),
+    });
+    return successfulPackageOperation("install", packageId, result);
+  }
+
+  async updateManagedPackage(packageId: string, releaseId?: string) {
+    const result = await this.request<unknown>(`/packages/${encodeURIComponent(packageId)}/update`, {
+      method: "POST",
+      body: JSON.stringify(releaseId ? { releaseId } : {}),
+    });
+    return successfulPackageOperation("update", packageId, result);
+  }
+
+  async uninstallManagedPackage(packageId: string, keepData = true) {
+    const result = await this.request<unknown>(`/packages/${encodeURIComponent(packageId)}`, { method: "DELETE" }, { purgeData: !keepData });
+    return successfulPackageOperation("uninstall", packageId, result);
+  }
+
+  async setPackageContribution(packageId: string, contributionId: string, enabled: boolean) {
+    const result = await this.request<unknown>(`/packages/${encodeURIComponent(packageId)}/contributions/${encodeURIComponent(contributionId)}/${enabled ? "enable" : "disable"}`, { method: "POST", body: "{}" });
+    return successfulPackageOperation(enabled ? "enable" : "disable", packageId, result);
+  }
+
+  async commitPackageChanges(packageId: string, message: string) {
+    const result = await this.request<unknown>(`/packages/${encodeURIComponent(packageId)}/commit`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    });
+    return successfulPackageOperation("commit", packageId, result);
+  }
+
+  async setPackageAssistantBinding(packageId: string, assistantId: string, enabledContributionIds: string[], experienceSpaces: Record<string, string>) {
+    const result = await this.request<unknown>(`/packages/bindings/${encodeURIComponent(assistantId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabledContributionIds, experienceSpaces }),
+    });
+    return successfulPackageOperation("bind", packageId, result);
+  }
+
+  submitMarketPackage(input: PublisherSubmissionInput) {
+    return this.request<{ submission: PublisherSubmission }>("/packages/publisher/submissions", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  endpoint(group: "assistants" | "files" | "skills" | "extensions" | "capabilities" | "packages", suffix = "") {
     return `/${group}${suffix ? (suffix.startsWith("/") ? suffix : `/${suffix}`) : ""}`;
   }
 }
