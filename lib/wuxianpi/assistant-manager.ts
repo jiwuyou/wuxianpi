@@ -16,11 +16,69 @@ import { allowFileRoot } from "../file-access";
 import { assistantPath, assertSafeId, getWuxianPiPaths, isPathInside } from "./paths";
 import { ensurePrivateDir, readJsonFile, removeIfExists, writeJsonAtomic } from "./storage";
 
+export const DEFAULT_ASSISTANT_ID = "wuxianpi";
+
 const DEFAULT_FILES: AssistantFiles = {
   agents: "# Identity\n\nYou are a helpful personal assistant.\n\n# Working style\n\n- Be concise, honest, and practical.\n",
   memory: "# Long-term memory\n\n",
   workspaces: "# External workspaces\n\nDescribe external paths and operating rules here.\n",
 };
+
+const DEFAULT_ASSISTANT_MANIFEST: AssistantManifestV1 = {
+  schemaVersion: WUXIANPI_SCHEMA_VERSION,
+  name: "WuxianPi",
+  description: "默认个人助手",
+  greeting: "你好，我是 WuxianPi。今天想聊些什么？",
+  starterPrompts: ["帮我整理今天的待办", "解释一个概念", "帮我写一段文字"],
+  model: "inherit",
+  thinkingLevel: "inherit",
+  tools: "inherit",
+  skills: "inherit",
+  mcpServers: "inherit",
+  webExtensions: "inherit",
+  tts: "inherit",
+};
+
+const DEFAULT_ASSISTANT_FILES: AssistantFiles = {
+  agents: "# Identity\n\n你是 WuxianPi，运行在用户设备上的默认个人助手。\n\n# Working style\n\n- 简洁、诚实、可执行\n- 优先完成用户目标，不确定时先问清楚\n- 尊重用户隐私与本地数据边界\n",
+  memory: "# Long-term memory\n\n",
+  workspaces: "# External workspaces\n\nDescribe external paths and operating rules here.\n",
+};
+
+/** Ensure the built-in default assistant exists (id: wuxianpi). Idempotent. */
+export async function ensureDefaultAssistant(): Promise<AssistantSummary> {
+  const directory = assistantPath(DEFAULT_ASSISTANT_ID);
+  const manifestFile = path.join(directory, "assistant.json");
+  try {
+    await lstat(manifestFile);
+    return getAssistant(DEFAULT_ASSISTANT_ID);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  // Partial leftover directory (e.g. interrupted create) — remove and recreate.
+  try {
+    await lstat(directory);
+    await removeIfExists(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  try {
+    return await createAssistant({
+      id: DEFAULT_ASSISTANT_ID,
+      manifest: DEFAULT_ASSISTANT_MANIFEST,
+      files: DEFAULT_ASSISTANT_FILES,
+    });
+  } catch (error) {
+    // Concurrent create: prefer reading if it became valid.
+    try {
+      return await getAssistant(DEFAULT_ASSISTANT_ID);
+    } catch {
+      throw error;
+    }
+  }
+}
 
 function validateManifest(input: AssistantManifestV1 | null | undefined): AssistantManifestV1 {
   if (!input || input.schemaVersion !== WUXIANPI_SCHEMA_VERSION) throw new Error("Unsupported assistant schema");
@@ -104,6 +162,7 @@ function assistantDiagnostics(manifest: AssistantManifestV1): CapabilityDiagnost
 
 export async function listAssistants(options: { includeArchived?: boolean } = {}): Promise<AssistantSummary[]> {
   await ensurePrivateDir(getWuxianPiPaths().assistants);
+  await ensureDefaultAssistant();
   const [entries, sessions] = await Promise.all([readdir(getWuxianPiPaths().assistants, { withFileTypes: true }), listAllSessions()]);
   const results: AssistantSummary[] = [];
   for (const entry of entries) {
@@ -121,7 +180,14 @@ export async function listAssistants(options: { includeArchived?: boolean } = {}
       });
     }
   }
-  return results.sort((a, b) => (b.lastActiveAt ?? "").localeCompare(a.lastActiveAt ?? "") || a.manifest.name.localeCompare(b.manifest.name));
+  return results.sort((a, b) => {
+    // Keep the default assistant near the top when both lack recent activity.
+    if (!a.lastActiveAt && !b.lastActiveAt) {
+      if (a.id === DEFAULT_ASSISTANT_ID && b.id !== DEFAULT_ASSISTANT_ID) return -1;
+      if (b.id === DEFAULT_ASSISTANT_ID && a.id !== DEFAULT_ASSISTANT_ID) return 1;
+    }
+    return (b.lastActiveAt ?? "").localeCompare(a.lastActiveAt ?? "") || a.manifest.name.localeCompare(b.manifest.name);
+  });
 }
 
 export async function readAssistantBundle(id: string): Promise<AssistantBundleV1> {

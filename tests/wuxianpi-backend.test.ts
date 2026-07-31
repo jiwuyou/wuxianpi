@@ -85,6 +85,16 @@ if (!bundled) {
       files: { agents: "# Identity\n\nROLE_MARKER", memory: "memory", workspaces: "workspace" },
     });
 
+    await t.test("default wuxianpi assistant is seeded on list and stays idempotent", async () => {
+      const listed = await assistants.listAssistants();
+      const defaults = listed.filter((item) => item.id === assistants.DEFAULT_ASSISTANT_ID);
+      assert.equal(defaults.length, 1);
+      assert.equal(defaults[0].manifest.name, "WuxianPi");
+      const again = await assistants.listAssistants();
+      assert.equal(again.filter((item) => item.id === assistants.DEFAULT_ASSISTANT_ID).length, 1);
+      assert.equal(listed.findIndex((item) => item.id === assistants.DEFAULT_ASSISTANT_ID), 0);
+    });
+
     await t.test("secrets are mode 0600 and config APIs mask inline values", async () => {
       await secrets.setSecret("secret:test", "top-secret");
       assert.equal((await stat(paths.getWuxianPiPaths().secrets)).mode & 0o777, 0o600);
