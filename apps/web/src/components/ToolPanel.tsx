@@ -8,15 +8,24 @@ export interface ToolEntry {
   active: boolean;
 }
 
-export type ToolPreset = "none" | "default" | "full";
+export type ToolPreset = "assistant" | "none" | "default" | "full" | "custom";
+export type SelectableToolPreset = Exclude<ToolPreset, "custom">;
 export const PRESET_NONE: string[] = [];
 export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write"];
 export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls"];
 const BUILTIN_TOOL_NAMES = new Set(PRESET_FULL);
 
+export function toolNamesForPreset(preset: ToolPreset): string[] | undefined {
+  if (preset === "none") return PRESET_NONE;
+  if (preset === "default") return PRESET_DEFAULT;
+  if (preset === "full") return PRESET_FULL;
+  return undefined;
+}
+
 export function getPresetFromTools(tools: ToolEntry[]): ToolPreset {
   const activeTools = tools.filter(t => t.active);
   if (activeTools.length === 0) return "none";
+  if (activeTools.some((tool) => !BUILTIN_TOOL_NAMES.has(tool.name))) return "custom";
 
   const active = activeTools
     .map(t => t.name)
@@ -26,16 +35,16 @@ export function getPresetFromTools(tools: ToolEntry[]): ToolPreset {
 
   if (active === [...PRESET_DEFAULT].sort().join(",")) return "default";
   if (active === [...PRESET_FULL].sort().join(",")) return "full";
-  return "default"; // closest match
+  return "custom";
 }
 
 interface Props {
   tools: ToolEntry[];
-  onPreset: (preset: ToolPreset, toolNames: string[]) => void;
+  onPreset: (preset: "none" | "default" | "full", toolNames: string[]) => void;
   onClose: () => void;
 }
 
-const PRESETS: { id: ToolPreset; label: string; desc: string; tools: string[] }[] = [
+const PRESETS: { id: "none" | "default" | "full"; label: string; desc: string; tools: string[] }[] = [
   { id: "none",    label: "Off",  desc: "No tools",                                tools: PRESET_NONE },
   { id: "default", label: "Low",  desc: "read · bash · edit · write",              tools: PRESET_DEFAULT },
   { id: "full",    label: "High", desc: "read · bash · edit · write · grep · find · ls", tools: PRESET_FULL },

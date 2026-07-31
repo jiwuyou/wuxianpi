@@ -283,6 +283,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
       compactError={compactError}
       compactResult={compactResult}
       toolPreset={toolPreset}
+      assistantToolPresetAvailable={!!assistantId}
       onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
       thinkingLevel={thinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}

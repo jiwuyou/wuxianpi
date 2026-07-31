@@ -6,6 +6,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { promisify } from "node:util";
 import { DefaultPackageManager, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import { strFromU8, unzipSync, zipSync } from "fflate";
+import { McpConfigError, StandardMcpConfigStore, type McpServerConfig } from "./mcp-config.js";
 import { RequestError } from "./protocol.js";
 import type { SessionRegistry } from "./session-registry.js";
 
@@ -39,20 +40,45 @@ const DEFAULT_CONFIG = {
 };
 const execFileAsync = promisify(execFile);
 
+export function resolveConfiguredToolNames(configured: string[], extensions: Array<Record<string, unknown>>): string[] {
+  const resolved: string[] = [];
+  const add = (name: string) => { if (name && !resolved.includes(name)) resolved.push(name); };
+
+  for (const configuredName of configured) {
+    if (configuredName.startsWith("pi-extension:")) { add(configuredName.slice("pi-extension:".length)); continue; }
+    if (configuredName.startsWith("pi:")) { add(configuredName.slice("pi:".length)); continue; }
+    if (configuredName.startsWith("builtin:")) { add(configuredName.slice("builtin:".length)); continue; }
+
+    const extensionReference = configuredName.startsWith("extension:")
+      ? configuredName.slice("extension:".length)
+      : configuredName;
+    const extension = extensions.find((candidate) =>
+      candidate.kind !== "wuxianpi" &&
+      [candidate.id, candidate.path].some((value) => typeof value === "string" && value === extensionReference));
+    if (extension && Array.isArray(extension.tools)) {
+      for (const toolName of extension.tools) if (typeof toolName === "string") add(toolName);
+    } else add(configuredName);
+  }
+  return resolved;
+}
+
 export interface WebServicesOptions {
   agentDir: string;
   registry: SessionRegistry;
+  mcpConfigPath?: string;
 }
 
 export class WebServices {
   readonly assistantsRoot: string;
   readonly legacyExtensionsRoot: string;
+  readonly mcpConfig: StandardMcpConfigStore;
   private readonly nonces = new Map<string, { extensionId: string; assistantId: string; expiresAt: number }>();
   private readonly pendingPermissions = new Map<string, Record<string, unknown>>();
 
   constructor(private readonly options: WebServicesOptions) {
     this.assistantsRoot = join(options.agentDir, "assistants");
     this.legacyExtensionsRoot = join(options.agentDir, "wuxianpi", "extensions");
+    this.mcpConfig = new StandardMcpConfigStore(options.mcpConfigPath);
   }
 
   async listAssistants(includeArchived = false) {
@@ -349,18 +375,32 @@ export class WebServices {
       ["bash", "Run shell commands", ["execute", "write", "network"]],
     ].map(([id, description, risk]) => ({
       id: `pi:${id}`, name: id, description, risk, source: "pi-builtin", status: "available", assistantSelectable: true,
+      selection: { field: "tools", values: [`pi:${id}`] },
     }));
     for (const skill of skills.skills) capabilities.push({
       id: `skill:${skill.name}`, name: skill.name, description: skill.description,
       source: "skill", risk: ["read"], status: "available", assistantSelectable: true,
+      selection: { field: "skills", values: [skill.name] },
     });
-    for (const extension of extensions) capabilities.push({
-      id: `extension:${extension.id}`, name: extension.name, source: extension.kind === "wuxianpi" ? "web-extension" : "pi-extension",
-      risk: ["execute"], status: extension.enabled === false ? "error" : "available", assistantSelectable: true,
-    });
-    for (const server of config.mcpServers as Array<Record<string, unknown>>) capabilities.push({
+    for (const extension of extensions) {
+      const webExtension = extension.kind === "wuxianpi";
+      const toolNames = Array.isArray(extension.tools)
+        ? extension.tools.filter((name): name is string => typeof name === "string")
+        : [];
+      capabilities.push({
+        id: `extension:${extension.id}`, name: extension.name, source: webExtension ? "web-extension" : "pi-extension",
+        risk: ["execute"], status: extension.enabled === false ? "error" : "available",
+        assistantSelectable: webExtension || toolNames.length > 0,
+        selection: webExtension
+          ? { field: "webExtensions", values: [String(extension.id)] }
+          : { field: "tools", values: toolNames.map((name) => `pi-extension:${name}`) },
+        metadata: webExtension ? undefined : { toolNames, extensionPath: extension.path ?? extension.id },
+      });
+    }
+    for (const server of config.mcpServers as McpServerConfig[]) capabilities.push({
       id: `mcp:${server.id}`, name: server.name ?? server.id, description: `${server.transport ?? "stdio"} via pi-mcp-adapter`,
       source: "mcp", risk: ["external", "network"], status: server.enabled === false ? "unavailable" : "available", assistantSelectable: true,
+      selection: { field: "mcpServers", values: [String(server.id)] },
     });
     for (const profile of config.ttsProfiles as Array<Record<string, unknown>>) capabilities.push({
       id: `tts:${profile.id}`, name: profile.name ?? profile.id, description: profile.provider,
@@ -369,16 +409,52 @@ export class WebServices {
     return { generatedAt: new Date().toISOString(), capabilities, diagnostics: skills.diagnostics };
   }
 
+  async resolveAssistantToolNames(id: string): Promise<{ toolNames: string[]; configured: string[] }> {
+    const assistant = await this.getAssistant(id);
+    const [config, extensions] = await Promise.all([this.readConfig(), this.listExtensions(assistant.path)]);
+    const configured = Array.isArray(assistant.manifest.tools)
+      ? assistant.manifest.tools.filter((name: unknown): name is string => typeof name === "string")
+      : Array.isArray(config.defaults?.tools)
+        ? config.defaults.tools.filter((name: unknown): name is string => typeof name === "string")
+        : [];
+    const resolved = resolveConfiguredToolNames(configured, extensions);
+    const selectedMcpServers = Array.isArray(assistant.manifest.mcpServers)
+      ? assistant.manifest.mcpServers
+      : Array.isArray(config.defaults?.mcpServers) ? config.defaults.mcpServers : [];
+    const availableMcpServers = new Set((config.mcpServers as McpServerConfig[])
+      .filter((server) => server.enabled !== false)
+      .map((server) => server.id));
+    if (selectedMcpServers.some((id: unknown) => typeof id === "string" && availableMcpServers.has(id)) && !resolved.includes("mcp")) {
+      resolved.push("mcp");
+    }
+    return { toolNames: resolved, configured };
+  }
+
+  async resolveAssistantToolNamesForCwd(cwd: string): Promise<string[] | undefined> {
+    const relativePath = relative(this.assistantsRoot, resolve(cwd));
+    if (!relativePath || relativePath.startsWith("..") || relativePath.includes(sep)) return undefined;
+    return (await this.resolveAssistantToolNames(relativePath)).toolNames;
+  }
+
+  async applyAssistantTools(sessionId: string, assistantId: string) {
+    const resolved = await this.resolveAssistantToolNames(assistantId);
+    const applied = await this.options.registry.setAssistantTools(sessionId, resolved.toolNames);
+    return { source: "assistant", ...(isRecord(applied) ? applied : { result: applied }) };
+  }
+
   async readConfig(): Promise<Record<string, any>> {
     const path = join(this.options.agentDir, "wuxianpi", "config.json");
     let raw: Record<string, any> = {};
     try { raw = JSON.parse(await readFile(path, "utf8")) as Record<string, any>; } catch { /* defaults */ }
+    const mcpServers = await this.mcpConfig.list().catch((error) => {
+      throw asMcpRequestError(error, this.mcpConfig.path);
+    });
     return {
       ...DEFAULT_CONFIG,
       ...raw,
       schemaVersion: 1,
       defaults: { ...DEFAULT_CONFIG.defaults, ...(raw.defaults ?? {}) },
-      mcpServers: Array.isArray(raw.mcpServers) ? raw.mcpServers : [],
+      mcpServers,
       ttsProfiles: Array.isArray(raw.ttsProfiles) ? raw.ttsProfiles : DEFAULT_CONFIG.ttsProfiles,
       permissions: Array.isArray(raw.permissions) ? raw.permissions : [],
       ubuntu: { ...DEFAULT_CONFIG.ubuntu, ...(raw.ubuntu ?? {}) },
@@ -386,19 +462,28 @@ export class WebServices {
   }
 
   async patchConfig(patch: Record<string, unknown>): Promise<Record<string, any>> {
-    const current = await this.readConfig();
-    const next: Record<string, any> = {
-      ...current,
-      ...patch,
-      schemaVersion: 1,
-      defaults: { ...current.defaults, ...(isRecord(patch.defaults) ? patch.defaults : {}) },
-      permissions: current.permissions,
-    };
     if (patch.mcpServers !== undefined && !Array.isArray(patch.mcpServers)) throw new RequestError("invalid_payload", "mcpServers must be an array");
     if (patch.ttsProfiles !== undefined && !Array.isArray(patch.ttsProfiles)) throw new RequestError("invalid_payload", "ttsProfiles must be an array");
+    const current = await this.readConfig();
+    const { mcpServers: requestedMcpServers, ...localPatch } = patch;
+    const next: Record<string, any> = {
+      ...current,
+      ...localPatch,
+      schemaVersion: 1,
+      defaults: { ...current.defaults, ...(isRecord(localPatch.defaults) ? localPatch.defaults : {}) },
+      permissions: current.permissions,
+    };
+    delete next.mcpServers;
+    if (requestedMcpServers !== undefined && JSON.stringify(requestedMcpServers) !== JSON.stringify(current.mcpServers)) {
+      try {
+        await this.mcpConfig.replace(requestedMcpServers as McpServerConfig[]);
+      } catch (error) {
+        throw asMcpRequestError(error, this.mcpConfig.path);
+      }
+      await this.options.registry.invalidateMcpSessions?.();
+    }
     await writeJson(join(this.options.agentDir, "wuxianpi", "config.json"), next);
-    await this.writeStandardMcpConfig(next.mcpServers);
-    return next;
+    return this.readConfig();
   }
 
   async permissionState(assistantId?: string) {
@@ -445,7 +530,7 @@ export class WebServices {
     const action = requireRecordString(body, "action");
     const serverId = requireRecordString(body, "serverId");
     const config = await this.readConfig();
-    const server = (config.mcpServers as Array<Record<string, unknown>>).find((item) => item.id === serverId);
+    const server = (config.mcpServers as McpServerConfig[]).find((item) => item.id === serverId);
     if (!server) throw new RequestError("mcp_server_not_found", `MCP server not found: ${serverId}`);
     const adapter = (await this.listExtensions()).find((item) => String(item.path ?? item.id).includes("pi-mcp-adapter"));
     const diagnostics = [{
@@ -456,8 +541,18 @@ export class WebServices {
         : "Install pi-mcp-adapter as a Pi package before using MCP tools",
     }];
     if (action === "test" || action === "listTools") {
-      return { serverId, ...(action === "listTools" ? { tools: [] } : {}), diagnostics,
-        adapterInstalled: !!adapter, configPath: join(this.options.agentDir, "mcp.json") };
+      const result = server.transport === "streamable-http"
+        ? await probeHttpMcpServer(server, action === "listTools")
+        : {
+            diagnostics: [{ level: "info", code: "mcp.adapter_delegated", message: "stdio MCP servers are executed by pi-mcp-adapter inside the selected assistant session" }],
+          };
+      return {
+        serverId,
+        ...result,
+        diagnostics: [...diagnostics, ...result.diagnostics],
+        adapterInstalled: !!adapter,
+        configPath: this.mcpConfig.path,
+      };
     }
     throw new RequestError("mcp_owned_by_pi_extension", `${action} must be executed through the pi-mcp-adapter tool inside Pi`);
   }
@@ -534,16 +629,6 @@ export class WebServices {
 
   createReadStream(filePath: string, start?: number, end?: number) {
     return createReadStream(resolveWebPath(filePath), start === undefined ? undefined : { start, end });
-  }
-
-  private async writeStandardMcpConfig(servers: Array<Record<string, unknown>>): Promise<void> {
-    const mcpServers: Record<string, unknown> = {};
-    for (const server of servers) {
-      if (typeof server.id !== "string" || !server.id) throw new RequestError("invalid_mcp_config", "Every MCP server requires an id");
-      const { id, name: _name, runtime: _runtime, enabled, ...standard } = server;
-      if (enabled !== false) mcpServers[id] = standard;
-    }
-    await writeJson(join(this.options.agentDir, "mcp.json"), { mcpServers });
   }
 
   private async requireWebExtension(extensionId: string): Promise<Record<string, unknown>> {
@@ -657,6 +742,123 @@ function requireRecordString(value: Record<string, unknown>, name: string): stri
 function stringOr(value: unknown, fallback: string): string { return typeof value === "string" ? value : fallback; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 async function readOptional(path: string, fallback: string): Promise<string> { try { return await readFile(path, "utf8"); } catch { return fallback; } }
+
+type McpDiagnostic = { level: "info" | "warning" | "error"; code: string; message: string };
+type McpProbeResult = { diagnostics: McpDiagnostic[]; tools?: Array<Record<string, unknown>> };
+
+async function probeHttpMcpServer(server: McpServerConfig, listTools: boolean): Promise<McpProbeResult> {
+  if (!server.url) throw new RequestError("invalid_mcp_config", `MCP server ${server.id} has no URL`);
+  const timeoutMs = Math.min(server.timeoutMs ?? 15_000, 30_000);
+  const headers = new Headers({
+    accept: "application/json, text/event-stream",
+    "content-type": "application/json",
+    "mcp-protocol-version": "2025-03-26",
+  });
+  for (const [name, value] of Object.entries(server.headers ?? {})) headers.set(name, value);
+  let initialize: Response;
+  try {
+    initialize = await fetch(server.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "wuxianpi-initialize",
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "wuxianpi", version: "0.1.0" },
+        },
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    const message = error instanceof Error && error.name === "TimeoutError"
+      ? `MCP server ${server.id} did not respond within ${timeoutMs}ms`
+      : `Unable to connect to MCP server ${server.id}: ${errorMessage(error)}`;
+    return { diagnostics: [{ level: "error", code: "mcp.connection_failed", message }] };
+  }
+  if (!initialize.ok) return failedMcpResponse(initialize, server.id);
+  const initialized = await readMcpResponse(initialize);
+  if (isRecord(initialized.error)) {
+    return { diagnostics: [{ level: "error", code: "mcp.initialize_failed", message: `MCP server ${server.id} rejected initialization: ${mcpErrorMessage(initialized.error)}` }] };
+  }
+  if (!isRecord(initialized.result)) {
+    return { diagnostics: [{ level: "error", code: "mcp.invalid_response", message: `MCP server ${server.id} returned no initialization result` }] };
+  }
+  const diagnostics: McpDiagnostic[] = [{ level: "info", code: "mcp.connected", message: `Connected to MCP server ${server.id}` }];
+  if (!listTools) return { diagnostics };
+
+  const sessionId = initialize.headers.get("mcp-session-id");
+  const toolsHeaders = new Headers(headers);
+  if (sessionId) toolsHeaders.set("mcp-session-id", sessionId);
+  let listed: Response;
+  try {
+    listed = await fetch(server.url, {
+      method: "POST",
+      headers: toolsHeaders,
+      body: JSON.stringify({ jsonrpc: "2.0", id: "wuxianpi-tools", method: "tools/list", params: {} }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    return { diagnostics: [...diagnostics, { level: "error", code: "mcp.tools_connection_failed", message: `Unable to list MCP tools: ${errorMessage(error)}` }] };
+  }
+  if (!listed.ok) return { diagnostics: [...diagnostics, ...failedMcpResponse(listed, server.id).diagnostics] };
+  const listedPayload = await readMcpResponse(listed);
+  if (isRecord(listedPayload.error)) {
+    return { diagnostics: [...diagnostics, { level: "error", code: "mcp.tools_failed", message: `MCP tool listing failed: ${mcpErrorMessage(listedPayload.error)}` }] };
+  }
+  const rawTools = isRecord(listedPayload.result) && Array.isArray(listedPayload.result.tools) ? listedPayload.result.tools : [];
+  const tools = rawTools.filter(isRecord).flatMap((tool) => {
+    const name = typeof tool.name === "string" ? tool.name : "";
+    if (!name) return [];
+    return [{
+      id: `mcp:${server.id}:${name}`,
+      name,
+      description: typeof tool.description === "string" ? tool.description : `MCP tool from ${server.id}`,
+      source: "mcp",
+      risk: ["external", "network"],
+      status: "available",
+      assistantSelectable: false,
+    }];
+  });
+  diagnostics.push({ level: "info", code: "mcp.tools_discovered", message: `Discovered ${tools.length} tool(s) from ${server.id}` });
+  return { diagnostics, tools };
+}
+
+function failedMcpResponse(response: Response, serverId: string): McpProbeResult {
+  const authenticate = response.headers.get("www-authenticate") ?? "";
+  if (response.status === 401 && /invalid_token/i.test(authenticate)) {
+    return { diagnostics: [{ level: "error", code: "mcp.oauth_invalid_token", message: `MCP server ${serverId} rejected its OAuth token. Reauthorize this server with /mcp-auth ${serverId}.` }] };
+  }
+  if (response.status === 401 && /oauth/i.test(authenticate)) {
+    return { diagnostics: [{ level: "warning", code: "mcp.oauth_required", message: `MCP server ${serverId} requires OAuth authorization. Run /mcp-auth ${serverId} in an assistant chat.` }] };
+  }
+  return { diagnostics: [{ level: "error", code: "mcp.http_error", message: `MCP server ${serverId} returned HTTP ${response.status}` }] };
+}
+
+async function readMcpResponse(response: Response): Promise<Record<string, unknown>> {
+  const body = (await response.text()).trim();
+  const payload = body.startsWith("data:")
+    ? body.split(/\r?\n/).filter((line) => line.startsWith("data:")).at(-1)?.slice("data:".length).trim() ?? ""
+    : body;
+  try {
+    const parsed = JSON.parse(payload);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function mcpErrorMessage(error: Record<string, unknown>): string {
+  return typeof error.message === "string" && error.message ? error.message : "unknown MCP error";
+}
+
+function asMcpRequestError(error: unknown, path: string): RequestError {
+  if (error instanceof RequestError) return error;
+  if (error instanceof McpConfigError) return new RequestError("mcp_config_invalid", error.message);
+  return new RequestError("mcp_config_failed", `Unable to access standard MCP config ${path}: ${errorMessage(error)}`);
+}
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });

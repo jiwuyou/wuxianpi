@@ -97,6 +97,8 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
   headerSecretRefs?: Record<string, string>;
   timeoutMs?: number;
+  lifecycle?: "keep-alive" | "lazy" | "lazy-keep-alive" | "eager";
+  auth?: "oauth" | "bearer" | false;
   enabled?: boolean;
 }
 
@@ -190,6 +192,10 @@ export interface CapabilityDescriptor {
   status: CapabilityStatus;
   assistantSelectable: boolean;
   diagnostics?: CapabilityDiagnostic[];
+  selection?: {
+    field: "tools" | "skills" | "mcpServers" | "webExtensions";
+    values: string[];
+  };
   metadata?: Record<string, JsonValue>;
 }
 
@@ -324,6 +330,8 @@ export interface McpActionData {
   tools?: CapabilityDescriptor[];
   result?: JsonValue;
   diagnostics?: CapabilityDiagnostic[];
+  adapterInstalled?: boolean;
+  configPath?: string;
 }
 
 export interface TtsSpeakRequest {

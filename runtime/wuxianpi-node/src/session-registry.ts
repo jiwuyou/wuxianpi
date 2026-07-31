@@ -30,6 +30,10 @@ export function runDetached(operation: Promise<unknown>, onError: (error: unknow
   void operation.catch(onError);
 }
 
+export function normalizeConfiguredToolName(name: string): string {
+  return name.replace(/^pi-extension:/, "").replace(/^pi:/, "").replace(/^builtin:/, "");
+}
+
 export interface RuntimeIdentity {
   sessionId: string; sessionPath?: string; cwd: string; isRunning: boolean; isIdle: boolean;
 }
@@ -38,6 +42,7 @@ export type RuntimeSlot = {
   runtime: AgentSessionRuntime; serial: SerialExecutor; isRunning: boolean;
   agentStartCount: number; createdAt: Date; closeAfterSettled: boolean; unsubscribe?: () => void;
   ui?: ExtensionUiBridge; reclaimTimer?: NodeJS.Timeout;
+  toolSource?: "assistant" | "override";
   modelStatus: {
     state: "ready" | "pending" | "invalid";
     provider?: string;
@@ -81,6 +86,7 @@ export class SessionRegistry {
   private readonly modelSettings: SettingsManager;
   private readonly modelSetupService: ModelSetupService;
   private readonly listeners = new Set<EventSink>();
+  private readonly assistantToolsResolver?: (cwd: string) => Promise<string[] | undefined>;
 
   constructor(emitEvent?: EventSink, options: {
     idleTimeoutMs?: number;
@@ -88,6 +94,7 @@ export class SessionRegistry {
     modelRuntime?: ModelRuntime;
     settingsManager?: SettingsManager;
     diagnostics?: PersistentDiagnostics;
+    assistantToolsResolver?: (cwd: string) => Promise<string[] | undefined>;
   } = {}) {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 5 * 60_000;
     this.agentDir = options.agentDir ?? getAgentDir();
@@ -105,6 +112,7 @@ export class SessionRegistry {
       reload: () => this.reloadModelConfiguration(),
     });
     this.diagnostics = options.diagnostics;
+    this.assistantToolsResolver = options.assistantToolsResolver;
     if (emitEvent) this.listeners.add(emitEvent);
   }
 
@@ -424,34 +432,41 @@ export class SessionRegistry {
 
   async tools(sessionId: string): Promise<unknown> {
     return this.control(sessionId, async (slot) => ({
-      tools: slot.runtime.session.getAllTools(), activeToolNames: slot.runtime.session.getActiveToolNames(),
+      tools: slot.runtime.session.getAllTools(), activeToolNames: slot.runtime.session.getActiveToolNames(), toolSource: slot.toolSource,
     }));
   }
 
   async setTools(sessionId: string, toolNames: string[]): Promise<unknown> {
-    return this.run(sessionId, async (slot) => {
-      requireIdle(slot, "session.setTools");
-      const available = new Set(slot.runtime.session.getAllTools().map((tool) => tool.name));
-      const requested = [...new Set(toolNames)];
-      const unknown = requested.filter((name) => !available.has(name));
-      const availableToolNames = [...available];
-      const warnings = unknown.length > 0 ? [{
-        code: "unknown_tool",
-        message: `Unknown tool name(s) ignored: ${unknown.join(", ")}`,
+    return this.run(sessionId, async (slot) => this.setToolsOnSlot(slot, toolNames, "override"));
+  }
+
+  async setAssistantTools(sessionId: string, toolNames: string[]): Promise<unknown> {
+    return this.run(sessionId, async (slot) => this.setToolsOnSlot(slot, toolNames, "assistant"));
+  }
+
+  private setToolsOnSlot(slot: RuntimeSlot, toolNames: string[], source: "assistant" | "override") {
+    requireIdle(slot, "session.setTools");
+    const available = new Set(slot.runtime.session.getAllTools().map((tool) => tool.name));
+    const requested = [...new Set(toolNames.map(normalizeConfiguredToolName).filter(Boolean))];
+    const unknown = requested.filter((name) => !available.has(name));
+    const availableToolNames = [...available];
+    const warnings = unknown.length > 0 ? [{
+      code: "unknown_tool",
+      message: `Unknown tool name(s) ignored: ${unknown.join(", ")}`,
+      unknown,
+      available: availableToolNames,
+    }] : [];
+    if (unknown.length > 0) {
+      this.diagnostics?.record("tools.warning", {
+        sessionId: slot.runtime.session.sessionId,
         unknown,
         available: availableToolNames,
-      }] : [];
-      if (unknown.length > 0) {
-        this.diagnostics?.record("tools.warning", {
-          sessionId: slot.runtime.session.sessionId,
-          unknown,
-          available: availableToolNames,
-          code: "unknown_tool",
-        });
-      }
-      slot.runtime.session.setActiveToolsByName(requested.filter((name) => available.has(name)));
-      return { activeToolNames: slot.runtime.session.getActiveToolNames(), warnings };
-    });
+        code: "unknown_tool",
+      });
+    }
+    slot.runtime.session.setActiveToolsByName(requested.filter((name) => available.has(name)));
+    slot.toolSource = source;
+    return { activeToolNames: slot.runtime.session.getActiveToolNames(), warnings, toolSource: source };
   }
 
   async sessionModels(sessionId: string): Promise<unknown> {
@@ -563,6 +578,26 @@ export class SessionRegistry {
     return { closed: true, deferred: false };
   }
 
+  /** Recreate managed sessions after MCP definitions or credentials change. */
+  async invalidateMcpSessions(): Promise<{ closed: number; deferred: number }> {
+    let closed = 0;
+    let deferred = 0;
+    for (const slot of [...this.slots]) {
+      await slot.serial.run(async () => {
+        if (!this.slots.has(slot)) return;
+        if (slot.isRunning || !slot.runtime.session.isIdle) {
+          slot.closeAfterSettled = true;
+          deferred += 1;
+          return;
+        }
+        await this.disposeSlot(slot);
+        closed += 1;
+      });
+    }
+    this.diagnostics?.record("session.mcp.invalidated", { closed, deferred });
+    return { closed, deferred };
+  }
+
   async dispose(): Promise<void> {
     this.diagnostics?.record("registry.dispose.start", { activeSessions: this.slots.size });
     await Promise.all([...this.slots].map((slot) => this.disposeSlot(slot)));
@@ -597,6 +632,7 @@ export class SessionRegistry {
       isPromptRunning: identity.isRunning,
       tools: session.getAllTools(),
       activeToolNames: session.getActiveToolNames(),
+      toolSource: slot.toolSource,
       slashCommands: { commands: this.commandsOf(slot) },
       sessionStats: session.getSessionStats(),
       modelStatus: { ...slot.modelStatus },
@@ -704,6 +740,7 @@ export class SessionRegistry {
     this.slots.add(slot);
     try {
       await this.bindSlot(slot, runtime.session);
+      await this.applyAssistantTools(slot);
       for (const diagnostic of runtime.diagnostics) this.emit(slot, {
         type: "runtime_diagnostic", diagnosticType: diagnostic.type, message: diagnostic.message,
       });
@@ -717,6 +754,11 @@ export class SessionRegistry {
       await runtime.dispose().catch(() => undefined);
       throw error;
     }
+  }
+
+  private async applyAssistantTools(slot: RuntimeSlot): Promise<void> {
+    const configured = await this.assistantToolsResolver?.(slot.runtime.cwd);
+    if (configured !== undefined) this.setToolsOnSlot(slot, configured, "assistant");
   }
 
   private async bindSlot(slot: RuntimeSlot, session: AgentSession): Promise<void> {

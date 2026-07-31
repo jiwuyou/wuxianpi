@@ -4,6 +4,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { AssistantSummary, CapabilityCatalog, GlobalWuxianPiConfigV1, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
 import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import { useRuntimeDeploymentSync } from "@/hooks/useRuntimeDeploymentSync";
 import { useTheme } from "@/hooks/useTheme";
 import { useBrowserNavigation } from "@/lib/browser-navigation";
 import { webApi } from "@/lib/web-api-client";
@@ -89,6 +90,7 @@ export function AppShell() {
   const router = useBrowserNavigation();
   const searchParams = router.searchParams;
   const { isDark, toggleTheme } = useTheme();
+  useRuntimeDeploymentSync();
   const [assistants, setAssistants] = useState<AssistantSummary[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [extensions, setExtensions] = useState<WebExtensionSummary[]>([]);

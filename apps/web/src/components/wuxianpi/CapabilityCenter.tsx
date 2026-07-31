@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CapabilityCatalog,
   CapabilityDescriptor,
+  CapabilityDiagnostic,
   GlobalWuxianPiConfigV1,
   McpServerConfig,
   PermissionStateData,
@@ -12,7 +13,7 @@ import type {
   WebExtensionSummary,
 } from "@/lib/wuxianpi/contracts";
 import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
-import { getPermissionState, mutatePermission, speakText, updateGlobalConfig } from "./api";
+import { getPermissionState, mutatePermission, performMcpAction, speakText, updateGlobalConfig } from "./api";
 import { ExtensionHost } from "./ExtensionHost";
 import { SkillsConfig } from "../SkillsConfig";
 
@@ -68,6 +69,8 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
   const [actionError, setActionError] = useState<string | null>(null);
   const [permissionState, setPermissionState] = useState<PermissionStateData>({ pending: [], grants: [] });
   const [previewing, setPreviewing] = useState<string | null>(null);
+  const [testingMcp, setTestingMcp] = useState<string | null>(null);
+  const [mcpDiagnostics, setMcpDiagnostics] = useState<Record<string, CapabilityDiagnostic[]>>({});
   const [openPanel, setOpenPanel] = useState<{ extension: WebExtensionSummary; title: string; entry: string } | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -130,6 +133,29 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
     catch (reason) { setActionError(reason instanceof Error ? reason.message : String(reason)); }
   };
 
+  const testMcp = async (server: McpServerConfig, listTools = false) => {
+    const action = listTools ? "listTools" : "test";
+    setTestingMcp(`${server.id}:${action}`); setActionError(null);
+    try {
+      const result = await performMcpAction({ action, serverId: server.id });
+      setMcpDiagnostics((current) => ({ ...current, [server.id]: result.diagnostics ?? [] }));
+    } catch (reason) { setActionError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setTestingMcp(null); }
+  };
+
+  const setMcpAuth = (index: number, value: "auto" | "oauth" | "bearer") => {
+    setDraft((current) => ({
+      ...current,
+      mcpServers: current.mcpServers.map((server, itemIndex) => {
+        if (itemIndex !== index) return server;
+        const headers = value === "oauth" && server.headers
+          ? Object.fromEntries(Object.entries(server.headers).filter(([name]) => name.toLowerCase() !== "authorization"))
+          : server.headers;
+        return { ...server, ...(headers ? { headers } : {}), auth: value === "auto" ? undefined : value };
+      }),
+    }));
+  };
+
   const tabs: Array<[Tab, string]> = [["defaults", "默认能力"], ["packages", "Pi Packages"], ["mcp", "MCP 配置"], ["tts", "语音"], ["extensions", "WebUI"], ["permissions", "权限"], ["runtime", "运行时"]];
   const showSave = tab !== "permissions";
   const mcpAdapterInstalled = (catalog?.capabilities ?? []).some((item) => `${item.id} ${item.name}`.includes("pi-mcp-adapter") && item.status === "available");
@@ -155,16 +181,18 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
       {!loading && tab === "packages" && <><SkillsConfig cwd={hostAssistantPath} onChanged={onReload} /><section className="settings-card"><header><div><strong>已发现 Package 能力</strong><small>工具、MCP、浏览器、记忆和增强 Web UI 都由 Pi package 提供。</small></div></header><div className="default-picker-grid">{(catalog?.capabilities ?? []).filter((item) => item.source !== "pi-builtin").map((item) => <div key={item.id} className={item.status !== "available" ? "unavailable" : ""}><span><strong>{item.name}</strong><small>{labelForSource(item.source)} · {item.description ?? item.id}</small></span><em className={`status-pill ${item.status === "available" ? "success" : "warning"}`}>{item.status}</em></div>)}</div></section></>}
 
       {!loading && tab === "mcp" && <div className="settings-stack">
-        <section className="settings-card"><header><div><strong>标准 MCP 配置</strong><small>保存后写入 Pi 标准 mcp.json；实际工具发现与执行由 pi-mcp-adapter 负责。</small></div><span className={`status-pill ${mcpAdapterInstalled ? "success" : "warning"}`}>{mcpAdapterInstalled ? "adapter 已安装" : "需安装 pi-mcp-adapter"}</span></header></section>
+        <section className="settings-card"><header><div><strong>标准 MCP 配置</strong><small>服务定义与 Pi CLI 共用；助手只保存所选服务 ID。</small></div><span className={`status-pill ${mcpAdapterInstalled ? "success" : "warning"}`}>{mcpAdapterInstalled ? "adapter 已安装" : "需安装 pi-mcp-adapter"}</span></header></section>
         {draft.mcpServers.map((server, index) => <section key={`${server.id}-${index}`} className="settings-card">
-          <header><div><strong>{server.name || server.id || `MCP ${index + 1}`}</strong><small>{server.transport} · {server.enabled === false ? "已停用" : "启用"}</small></div><button type="button" className="danger-link" onClick={() => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.filter((_, itemIndex) => itemIndex !== index) }))}>删除</button></header>
+          <header><div><strong>{server.name || server.id || `MCP ${index + 1}`}</strong><small>{server.transport} · {server.enabled === false ? "已停用" : "启用"}</small></div><div className="inline-actions"><button type="button" disabled={!mcpAdapterInstalled || testingMcp !== null} onClick={() => void testMcp(server)}>{testingMcp === `${server.id}:test` ? "测试中…" : "测试"}</button>{server.transport === "streamable-http" && <button type="button" disabled={!mcpAdapterInstalled || testingMcp !== null} onClick={() => void testMcp(server, true)}>{testingMcp === `${server.id}:listTools` ? "读取中…" : "读取工具"}</button>}<button type="button" className="danger-link" onClick={() => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.filter((_, itemIndex) => itemIndex !== index) }))}>删除</button></div></header>
           <div className="form-grid compact">
             <label>ID<input value={server.id} onChange={(event) => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value } : item) }))} /></label>
             <label>名称<input value={server.name} onChange={(event) => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) }))} /></label>
             <label>传输<select value={server.transport} onChange={(event) => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.map((item, itemIndex) => itemIndex === index ? { ...item, transport: event.target.value as McpServerConfig["transport"] } : item) }))}><option value="stdio">stdio</option><option value="streamable-http">streamable-http</option></select></label>
             <label>状态<select value={server.enabled === false ? "disabled" : "enabled"} onChange={(event) => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: event.target.value === "enabled" } : item) }))}><option value="enabled">启用</option><option value="disabled">停用</option></select></label>
+            {server.transport === "streamable-http" && <label>认证<select value={server.auth === "oauth" ? "oauth" : server.auth === "bearer" ? "bearer" : "auto"} onChange={(event) => setMcpAuth(index, event.target.value as "auto" | "oauth" | "bearer")}><option value="auto">自动</option><option value="oauth">OAuth</option><option value="bearer">Bearer</option></select></label>}
             {server.transport === "stdio" ? <><label className="span-2">命令<input value={server.command ?? ""} onChange={(event) => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.map((item, itemIndex) => itemIndex === index ? { ...item, command: event.target.value } : item) }))} /></label><label className="span-2">参数（每行一个）<textarea rows={3} value={(server.args ?? []).join("\n")} onChange={(event) => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.map((item, itemIndex) => itemIndex === index ? { ...item, args: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean) } : item) }))} /></label></> : <label className="span-2">URL<input value={server.url ?? ""} onChange={(event) => setDraft((current) => ({ ...current, mcpServers: current.mcpServers.map((item, itemIndex) => itemIndex === index ? { ...item, url: event.target.value } : item) }))} /></label>}
           </div>
+          {(mcpDiagnostics[server.id] ?? []).map((diagnostic) => <p key={`${diagnostic.code}:${diagnostic.message}`} className={`muted-copy ${diagnostic.level === "error" ? "error" : ""}`}>{diagnostic.message}</p>)}
         </section>)}
         <button type="button" className="add-card-button" onClick={() => setDraft((current) => ({ ...current, mcpServers: [...current.mcpServers, { id: `mcp-${current.mcpServers.length + 1}`, name: `MCP ${current.mcpServers.length + 1}`, transport: "stdio", command: "", args: [], enabled: true }] }))}>＋ 新增 MCP Server</button>
       </div>}

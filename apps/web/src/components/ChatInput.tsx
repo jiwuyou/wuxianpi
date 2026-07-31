@@ -2,6 +2,8 @@
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import type { BuiltinSlashCommandResult, CompactResultInfo, SlashCommandInfo } from "@/hooks/useAgentSession";
+import type { SelectableToolPreset, ToolPreset } from "@/components/ToolPanel";
+import { consumeRuntimeReloadDraft } from "@/lib/runtime-deployment";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -33,8 +35,9 @@ interface Props {
   isCompacting?: boolean;
   compactError?: string | null;
   compactResult?: CompactResultInfo | null;
-  toolPreset?: "none" | "default" | "full";
-  onToolPresetChange?: (preset: "none" | "default" | "full") => void;
+  toolPreset?: ToolPreset;
+  assistantToolPresetAvailable?: boolean;
+  onToolPresetChange?: (preset: SelectableToolPreset) => void;
   thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh") => void;
   availableThinkingLevels?: string[] | null;
@@ -54,9 +57,12 @@ export interface ChatInputHandle {
   addImages: (files: File[]) => void;
 }
 
-const TOOL_PRESETS = ["off", "default", "full"] as const;
-const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "full"> = { off: "none", default: "default", full: "full" };
+const TOOL_PRESETS = ["assistant", "off", "default", "full"] as const;
+const TOOL_PRESET_MAP: Record<typeof TOOL_PRESETS[number], SelectableToolPreset> = {
+  assistant: "assistant", off: "none", default: "default", full: "full",
+};
 const TOOL_PRESET_LABEL: Record<typeof TOOL_PRESETS[number], string> = {
+  assistant: "助手配置",
   off: "关闭工具",
   default: "默认工具",
   full: "全部工具",
@@ -141,7 +147,7 @@ function slashMatchRank(command: SlashCommandPaletteItem, query: string): number
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, onModelChange,
   onOpenModelsConfig,
-  onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
+  onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, assistantToolPresetAvailable, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
@@ -159,6 +165,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [advancedControlsOpen, setAdvancedControlsOpen] = useState(false);
   const [queuedDrafts, setQueuedDrafts] = useState<QueuedDraft[]>([]);
+
+  useEffect(() => {
+    const draft = consumeRuntimeReloadDraft();
+    if (draft) setValue(draft);
+  }, []);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -601,7 +612,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     isCompacting ||
     !!compactError
   );
-  const currentToolPresetKey = (Object.entries(TOOL_PRESET_MAP).find(([, v]) => v === (toolPreset ?? "default"))?.[0] ?? "default") as typeof TOOL_PRESETS[number];
+  const currentToolPresetKey = Object.entries(TOOL_PRESET_MAP).find(([, value]) => value === toolPreset)?.[0] as typeof TOOL_PRESETS[number] | undefined;
+  const currentToolPresetLabel = toolPreset === "custom"
+    ? "自定义工具"
+    : TOOL_PRESET_LABEL[currentToolPresetKey ?? "default"];
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -928,6 +942,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           >
           <textarea
             ref={textareaRef}
+            data-wuxianpi-composer
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -1376,7 +1391,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                   </svg>
-                  <span>{TOOL_PRESET_LABEL[currentToolPresetKey]}</span>
+                  <span>{currentToolPresetLabel}</span>
                 </button>
                 {toolDropdownOpen && (
                   <div style={{
@@ -1385,10 +1400,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                     overflow: "hidden", minWidth: 120,
                   }}>
-                    {TOOL_PRESETS.map((lvl) => {
+                    {TOOL_PRESETS.filter((level) => level !== "assistant" || assistantToolPresetAvailable).map((lvl) => {
                       const preset = TOOL_PRESET_MAP[lvl];
                       const isActive = (toolPreset ?? "default") === preset;
-                      const desc = lvl === "off" ? "无工具，纯聊天" : lvl === "default" ? "4 项内置工具" : "全部内置工具";
+                      const desc = lvl === "assistant" ? "使用助手中勾选的能力"
+                        : lvl === "off" ? "无工具，纯聊天"
+                          : lvl === "default" ? "4 项内置工具" : "全部内置工具";
                       return (
                         <button
                           key={lvl}

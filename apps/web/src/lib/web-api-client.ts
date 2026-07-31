@@ -547,13 +547,16 @@ export class WebApiClient {
     return normalizeSessionList(await this.request<unknown>("/sessions"));
   }
 
-  async createSession(input: Record<string, unknown>): Promise<{ sessionId: string; session?: SessionInfo }> {
+  async createSession(input: Record<string, unknown>): Promise<{ sessionId: string; session?: SessionInfo; warnings?: JsonRecord[] }> {
     const body = await this.request<JsonRecord>("/sessions", { method: "POST", body: JSON.stringify(input) });
     const normalized = normalizeSessionList([body.session ?? body]);
     const session = normalized[0];
     const sessionId = String(body.sessionId ?? session?.id ?? body.id ?? "");
     if (!sessionId) throw new Error("Runtime did not return a session id");
-    return { sessionId, ...(session?.id ? { session } : {}) };
+    const warnings = Array.isArray(body.warnings)
+      ? body.warnings.filter((warning): warning is JsonRecord => !!warning && typeof warning === "object" && !Array.isArray(warning))
+      : [];
+    return { sessionId, ...(session?.id ? { session } : {}), ...(warnings.length ? { warnings } : {}) };
   }
 
   async snapshot(sessionId: string, leafId?: string | null): Promise<SessionSnapshot> {
@@ -629,6 +632,13 @@ export class WebApiClient {
 
   updateTools(sessionId: string, toolNames: string[]) {
     return this.request<JsonRecord>(`/sessions/${encodeURIComponent(sessionId)}/tools`, { method: "PATCH", body: JSON.stringify({ toolNames }) });
+  }
+
+  applyAssistantTools(sessionId: string, assistantId: string) {
+    return this.request<JsonRecord>(`/sessions/${encodeURIComponent(sessionId)}/assistant-tools`, {
+      method: "POST",
+      body: JSON.stringify({ assistantId }),
+    });
   }
 
   respondToExtensionUi(sessionId: string, input: Record<string, unknown>) {

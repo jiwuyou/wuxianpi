@@ -35,3 +35,13 @@ test("extension UI state is snapshotted as arrays", () => {
   assert.equal(emitted.length, 4);
   bridge.dispose();
 });
+
+test("extension UI exposes a plain-text theme for headless extensions", () => {
+  const bridge = new ExtensionUiBridge(() => {});
+  assert.equal(bridge.context.theme.fg("accent", "Ready"), "Ready");
+  assert.equal(bridge.context.theme.bg("selectedBg", "Selected"), "Selected");
+  assert.equal(bridge.context.theme.bold("Important"), "Important");
+  assert.equal(bridge.context.theme.getFgAnsi("accent"), "");
+  assert.equal(bridge.context.theme.getThinkingBorderColor("high")("Border"), "Border");
+  bridge.dispose();
+});

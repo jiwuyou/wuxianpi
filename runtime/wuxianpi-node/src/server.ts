@@ -1,7 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse as HttpResponse } from "node:http";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { WebSocket, WebSocketServer } from "ws";
 import { PersistentDiagnostics } from "./diagnostics.js";
@@ -34,6 +36,8 @@ export interface RuntimeServerOptions {
   diagnosticsMaxFiles?: number;
   webRoot?: string;
   preferredWebUiUrl?: string;
+  mcpConfigPath?: string;
+  deploymentId?: string;
 }
 
 interface ConnectionContext {
@@ -85,16 +89,19 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const subscriptions = new SessionSubscriptions<WebSocket>();
   const requestOwner = new AsyncLocalStorage<WebSocket>();
   const inFlightRequests = new Map<WebSocket, number>();
+  let webServices: WebServices | undefined;
   const registry = new SessionRegistry(undefined, {
     idleTimeoutMs: options.idleTimeoutMs,
     agentDir,
     diagnostics,
+    assistantToolsResolver: async (cwd) => webServices?.resolveAssistantToolNamesForCwd(cwd),
   });
   const nativeEvents = new NativeEventProjector(registry);
   registry.subscribe((event) => routeEvent(nativeEvents.project(event)));
   const adapter = new PiSdkAdapter(registry);
-  const webServices = new WebServices({ agentDir, registry });
+  webServices = new WebServices({ agentDir, registry, mcpConfigPath: options.mcpConfigPath });
   const staticFiles = new StaticFiles(options.webRoot);
+  let deploymentId = options.deploymentId?.trim() || "starting";
   const runtimeCapabilities = {
     ...CAPABILITIES,
     webApi: 1,
@@ -107,6 +114,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     services: webServices,
     status: () => ({
       version: RUNTIME_VERSION,
+      deploymentId,
       protocolVersion: PROTOCOL_VERSION,
       protocol: PROTOCOL_NAME,
       ...registry.status(),
@@ -252,6 +260,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         protocol: PROTOCOL_NAME,
         protocolVersion: PROTOCOL_VERSION,
         version: RUNTIME_VERSION,
+        deploymentId,
         activeSessions: registry.size,
         capabilities: runtimeCapabilities,
         uiMetadataPath: "/v1/ui/metadata",
@@ -260,6 +269,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       json(response, 200, {
         ok: true,
         schemaVersion: 1,
+        deploymentId,
         preferred: { id: "aionui", url: preferredWebUiUrl },
         fallback: {
           id: "wuxianpi-builtin",
@@ -273,6 +283,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       json(response, 200, {
         ok: true,
         version: RUNTIME_VERSION,
+        deploymentId,
         protocolVersion: PROTOCOL_VERSION,
         protocol: PROTOCOL_NAME,
         ...registry.status(),
@@ -286,6 +297,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       json(response, 200, {
         ok: true,
         version: RUNTIME_VERSION,
+        deploymentId,
         protocolVersion: PROTOCOL_VERSION,
         protocol: PROTOCOL_NAME,
         ...registry.status(),
@@ -331,6 +343,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     void nativeEvents.decorateResult(registry.status()).then((nativeStatus) => send(websocket, {
       type: "runtime.ready",
       version: RUNTIME_VERSION,
+      deploymentId,
       protocolVersion: PROTOCOL_VERSION,
       connectionId: connection.id,
       protocol: PROTOCOL_NAME,
@@ -543,6 +556,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     nativeEvents,
     diagnostics,
     async start() {
+      deploymentId = options.deploymentId?.trim() || await deriveDeploymentId(options.webRoot);
       await new Promise<void>((resolve, reject) => {
         httpServer.once("error", reject);
         httpServer.listen(options.port, options.host, () => {
@@ -557,6 +571,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         port: listeningPort,
         protocol: PROTOCOL_NAME,
         version: RUNTIME_VERSION,
+        deploymentId,
       });
       return { host: options.host, port: listeningPort };
     },
@@ -571,6 +586,41 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       await diagnostics.close();
     },
   };
+}
+
+async function deriveDeploymentId(webRoot?: string): Promise<string> {
+  const digest = createHash("sha256");
+  digest.update(`runtime:${RUNTIME_VERSION}\0`);
+  await hashJavaScriptTree(digest, dirname(fileURLToPath(import.meta.url)));
+  await hashFile(digest, webRoot ? join(webRoot, "index.html") : undefined, "web-index");
+  return `sha256-${digest.digest("hex").slice(0, 24)}`;
+}
+
+async function hashJavaScriptTree(digest: ReturnType<typeof createHash>, directory: string, prefix = ""): Promise<void> {
+  try {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const path = join(directory, entry.name);
+      const label = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await hashJavaScriptTree(digest, path, label);
+      else if (entry.isFile() && entry.name.endsWith(".js")) await hashFile(digest, path, `runtime:${label}`);
+    }
+  } catch {
+    digest.update(`runtime-directory-unavailable:${directory}\0`);
+  }
+}
+
+async function hashFile(digest: ReturnType<typeof createHash>, path: string | undefined, label: string): Promise<void> {
+  digest.update(`${label}\0`);
+  if (!path) {
+    digest.update("unavailable\0");
+    return;
+  }
+  try {
+    digest.update(await readFile(path));
+  } catch {
+    digest.update(`unavailable:${path}\0`);
+  }
 }
 
 function eventType(payload: unknown): string {

@@ -6,6 +6,22 @@ type UiResponse = { requestId: string; value?: string; confirmed?: boolean; canc
 type DialogOptions = { timeout?: number; signal?: AbortSignal };
 type PendingRequest = { resolve: (value: unknown) => void; fallback: unknown; timer?: NodeJS.Timeout; cleanup?: () => void };
 
+const preserveText = (text: string) => text;
+const plainTextTheme = {
+  fg: (_color: unknown, text: string) => text,
+  bg: (_color: unknown, text: string) => text,
+  bold: preserveText,
+  italic: preserveText,
+  underline: preserveText,
+  inverse: preserveText,
+  strikethrough: preserveText,
+  getFgAnsi: () => "",
+  getBgAnsi: () => "",
+  getColorMode: () => "truecolor",
+  getThinkingBorderColor: () => preserveText,
+  getBashModeBorderColor: () => preserveText,
+} as unknown as ExtensionUIContext["theme"];
+
 export interface ExtensionUiState {
   statuses: Array<{ key: string; text: string }>;
   widgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;
@@ -60,7 +76,7 @@ export class ExtensionUiBridge {
     getEditorText: () => "",
     editor: (title: string, prefill?: string) => this.request("editor", { title, prefill }, undefined, undefined),
     addAutocompleteProvider: () => {}, setEditorComponent: () => {}, getEditorComponent: () => undefined,
-    theme: {} as never, getAllThemes: () => [], getTheme: () => undefined,
+    theme: plainTextTheme, getAllThemes: () => [], getTheme: () => undefined,
     setTheme: () => ({ success: false, error: "Theme switching is not supported by the WuxianPi host" }),
     getToolsExpanded: () => false, setToolsExpanded: () => {},
   } as unknown as ExtensionUIContext;

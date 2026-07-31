@@ -33,10 +33,12 @@ test("web API serves static UI and core resource endpoints", { timeout: 20_000 }
 
   const status = await jsonFetch(`${base}/api/web/v1/status`);
   assert.equal(status.ok, true);
+  assert.match(status.deploymentId, /^sha256-[a-f0-9]{24}$/);
   assert.equal(status.eventTransport, "snapshot-sse-v1");
   assert.equal(status.capabilities.staticWebUi, 1);
 
   const health = await jsonFetch(`${base}/health`);
+  assert.equal(health.deploymentId, status.deploymentId);
   assert.equal(health.capabilities.staticWebUi, 1);
   assert.equal(health.uiMetadataPath, "/v1/ui/metadata");
 

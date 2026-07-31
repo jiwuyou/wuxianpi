@@ -39,12 +39,7 @@ test("AI Web contract covers session controls and complete snapshots", { timeout
   });
   assert.deepEqual(updatedTools.data.activeToolNames, ["read", "bash"]);
   assert.equal(Array.isArray(updatedTools.data.warnings), true);
-  assert.equal(updatedTools.data.warnings.length, 1);
-  assert.equal(updatedTools.data.warnings[0].code, "unknown_tool");
-  assert.equal(updatedTools.data.warnings[0].message, "Unknown tool name(s) ignored: pi:read");
-  assert.deepEqual(updatedTools.data.warnings[0].unknown, ["pi:read"]);
-  assert.equal(updatedTools.data.warnings[0].available.includes("read"), true);
-  assert.equal(updatedTools.data.warnings[0].available.includes("bash"), true);
+  assert.equal(updatedTools.data.warnings.length, 0);
 
   await jsonFetch(`${fixture.base}/api/web/v1/sessions/${sessionId}`, {
     method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ name: "Renamed" }),
@@ -95,6 +90,27 @@ test("assistant lifecycle, capabilities, TTS, MCP adapter status, and extension 
   const detail = await jsonFetch(`${fixture.base}/api/web/v1/assistants/copied`);
   assert.equal(detail.data.assistant.id, "copied");
   assert.equal(typeof detail.data.files.agents, "string");
+  await jsonFetch(`${fixture.base}/api/web/v1/assistants/copied`, {
+    method: "PATCH", headers: jsonHeaders,
+    body: JSON.stringify({ manifest: { tools: ["pi:read", "pi:bash"] } }),
+  });
+  const assistantSession = await jsonFetch(`${fixture.base}/api/web/v1/sessions`, {
+    method: "POST", headers: jsonHeaders, body: JSON.stringify({ assistantId: "copied" }),
+  });
+  const assistantSlot = await fixture.server.registry.getOrOpen(assistantSession.data.sessionId);
+  assistantSlot.runtime.session.sessionManager.appendMessage({ role: "user", content: "persist assistant tools", timestamp: Date.now() });
+  assistantSlot.runtime.session.sessionManager.appendMessage({
+    role: "assistant", content: [{ type: "text", text: "persisted" }], api: "openai-responses",
+    provider: "openai", model: "seed", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now(),
+  });
+  const assistantTools = await jsonFetch(`${fixture.base}/api/web/v1/sessions/${assistantSession.data.sessionId}/tools`);
+  assert.deepEqual(assistantTools.data.activeToolNames, ["read", "bash"]);
+  assert.equal(assistantTools.data.toolSource, "assistant");
+  await fixture.server.registry.close(assistantSession.data.sessionId);
+  const reopenedAssistantTools = await jsonFetch(`${fixture.base}/api/web/v1/sessions/${assistantSession.data.sessionId}/tools`);
+  assert.deepEqual(reopenedAssistantTools.data.activeToolNames, ["read", "bash"]);
+  assert.equal(reopenedAssistantTools.data.toolSource, "assistant");
 
   const exported = await fetch(`${fixture.base}/api/web/v1/assistants/copied/export`);
   assert.equal(exported.headers.get("content-type"), "application/zip");
@@ -111,9 +127,11 @@ test("assistant lifecycle, capabilities, TTS, MCP adapter status, and extension 
     }),
   });
   assert.equal(config.data.mcpServers[0].id, "local");
-  assert.match(await readFile(join(fixture.agentDir, "mcp.json"), "utf8"), /"local"/);
+  assert.match(await readFile(fixture.mcpConfigPath, "utf8"), /"local"/);
   const capabilities = await jsonFetch(`${fixture.base}/api/web/v1/capabilities`);
   assert.equal(Array.isArray(capabilities.data.catalog.capabilities), true);
+  assert.deepEqual(capabilities.data.catalog.capabilities.find((item) => item.id === "pi:read").selection,
+    { field: "tools", values: ["pi:read"] });
   assert.equal(capabilities.data.config.ttsProfiles[0].id, "browser:test");
   const permissions = await jsonFetch(`${fixture.base}/api/web/v1/capabilities/permissions`);
   assert.deepEqual(permissions.data.pending, []);
@@ -124,7 +142,7 @@ test("assistant lifecycle, capabilities, TTS, MCP adapter status, and extension 
   const mcp = await jsonFetch(`${fixture.base}/api/web/v1/capabilities/mcp`, {
     method: "POST", headers: jsonHeaders, body: JSON.stringify({ action: "test", serverId: "local" }),
   });
-  assert.equal(mcp.data.configPath, join(fixture.agentDir, "mcp.json"));
+  assert.equal(mcp.data.configPath, fixture.mcpConfigPath);
   const tts = await fetch(`${fixture.base}/api/web/v1/capabilities/tts`, {
     method: "POST", headers: jsonHeaders, body: JSON.stringify({ profileId: "browser:test", text: "hello" }),
   }).then((response) => response.json());
@@ -150,13 +168,14 @@ const jsonHeaders = { "content-type": "application/json" };
 async function startFixture(t, name) {
   const root = await mkdtemp(join(tmpdir(), `wuxianpi-${name}-`));
   const agentDir = join(root, "agent");
-  const server = createRuntimeServer({ host: "127.0.0.1", port: 0, agentDir, idleTimeoutMs: 0 });
+  const mcpConfigPath = join(root, "mcp", "mcp.json");
+  const server = createRuntimeServer({ host: "127.0.0.1", port: 0, agentDir, mcpConfigPath, idleTimeoutMs: 0 });
   const address = await server.start();
   t.after(async () => {
     await server.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   });
-  return { root, agentDir, server, base: `http://127.0.0.1:${address.port}` };
+  return { root, agentDir, mcpConfigPath, server, base: `http://127.0.0.1:${address.port}` };
 }
 
 async function jsonFetch(url, init) {

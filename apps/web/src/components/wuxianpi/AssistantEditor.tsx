@@ -53,11 +53,24 @@ function capabilityField(source: CapabilityDescriptor["source"]): "tools" | "ski
   return "tools";
 }
 
-function capabilitySelectionId(capability: CapabilityDescriptor): string {
+function legacyCapabilitySelectionId(capability: CapabilityDescriptor): string {
   if (capability.source === "skill") return capability.id.replace(/^skill:/, "");
   if (capability.source === "mcp") return capability.id.replace(/^mcp:/, "");
   if (capability.source === "web-extension") return capability.id.replace(/^web-extension:/, "");
   return capability.id;
+}
+
+function capabilitySelection(capability: CapabilityDescriptor) {
+  const field = capability.selection?.field ?? capabilityField(capability.source);
+  const values = capability.selection
+    ? capability.selection.values
+    : [legacyCapabilitySelectionId(capability)];
+  const runtimeValues = field === "tools"
+    ? values.map((value) => value.replace(/^pi-extension:/, "").replace(/^pi:/, "").replace(/^builtin:/, ""))
+    : values;
+  const legacyValue = legacyCapabilitySelectionId(capability);
+  const aliases = [...new Set([legacyValue, ...runtimeValues])];
+  return { field, values, runtimeValues, legacyValue, aliases };
 }
 
 function humanSource(source: CapabilityDescriptor["source"]): string {
@@ -114,13 +127,15 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
   };
 
   const toggleCapability = (capability: CapabilityDescriptor) => {
-    const field = capabilityField(capability.source);
+    const { field, values, runtimeValues, legacyValue, aliases } = capabilitySelection(capability);
     if (!field) return;
     setManifest((current) => {
       const selected = new Set(listValue(current[field]));
-      const selectionId = capabilitySelectionId(capability);
-      if (selected.has(selectionId)) selected.delete(selectionId);
-      else selected.add(selectionId);
+      const fullySelected = values.every((value) => selected.has(value))
+        || runtimeValues.every((value) => selected.has(value))
+        || selected.has(legacyValue);
+      for (const value of [...values, ...aliases]) selected.delete(value);
+      if (!fullySelected) for (const value of values) selected.add(value);
       return { ...current, [field]: [...selected] };
     });
   };
@@ -195,11 +210,16 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
                   <h3>{humanSource(source)}</h3>
                   <div className="capability-list">
                     {items.map((capability) => {
-                      const field = capabilityField(source);
-                      const selected = field ? listValue(manifest[field]).includes(capabilitySelectionId(capability)) : false;
+                      const { field, values, runtimeValues, legacyValue } = capabilitySelection(capability);
+                      const selectedValues = field ? listValue(manifest[field]) : [];
+                      const selected = values.length > 0 && (
+                        values.every((value) => selectedValues.includes(value))
+                        || runtimeValues.every((value) => selectedValues.includes(value))
+                        || selectedValues.includes(legacyValue)
+                      );
                       return (
                         <label key={capability.id} className={`capability-row ${capability.status !== "available" ? "unavailable" : ""}`}>
-                          <input type="checkbox" checked={selected} disabled={capability.status !== "available"} onChange={() => toggleCapability(capability)} />
+                          <input type="checkbox" checked={selected} disabled={capability.status !== "available" || !capability.assistantSelectable} onChange={() => toggleCapability(capability)} />
                           <span><strong>{capability.name}</strong><small>{capability.description ?? capability.id}</small></span>
                           <em>{capability.risk.join(" · ") || "safe"}</em>
                         </label>

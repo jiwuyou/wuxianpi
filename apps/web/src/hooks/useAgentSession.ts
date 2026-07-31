@@ -11,7 +11,7 @@ import type {
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
-import type { ToolEntry } from "@/components/ToolPanel";
+import type { SelectableToolPreset, ToolEntry, ToolPreset } from "@/components/ToolPanel";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { PermissionDecision, PermissionRequest } from "@/lib/wuxianpi/contracts";
 import { getPermissionState, mutatePermission } from "@/components/wuxianpi/api";
@@ -141,7 +141,7 @@ export interface UseAgentSessionOptions {
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsPanelOpen?: () => void;
-  setToolPreset?: (preset: "none" | "default" | "full") => void;
+  setToolPreset?: (preset: ToolPreset) => void;
 }
 
 export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -283,7 +283,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
-  const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
+  const [toolPreset, setToolPreset] = useState<ToolPreset>(assistantId ? "assistant" : "default");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
@@ -323,6 +323,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
+
+  const showToolWarnings = useCallback((warnings: unknown) => {
+    if (!Array.isArray(warnings)) return;
+    for (const warning of warnings) {
+      const message = warning && typeof warning === "object" && "message" in warning
+        ? String((warning as { message?: unknown }).message ?? "") : "";
+      if (!message) continue;
+      dispatchNotice({ type: "add", notice: { id: createNoticeId(), type: "warning", message } });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isNew) setToolPresetState(assistantId ? "assistant" : "default");
+  }, [assistantId, isNew, setToolPresetState]);
 
   const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
@@ -437,15 +451,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadTools = useCallback(async (sid: string) => {
     try {
-      const tools = await sendAgentCommand<ToolEntry[]>(sid, { type: "get_tools" });
-      if (tools) {
-        const { getPresetFromTools } = await import("@/components/ToolPanel");
-        setToolPresetState(getPresetFromTools(tools));
-      }
+      const result = await webApi.tools(sid);
+      const active = new Set(Array.isArray(result.activeToolNames) ? result.activeToolNames.map(String) : []);
+      const tools = Array.isArray(result.tools) ? result.tools.map((value) => {
+        const tool = value && typeof value === "object" ? value as Record<string, unknown> : {};
+        const name = String(tool.name ?? "");
+        return { name, description: String(tool.description ?? ""), active: active.has(name) } satisfies ToolEntry;
+      }) : [];
+      const { getPresetFromTools } = await import("@/components/ToolPanel");
+      setToolPresetState(assistantId && result.toolSource === "assistant" ? "assistant" : getPresetFromTools(tools));
     } catch (e) {
       console.error("Failed to load tools:", e);
     }
-  }, [setToolPresetState]);
+  }, [assistantId, setToolPresetState]);
 
   const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)") => {
     const sid = sessionIdRef.current;
@@ -471,16 +489,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const promise = (async () => {
       const selectedModel = newSessionModel ?? newSessionDefaultModel;
       if (selectedModel) setPendingModel(selectedModel);
-      const { PRESET_NONE, PRESET_DEFAULT, PRESET_FULL } = await import("@/components/ToolPanel");
-      const toolNames = toolPreset === "none" ? PRESET_NONE : toolPreset === "default" ? PRESET_DEFAULT : PRESET_FULL;
+      const { toolNamesForPreset } = await import("@/components/ToolPanel");
+      const toolNames = toolNamesForPreset(toolPreset);
       const result = await webApi.createSession({
         ...(assistantId ? { assistantId } : {}),
         cwd: newSessionCwd,
-        toolNames,
+        ...(toolNames ? { toolNames } : {}),
         ...(selectedModel && !assistantId ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
         ...(thinkingLevel !== "auto" && !assistantId ? { thinkingLevel } : {}),
       });
       const realId = result.sessionId;
+      showToolWarnings(result.warnings);
       sessionIdRef.current = realId;
       return realId;
     })();
@@ -491,7 +510,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, showToolWarnings]);
 
   const respondToPermission = useCallback(async (decision: PermissionDecision) => {
     const request = permissionRequest;
@@ -859,16 +878,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           promoteNewSession(1, message);
         } else {
           if (selectedModel) setPendingModel(selectedModel);
-          const { PRESET_NONE, PRESET_DEFAULT, PRESET_FULL } = await import("@/components/ToolPanel");
-          const toolNames = toolPreset === "none" ? PRESET_NONE : toolPreset === "default" ? PRESET_DEFAULT : PRESET_FULL;
+          const { toolNamesForPreset } = await import("@/components/ToolPanel");
+          const toolNames = toolNamesForPreset(toolPreset);
           const result = await webApi.createSession({
             ...(assistantId ? { assistantId } : {}),
             cwd: newSessionCwd,
-            toolNames,
+            ...(toolNames ? { toolNames } : {}),
             ...(selectedModel && !assistantId ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" && !assistantId ? { thinkingLevel } : {}),
           });
           const realId = result.sessionId;
+          showToolWarnings(result.warnings);
           sessionIdRef.current = realId;
           sentSessionId = realId;
           await connectEvents(realId);
@@ -907,7 +927,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, promoteNewSession, waitForPromptSettlement]);
+  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, promoteNewSession, waitForPromptSettlement, showToolWarnings]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1149,18 +1169,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const handleToolPresetChange = useCallback(async (preset: "none" | "default" | "full") => {
-    const { PRESET_NONE, PRESET_DEFAULT, PRESET_FULL } = await import("@/components/ToolPanel");
-    const toolNames = preset === "none" ? PRESET_NONE : preset === "default" ? PRESET_DEFAULT : PRESET_FULL;
+  const handleToolPresetChange = useCallback(async (preset: SelectableToolPreset) => {
+    const { toolNamesForPreset } = await import("@/components/ToolPanel");
     setToolPresetState(preset);
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, { type: "set_tools", toolNames });
+      if (preset === "assistant" && assistantId) {
+        const result = await webApi.applyAssistantTools(sid, assistantId);
+        showToolWarnings(result.warnings);
+      } else {
+        const toolNames = toolNamesForPreset(preset) ?? [];
+        await sendAgentCommand(sid, { type: "set_tools", toolNames });
+      }
     } catch (e) {
       console.error("Failed to set tools:", e);
     }
-  }, [setToolPresetState]);
+  }, [assistantId, setToolPresetState, showToolWarnings]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
@@ -1196,8 +1221,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (session) {
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
+        void loadTools(session.id);
         if (agentState?.running) {
-          loadTools(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             agentRunningRef.current = true;
             setAgentRunning(true);

@@ -78,8 +78,12 @@ export class WebApi {
       if (assistant) cwd = assistant.path;
       const config = await this.options.services.readConfig();
       const manifest = assistant?.manifest ?? {};
+      const assistantTools = assistantId && body.toolNames === undefined
+        ? await this.options.services.resolveAssistantToolNames(assistantId)
+        : undefined;
       const configuredTools = Array.isArray(body.toolNames) ? body.toolNames
-        : Array.isArray(manifest.tools) ? manifest.tools
+        : assistantTools ? assistantTools.toolNames
+          : Array.isArray(manifest.tools) ? manifest.tools
           : Array.isArray(config.defaults?.tools) ? config.defaults.tools : undefined;
       const configuredModel = isRecord(body.model) ? body.model
         : isRecord(manifest.model) ? manifest.model
@@ -96,7 +100,9 @@ export class WebApi {
             throw new RequestError("invalid_payload", "toolNames must be an array of strings");
         }
         if (configuredTools && configuredTools.every((name: unknown) => typeof name === "string")) {
-          const toolResult = await this.options.registry.setTools(created.sessionId, configuredTools as string[]);
+          const toolResult = assistantTools
+            ? await this.options.registry.setAssistantTools(created.sessionId, configuredTools as string[])
+            : await this.options.registry.setTools(created.sessionId, configuredTools as string[]);
           if (isRecord(toolResult) && Array.isArray(toolResult.warnings)) toolWarnings = toolResult.warnings;
         }
         if ((configuredProvider && !configuredModelId) || (!configuredProvider && configuredModelId)) {
@@ -346,6 +352,12 @@ export class WebApi {
         throw new RequestError("invalid_payload", "toolNames must be an array of strings");
       }
       json(response, 200, { ok: true, data: await registry.setTools(sessionId, body.toolNames) }); return;
+    }
+    if (action === "assistant-tools" && method === "POST") {
+      const body = await readJsonBody(request);
+      json(response, 200, { ok: true, data: await this.options.services.applyAssistantTools(
+        sessionId, requireString(body, "assistantId"),
+      ) }); return;
     }
     if (action === "extension-ui-responses" && method === "POST") {
       const body = await readJsonBody(request);
