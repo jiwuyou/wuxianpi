@@ -9,6 +9,7 @@ import {
 import { ExtensionUiBridge } from "./extension-ui.js";
 import type { PersistentDiagnostics } from "./diagnostics.js";
 import { ModelSetupService } from "./model-setup-service.js";
+import type { ResolvedAssistantPackageResources } from "./package-types.js";
 import { RequestError } from "./protocol.js";
 
 export class SerialExecutor {
@@ -87,6 +88,7 @@ export class SessionRegistry {
   private readonly modelSetupService: ModelSetupService;
   private readonly listeners = new Set<EventSink>();
   private readonly assistantToolsResolver?: (cwd: string) => Promise<string[] | undefined>;
+  private readonly assistantResourcesResolver?: (cwd: string) => Promise<ResolvedAssistantPackageResources | undefined>;
 
   constructor(emitEvent?: EventSink, options: {
     idleTimeoutMs?: number;
@@ -95,6 +97,7 @@ export class SessionRegistry {
     settingsManager?: SettingsManager;
     diagnostics?: PersistentDiagnostics;
     assistantToolsResolver?: (cwd: string) => Promise<string[] | undefined>;
+    assistantResourcesResolver?: (cwd: string) => Promise<ResolvedAssistantPackageResources | undefined>;
   } = {}) {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 5 * 60_000;
     this.agentDir = options.agentDir ?? getAgentDir();
@@ -113,6 +116,7 @@ export class SessionRegistry {
     });
     this.diagnostics = options.diagnostics;
     this.assistantToolsResolver = options.assistantToolsResolver;
+    this.assistantResourcesResolver = options.assistantResourcesResolver;
     if (emitEvent) this.listeners.add(emitEvent);
   }
 
@@ -708,11 +712,21 @@ export class SessionRegistry {
   private async createSlot(manager: SessionManager): Promise<RuntimeSlot> {
     const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
       const settingsManager = isolatedSessionSettings(cwd, this.agentDir);
+      const packageResources = await this.assistantResourcesResolver?.(cwd);
       const services = await createAgentSessionServices({
         cwd,
         agentDir: this.agentDir,
         modelRuntime: await this.sharedModelRuntime,
         settingsManager,
+        ...(packageResources ? {
+          resourceLoaderOptions: {
+            additionalExtensionPaths: packageResources.extensionPaths,
+            additionalSkillPaths: packageResources.skillPaths,
+            additionalPromptTemplatePaths: packageResources.promptPaths,
+            additionalThemePaths: packageResources.themePaths,
+            appendSystemPrompt: packageResources.appendSystemPrompt,
+          },
+        } : {}),
       });
       return { ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
         services, diagnostics: services.diagnostics };

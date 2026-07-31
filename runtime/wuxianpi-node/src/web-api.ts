@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { boundedInteger, RequestError, stringifyMessage } from "./protocol.js";
 import type { RegistrySessionEvent, SessionRegistry } from "./session-registry.js";
 import { contentType, errorMessage, WebServices } from "./web-services.js";
+import type { WuxianPiPackageManager } from "./package-manager.js";
 
 const API_ROOT = "/api/web/v1";
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
@@ -13,6 +14,7 @@ const SSE_HEARTBEAT_MS = 15_000;
 export interface WebApiOptions {
   registry: SessionRegistry;
   services: WebServices;
+  packageManager?: WuxianPiPackageManager;
   status: () => Record<string, unknown>;
 }
 
@@ -36,10 +38,15 @@ export class WebApi {
         response.end();
         return true;
       }
-      const status = error instanceof RequestError
-        ? error.code === "model_revision_conflict" || error.code === "model_concurrent_write" ? 409
-          : error.code.endsWith("_not_found") || error.code === "session_not_found" ? 404 : 400
-        : 500;
+      const explicitStatus = error instanceof RequestError && isRecord(error.details) &&
+        typeof error.details.httpStatus === "number" && error.details.httpStatus >= 400 && error.details.httpStatus <= 599
+        ? error.details.httpStatus : undefined;
+      const status = explicitStatus ?? (error instanceof RequestError
+        ? error.code === "model_revision_conflict" || error.code === "model_concurrent_write" ||
+          error.code.includes("conflict") || error.code.includes("mismatch") || error.code === "package_already_installed" ? 409
+          : error.code.endsWith("_not_found") || error.code === "session_not_found" ? 404
+            : error.code === "market_unavailable" || error.code === "service_manager_unavailable" ? 503 : 400
+        : 500);
       json(response, status, {
         ok: false,
         error: {
@@ -230,7 +237,7 @@ export class WebApi {
       await this.streamRawFile(request, response, requireQuery(url, "path")); return;
     }
     if (path === "/skills" && method === "GET") {
-      json(response, 200, { ok: true, data: await this.options.services.listSkills(url.searchParams.get("cwd") ?? process.cwd()) }); return;
+      json(response, 200, { ok: true, data: await this.options.services.listSkills(url.searchParams.get("cwd") ?? this.options.services.defaultCwd) }); return;
     }
     if (path === "/skills/search" && method === "GET") {
       json(response, 200, { ok: true, data: { packages: await this.options.services.searchPiPackages(requireQuery(url, "q")) } }); return;
@@ -238,11 +245,11 @@ export class WebApi {
     if ((path === "/skills/install" || path === "/skills") && method === "POST") {
       const body = await readJsonBody(request);
       json(response, 201, { ok: true, data: await this.options.services.installPiPackage(
-        requireString(body, "source"), optionalString(body, "cwd") ?? process.cwd(), body.local === true,
+        requireString(body, "source"), optionalString(body, "cwd") ?? this.options.services.defaultCwd, body.local === true,
       ) }); return;
     }
     if (path === "/extensions" && method === "GET") {
-      json(response, 200, { ok: true, data: { extensions: await this.options.services.listWebExtensions(url.searchParams.get("cwd") ?? process.cwd()) } }); return;
+      json(response, 200, { ok: true, data: { extensions: await this.options.services.listWebExtensions(url.searchParams.get("cwd") ?? this.options.services.defaultCwd) } }); return;
     }
     if (path === "/extensions/nonce" && method === "POST") {
       const body = await readJsonBody(request);
@@ -265,7 +272,7 @@ export class WebApi {
     }
     if (path === "/capabilities" && method === "GET") {
       const [catalog, config] = await Promise.all([
-        this.options.services.capabilities(url.searchParams.get("cwd") ?? process.cwd()),
+        this.options.services.capabilities(url.searchParams.get("cwd") ?? this.options.services.defaultCwd),
         this.options.services.readConfig(),
       ]);
       json(response, 200, { ok: true, data: { catalog, config } }); return;
@@ -288,7 +295,99 @@ export class WebApi {
     if (path === "/capabilities/tts" && method === "POST") {
       json(response, 200, await this.options.services.speak(await readJsonBody(request))); return;
     }
+    if (path === "/market/packages" && method === "GET") {
+      json(response, 200, { ok: true, data: await this.requirePackageManager().marketPackages(url.searchParams) }); return;
+    }
+    const marketRoute = /^\/market\/packages\/([^/]+)(?:\/(releases|install-plan))?$/.exec(path);
+    if (marketRoute && method === "GET") {
+      const packageId = decodeURIComponent(marketRoute[1]!);
+      const action = marketRoute[2];
+      const manager = this.requirePackageManager();
+      const data = action === "releases" ? await manager.marketReleases(packageId, url.searchParams)
+        : action === "install-plan" ? await manager.marketInstallPlan(packageId, url.searchParams.get("releaseId") ?? undefined)
+          : await manager.marketPackage(packageId);
+      json(response, 200, { ok: true, data }); return;
+    }
+    if (path === "/packages" && method === "GET") {
+      json(response, 200, { ok: true, data: { packages: await this.requirePackageManager().listInstalled() } }); return;
+    }
+    if (path === "/packages" && method === "POST") {
+      const body = await readJsonBody(request);
+      json(response, 201, { ok: true, data: await this.requirePackageManager().install(requireString(body, "packageId"), optionalString(body, "releaseId")) }); return;
+    }
+    if (path === "/packages/updates" && method === "GET") {
+      json(response, 200, { ok: true, data: { updates: await this.requirePackageManager().checkUpdates(url.searchParams.get("packageId") ?? undefined) } }); return;
+    }
+    if (path === "/packages/operations" && method === "GET") {
+      const limit = Number(url.searchParams.get("limit") ?? 100);
+      json(response, 200, { ok: true, data: { operations: await this.requirePackageManager().operations(
+        Number.isFinite(limit) ? limit : 100, url.searchParams.get("packageId") ?? undefined,
+      ) } }); return;
+    }
+    if (path === "/packages/publisher/submissions" && method === "POST") {
+      json(response, 202, { ok: true, data: await this.requirePackageManager().submitMarketPackage(await readJsonBody(request)) }); return;
+    }
+    if (path === "/packages/execution-context") {
+      const manager = this.requirePackageManager();
+      if (method === "GET") json(response, 200, { ok: true, data: { context: await manager.executionContext() } });
+      else if (method === "PUT") json(response, 200, { ok: true, data: { context: await manager.setExecutionContext(await readJsonBody(request)) } });
+      else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
+      return;
+    }
+    if (path === "/packages/experiences" && method === "GET") {
+      json(response, 200, { ok: true, data: { experiences: await this.requirePackageManager().listExperiences(url.searchParams.get("assistantId") ?? undefined) } }); return;
+    }
+    const experienceRoute = /^\/packages\/experiences\/([^/]+)\/update$/.exec(path);
+    if (experienceRoute && method === "POST") {
+      const body = await readJsonBody(request);
+      json(response, 200, { ok: true, data: await this.requirePackageManager().updateExperience(
+        decodeURIComponent(experienceRoute[1]!), optionalString(body, "experienceSpaceId"),
+      ) }); return;
+    }
+    const bindingRoute = /^\/packages\/bindings\/([^/]+)$/.exec(path);
+    if (bindingRoute) {
+      const assistantId = decodeURIComponent(bindingRoute[1]!);
+      if (method === "GET") json(response, 200, { ok: true, data: { binding: await this.requirePackageManager().assistantBinding(assistantId) } });
+      else if (method === "PUT") {
+        const body = await readJsonBody(request);
+        if (!Array.isArray(body.enabledContributionIds) || !body.enabledContributionIds.every((id) => typeof id === "string")) {
+          throw new RequestError("invalid_payload", "enabledContributionIds must be an array of strings");
+        }
+        if (body.experienceSpaces !== undefined && !isRecord(body.experienceSpaces)) throw new RequestError("invalid_payload", "experienceSpaces must be an object");
+        json(response, 200, { ok: true, data: { binding: await this.requirePackageManager().setAssistantBinding(assistantId, {
+          enabledContributionIds: body.enabledContributionIds as string[],
+          experienceSpaces: body.experienceSpaces as Record<string, string> | undefined,
+        }) } });
+      } else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
+      return;
+    }
+    const contributionRoute = /^\/packages\/([^/]+)\/contributions\/([^/]+)\/(enable|disable)$/.exec(path);
+    if (contributionRoute && method === "POST") {
+      const contributionId = decodeURIComponent(contributionRoute[2]!);
+      json(response, 200, { ok: true, data: await this.requirePackageManager().setContributionEnabled(contributionId, contributionRoute[3] === "enable") }); return;
+    }
+    const localPackageRoute = /^\/packages\/([^/]+)(?:\/(update|commit))?$/.exec(path);
+    if (localPackageRoute) {
+      const packageId = decodeURIComponent(localPackageRoute[1]!);
+      const action = localPackageRoute[2];
+      const manager = this.requirePackageManager();
+      if (!action && method === "GET") json(response, 200, { ok: true, data: { package: await manager.detail(packageId) } });
+      else if (!action && method === "DELETE") json(response, 200, { ok: true, data: await manager.uninstall(packageId, url.searchParams.get("purgeData") === "true") });
+      else if (action === "update" && method === "POST") {
+        const body = await readJsonBody(request);
+        json(response, 200, { ok: true, data: await manager.update(packageId, optionalString(body, "releaseId")) });
+      } else if (action === "commit" && method === "POST") {
+        const body = await readJsonBody(request);
+        json(response, 200, { ok: true, data: await manager.commitLocalChanges(packageId, requireString(body, "message")) });
+      } else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
+      return;
+    }
     throw new RequestError("not_found", `Web API route not found: ${method} ${path}`);
+  }
+
+  private requirePackageManager(): WuxianPiPackageManager {
+    if (!this.options.packageManager) throw new RequestError("package_manager_unavailable", "WuxianPi Package Manager is not configured");
+    return this.options.packageManager;
   }
 
   private async routeSession(request: IncomingMessage, response: ServerResponse, sessionId: string, action: string): Promise<void> {

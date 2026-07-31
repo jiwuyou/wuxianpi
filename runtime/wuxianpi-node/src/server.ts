@@ -26,6 +26,8 @@ import { SessionRegistry } from "./session-registry.js";
 import { StaticFiles } from "./static-files.js";
 import { WebApi } from "./web-api.js";
 import { WebServices } from "./web-services.js";
+import { MarketClient } from "./market-client.js";
+import { WuxianPiPackageManager } from "./package-manager.js";
 
 export interface RuntimeServerOptions {
   host: string;
@@ -38,6 +40,9 @@ export interface RuntimeServerOptions {
   preferredWebUiUrl?: string;
   mcpConfigPath?: string;
   deploymentId?: string;
+  hubUrl?: string;
+  packageManagerRoot?: string;
+  maintenanceRoot?: string;
 }
 
 interface ConnectionContext {
@@ -90,21 +95,35 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const requestOwner = new AsyncLocalStorage<WebSocket>();
   const inFlightRequests = new Map<WebSocket, number>();
   let webServices: WebServices | undefined;
+  const packageManager = new WuxianPiPackageManager({
+    agentDir,
+    rootDir: options.packageManagerRoot ?? join(agentDir, "wuxianpi", "package-manager"),
+    mcpConfigPath: options.mcpConfigPath,
+    marketClient: new MarketClient({ baseUrl: options.hubUrl }),
+    maintenanceRoot: options.maintenanceRoot,
+    initialExecutionContext: {
+      packageIds: commaSeparated(process.env.WUXIANPI_EXECUTION_PACKAGE_IDS),
+      contributionIds: commaSeparated(process.env.WUXIANPI_EXECUTION_CONTRIBUTION_IDS),
+      serviceIds: commaSeparated(process.env.WUXIANPI_EXECUTION_SERVICE_IDS ?? "pi-agent,service-manager"),
+    },
+  });
   const registry = new SessionRegistry(undefined, {
     idleTimeoutMs: options.idleTimeoutMs,
     agentDir,
     diagnostics,
     assistantToolsResolver: async (cwd) => webServices?.resolveAssistantToolNamesForCwd(cwd),
+    assistantResourcesResolver: async (cwd) => packageManager.resolveAssistantResourcesForCwd(cwd, join(agentDir, "assistants")),
   });
   const nativeEvents = new NativeEventProjector(registry);
   registry.subscribe((event) => routeEvent(nativeEvents.project(event)));
   const adapter = new PiSdkAdapter(registry);
-  webServices = new WebServices({ agentDir, registry, mcpConfigPath: options.mcpConfigPath });
+  webServices = new WebServices({ agentDir, registry, mcpConfigPath: options.mcpConfigPath, packageManager });
   const staticFiles = new StaticFiles(options.webRoot);
   let deploymentId = options.deploymentId?.trim() || "starting";
   const runtimeCapabilities = {
     ...CAPABILITIES,
     webApi: 1,
+    packageManager: 1,
     snapshotSse: 1,
     staticWebUi: staticFiles.enabled ? 1 : 0,
   } as const;
@@ -112,6 +131,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const webApi = new WebApi({
     registry,
     services: webServices,
+    packageManager,
     status: () => ({
       version: RUNTIME_VERSION,
       deploymentId,
@@ -645,4 +665,8 @@ function rawDataBytes(data: WebSocket.RawData): number {
   if (data instanceof ArrayBuffer) return data.byteLength;
   if (Array.isArray(data)) return data.reduce((total, item) => total + item.byteLength, 0);
   return data.byteLength;
+}
+
+function commaSeparated(value: string | undefined): string[] {
+  return [...new Set((value ?? "").split(",").map((item) => item.trim()).filter(Boolean))];
 }

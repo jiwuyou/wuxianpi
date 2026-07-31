@@ -74,6 +74,33 @@ export class StandardMcpConfigStore {
     return Object.entries(next).map(([id, definition]) => fromStandardServer(id, definition as Record<string, unknown>));
   }
 
+  async upsert(servers: McpServerConfig[]): Promise<McpServerConfig[]> {
+    const document = await this.readDocument();
+    const previous = isRecord(document.mcpServers) ? document.mcpServers : {};
+    const next: Record<string, unknown> = { ...previous };
+    const ids = new Set<string>();
+    for (const requested of servers) {
+      const server = validateServer(requested);
+      if (ids.has(server.id)) throw new McpConfigError(`Duplicate MCP server id: ${server.id}`);
+      ids.add(server.id);
+      const previousServer = previous[server.id];
+      next[server.id] = toStandardServer(server, isRecord(previousServer) ? previousServer : {});
+    }
+    document.mcpServers = next;
+    await writeJson(this.path, document);
+    return Object.entries(next).flatMap(([id, definition]) => isRecord(definition) ? [fromStandardServer(id, definition)] : []);
+  }
+
+  async remove(ids: string[]): Promise<McpServerConfig[]> {
+    const document = await this.readDocument();
+    const previous = isRecord(document.mcpServers) ? document.mcpServers : {};
+    const next: Record<string, unknown> = { ...previous };
+    for (const id of ids) delete next[id];
+    document.mcpServers = next;
+    await writeJson(this.path, document);
+    return Object.entries(next).flatMap(([id, definition]) => isRecord(definition) ? [fromStandardServer(id, definition)] : []);
+  }
+
   private async readDocument(): Promise<Record<string, unknown>> {
     let text: string;
     try {

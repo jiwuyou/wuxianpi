@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { DefaultPackageManager, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import { strFromU8, unzipSync, zipSync } from "fflate";
 import { McpConfigError, StandardMcpConfigStore, type McpServerConfig } from "./mcp-config.js";
+import type { WuxianPiPackageManager } from "./package-manager.js";
 import { RequestError } from "./protocol.js";
 import type { SessionRegistry } from "./session-registry.js";
 
@@ -66,11 +67,13 @@ export interface WebServicesOptions {
   agentDir: string;
   registry: SessionRegistry;
   mcpConfigPath?: string;
+  packageManager?: WuxianPiPackageManager;
 }
 
 export class WebServices {
   readonly assistantsRoot: string;
   readonly legacyExtensionsRoot: string;
+  readonly defaultCwd: string;
   readonly mcpConfig: StandardMcpConfigStore;
   private readonly nonces = new Map<string, { extensionId: string; assistantId: string; expiresAt: number }>();
   private readonly pendingPermissions = new Map<string, Record<string, unknown>>();
@@ -78,12 +81,12 @@ export class WebServices {
   constructor(private readonly options: WebServicesOptions) {
     this.assistantsRoot = join(options.agentDir, "assistants");
     this.legacyExtensionsRoot = join(options.agentDir, "wuxianpi", "extensions");
+    this.defaultCwd = options.agentDir;
     this.mcpConfig = new StandardMcpConfigStore(options.mcpConfigPath);
   }
 
   async listAssistants(includeArchived = false) {
     await this.ensureDefaultAssistant();
-    const sessions = (await this.options.registry.list({ all: true, offset: 0, limit: 1000 })).sessions;
     const entries = await readdir(this.assistantsRoot, { withFileTypes: true });
     const rows: Array<{
       id: string; path: string; manifest: Record<string, unknown>; sessionCount: number;
@@ -92,7 +95,7 @@ export class WebServices {
     for (const entry of entries) {
       if (!entry.isDirectory() || !SAFE_ID.test(entry.name)) continue;
       try {
-        const row = await this.getAssistant(entry.name, sessions);
+        const row = await this.getAssistant(entry.name);
         if (includeArchived || row.manifest.archived !== true) rows.push(row);
       } catch (error) {
         rows.push({
@@ -115,7 +118,7 @@ export class WebServices {
     if (!info.isDirectory() || info.isSymbolicLink()) throw new RequestError("assistant_not_found", `Assistant not found: ${id}`);
     const manifest = JSON.parse(await readFile(join(directory, "assistant.json"), "utf8")) as Record<string, unknown>;
     validateAssistantManifest(manifest);
-    const sessions = knownSessions ?? (await this.options.registry.list({ all: true, offset: 0, limit: 1000 })).sessions;
+    const sessions = knownSessions ?? (await this.options.registry.list({ cwd: directory, all: false, offset: 0, limit: 1000 })).sessions;
     const owned = sessions.filter((session) => resolve(session.cwd) === resolve(directory));
     return {
       id,
@@ -286,12 +289,16 @@ export class WebServices {
   }
 
   async listSkills(cwd: string) {
-    const loader = new DefaultResourceLoader({ cwd: resolve(cwd), agentDir: this.options.agentDir });
+    const packageResources = await this.options.packageManager?.resolveAssistantResourcesForCwd(cwd, this.assistantsRoot);
+    const loader = new DefaultResourceLoader({
+      cwd: resolve(cwd), agentDir: this.options.agentDir,
+      additionalSkillPaths: packageResources?.skillPaths,
+    });
     await loader.reload();
     return loader.getSkills();
   }
 
-  async installPiPackage(source: string, cwd = process.cwd(), local = false): Promise<Record<string, unknown>> {
+  async installPiPackage(source: string, cwd = this.defaultCwd, local = false): Promise<Record<string, unknown>> {
     const manager = new DefaultPackageManager({ cwd: resolve(cwd), agentDir: this.options.agentDir, settingsManager: this.options.registry.settings() });
     await manager.installAndPersist(source, { local });
     await Promise.all(this.options.registry.status().activeSessions.map((session) =>
@@ -308,9 +315,13 @@ export class WebServices {
     }));
   }
 
-  async listExtensions(cwd = process.cwd()) {
+  async listExtensions(cwd = this.defaultCwd) {
     const output = new Map<string, Record<string, unknown>>();
-    const loader = new DefaultResourceLoader({ cwd: resolve(cwd), agentDir: this.options.agentDir });
+    const packageResources = await this.options.packageManager?.resolveAssistantResourcesForCwd(cwd, this.assistantsRoot);
+    const loader = new DefaultResourceLoader({
+      cwd: resolve(cwd), agentDir: this.options.agentDir,
+      additionalExtensionPaths: packageResources?.extensionPaths,
+    });
     try {
       await loader.reload();
       const loaded = loader.getExtensions();
@@ -345,12 +356,13 @@ export class WebServices {
     return [...output.values()];
   }
 
-  async listWebExtensions(cwd = process.cwd()) {
-    return (await this.listExtensions(cwd)).filter((extension) => extension.kind === "wuxianpi" && extension.manifest);
+  async listWebExtensions(_cwd = this.defaultCwd) {
+    return (await this.findWebManifests()).filter((extension) =>
+      (extension.kind === "wuxianpi" || extension.kind === "wuxianpi-renderer") && extension.manifest);
   }
 
   async readExtensionAsset(extensionId: string, assetPath: string) {
-    const extensions = await this.listExtensions();
+    const extensions = await this.listWebExtensions();
     const extension = extensions.find((item) => item.id === extensionId);
     if (!extension || typeof extension.root !== "string") throw new RequestError("extension_not_found", `Extension not found: ${extensionId}`);
     const target = resolve(extension.root, assetPath);
@@ -362,7 +374,7 @@ export class WebServices {
     return { path: targetReal, size: info.size, contentType: contentType(targetReal) };
   }
 
-  async capabilities(cwd = process.cwd()) {
+  async capabilities(cwd = this.defaultCwd) {
     const [skills, extensions, config] = await Promise.all([
       this.listSkills(cwd).catch((error) => ({ skills: [], diagnostics: [{ message: errorMessage(error) }] })),
       this.listExtensions(cwd),
@@ -421,10 +433,12 @@ export class WebServices {
     const selectedMcpServers = Array.isArray(assistant.manifest.mcpServers)
       ? assistant.manifest.mcpServers
       : Array.isArray(config.defaults?.mcpServers) ? config.defaults.mcpServers : [];
+    const packageMcpServers = (await this.options.packageManager?.resolveAssistantResources(id))?.mcpServerIds ?? [];
     const availableMcpServers = new Set((config.mcpServers as McpServerConfig[])
       .filter((server) => server.enabled !== false)
       .map((server) => server.id));
-    if (selectedMcpServers.some((id: unknown) => typeof id === "string" && availableMcpServers.has(id)) && !resolved.includes("mcp")) {
+    if ((selectedMcpServers.some((id: unknown) => typeof id === "string" && availableMcpServers.has(id)) ||
+      packageMcpServers.some((id) => availableMcpServers.has(id))) && !resolved.includes("mcp")) {
       resolved.push("mcp");
     }
     return { toolNames: resolved, configured };
@@ -663,10 +677,10 @@ export class WebServices {
   private async findWebManifests(): Promise<Array<Record<string, unknown>>> {
     const roots = [
       join(this.options.agentDir, "extensions"),
-      join(this.options.agentDir, "packages"),
       this.legacyExtensionsRoot,
     ];
     const manifests: Array<Record<string, unknown>> = [];
+    manifests.push(...(await this.options.packageManager?.listActiveUiContributions() ?? []));
     for (const root of roots) await scanDirectories(root, 3, async (directory) => {
       const legacyPath = join(directory, "wuxianpi-extension.json");
       const packagePath = join(directory, "package.json");
