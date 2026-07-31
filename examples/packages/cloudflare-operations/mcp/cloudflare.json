@@ -1,0 +1,8 @@
+{
+  "id": "cloudflare",
+  "name": "Cloudflare",
+  "transport": "streamable-http",
+  "url": "https://mcp.cloudflare.com/mcp",
+  "auth": "oauth",
+  "enabled": true
+}

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "packageId": "io.wuxianpi.cloudflare-operations",
+  "releaseId": "rel_01JCFOPS",
+  "version": "1.0.0",
+  "approvedCommit": "4e9f8c18973e30c8a0ed896a78bd88e8803f84e8",
+  "manifestPath": "wuxianpi-package.json",
+  "manifestDigest": "531d311391c0e16751233ccddceb24617661000e2e6c4b7d9dd0ae9eee877826",
+  "gitSources": [
+    {
+      "kind": "github",
+      "url": "https://github.com/example/wuxianpi-cloudflare-operations.git",
+      "priority": 100
+    },
+    {
+      "kind": "mirror",
+      "url": "https://gitcode.com/example/wuxianpi-cloudflare-operations.git",
+      "priority": 80
+    }
+  ],
+  "artifacts": [],
+  "compatibility": {
+    "hostCapabilities": [
+      { "id": "wuxianpi.package", "contractVersion": 1 },
+      { "id": "wuxianpi.mcp", "contractVersion": 1 },
+      { "id": "wuxianpi.web-extension", "contractVersion": 1 }
+    ],
+    "packages": []
+  },
+  "verification": {
+    "status": "passed",
+    "verifiedAt": "2026-07-31T11:55:00Z",
+    "checks": ["commit", "manifest-schema", "paths", "references"]
+  },
+  "revoked": false
+}

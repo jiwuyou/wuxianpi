@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "name": "Cloudflare Operator",
+  "description": "Diagnoses and operates Cloudflare resources using explicitly enabled Package contributions.",
+  "greeting": "What should we inspect or change in Cloudflare?",
+  "model": "inherit",
+  "thinkingLevel": "inherit"
+}

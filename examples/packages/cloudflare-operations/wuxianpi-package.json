@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "id": "io.wuxianpi.cloudflare-operations",
+  "name": "Cloudflare Operations",
+  "version": "1.0.0",
+  "summary": "Operate Cloudflare through MCP with guided workflows and rich results.",
+  "description": "A composite Package containing a Cloudflare MCP connection, an operational Skill, reusable context, a functional-assistant template, and a sandboxed result renderer.",
+  "license": "MIT",
+  "homepage": "https://github.com/example/wuxianpi-cloudflare-operations",
+  "categories": [
+    "assistant",
+    "capability",
+    "skill",
+    "interface",
+    "knowledge-experience",
+    "solution"
+  ],
+  "requires": {
+    "hostCapabilities": [
+      { "id": "wuxianpi.package", "contractVersion": 1 },
+      { "id": "wuxianpi.mcp", "contractVersion": 1 },
+      { "id": "wuxianpi.web-extension", "contractVersion": 1 }
+    ],
+    "packages": []
+  },
+  "build": {
+    "mode": "none"
+  },
+  "artifacts": [],
+  "contributions": [
+    {
+      "id": "io.wuxianpi.cloudflare-operations/skill.operations",
+      "type": "pi.skill",
+      "name": "Cloudflare Operations Skill",
+      "description": "Guided DNS, Worker, Pages, and diagnostic workflows.",
+      "path": "skills/cloudflare-operations",
+      "assistantSelectable": true
+    },
+    {
+      "id": "io.wuxianpi.cloudflare-operations/mcp.cloudflare",
+      "type": "mcp.server",
+      "name": "Cloudflare MCP",
+      "description": "A streamable HTTP MCP connection configured without embedded credentials.",
+      "config": "mcp/cloudflare.json",
+      "assistantSelectable": true
+    },
+    {
+      "id": "io.wuxianpi.cloudflare-operations/web.operations",
+      "type": "wuxianpi.webExtension",
+      "name": "Cloudflare Operations UI",
+      "description": "Sandboxed settings and result details for Cloudflare operations.",
+      "manifest": "web/wuxianpi-extension.json",
+      "assistantSelectable": true
+    },
+    {
+      "id": "io.wuxianpi.cloudflare-operations/renderer.change-result",
+      "type": "wuxianpi.renderer",
+      "name": "Cloudflare Change Renderer",
+      "description": "Renders structured Cloudflare change summaries with host fallback text.",
+      "manifest": "web/wuxianpi-extension.json",
+      "contentTypes": ["cloudflare.change-result"]
+    },
+    {
+      "id": "io.wuxianpi.cloudflare-operations/context.runbook",
+      "type": "wuxianpi.context",
+      "name": "Cloudflare Operations Runbook",
+      "description": "Stable operational context shared by assistants that enable this Package.",
+      "path": "contexts/runbook.md",
+      "format": "markdown",
+      "assistantSelectable": true
+    },
+    {
+      "id": "io.wuxianpi.cloudflare-operations/experience.operations",
+      "type": "wuxianpi.experience",
+      "name": "Cloudflare Operations Experience",
+      "description": "Package guidance plus an updateable mainstream experience feed and preserved local corrections.",
+      "experienceSpaceId": "cloudflare.operations.shared",
+      "basePath": "experiences/base.md",
+      "mainstream": {
+        "type": "git",
+        "url": "https://github.com/example/cloudflare-mainstream-experience.git",
+        "ref": "main",
+        "path": "cloudflare/experience.json"
+      },
+      "updatePolicy": {
+        "strategy": "three-way-merge",
+        "priority": [
+          "local-verified-correction",
+          "mainstream",
+          "package-base"
+        ],
+        "localCorrections": "preserve"
+      },
+      "assistantSelectable": true
+    },
+    {
+      "id": "io.wuxianpi.cloudflare-operations/assistant.operator",
+      "type": "wuxianpi.assistantTemplate",
+      "name": "Cloudflare Operator",
+      "description": "A functional assistant template assembled from this Package's reusable contributions.",
+      "manifest": "assistants/cloudflare-operator.json",
+      "kind": "functional",
+      "defaultBindings": [
+        "io.wuxianpi.cloudflare-operations/skill.operations",
+        "io.wuxianpi.cloudflare-operations/mcp.cloudflare",
+        "io.wuxianpi.cloudflare-operations/web.operations",
+        "io.wuxianpi.cloudflare-operations/context.runbook",
+        "io.wuxianpi.cloudflare-operations/experience.operations"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "cloudflare-operations",
+  "name": "Cloudflare Operations UI",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "entry": "index.html",
+  "permissions": ["assistant.read", "tools.call", "ui.resize"],
+  "contributes": {
+    "settingsPanels": [
+      {
+        "id": "cloudflare-connection",
+        "title": "Cloudflare",
+        "entry": "index.html"
+      }
+    ],
+    "toolRenderers": [
+      {
+        "toolPattern": "cloudflare.*",
+        "entry": "index.html"
+      }
+    ]
+  }
+}
