@@ -1,0 +1,590 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wuxianpihub.webefficacy.com/contracts/wuxianpi-package.schema.json",
+  "title": "WuxianPi Composite Package",
+  "description": "Author-owned manifest for a WuxianPi composite package. Hub release metadata, source mirrors, and approved commits are intentionally outside this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "version",
+    "summary",
+    "categories",
+    "requires",
+    "build",
+    "artifacts",
+    "contributions"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "$ref": "#/$defs/packageId" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "version": {
+      "description": "Human-facing release label. Dependency resolution never uses this value.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]*$"
+    },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "description": { "type": "string", "minLength": 1 },
+    "license": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "homepage": { "$ref": "#/$defs/httpsUrl" },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "app",
+          "assistant",
+          "capability",
+          "skill",
+          "interface",
+          "knowledge-experience",
+          "solution"
+        ]
+      }
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostCapabilities", "packages"],
+      "properties": {
+        "hostCapabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/hostCapabilityRequirement" }
+        },
+        "packages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/exactPackageDependency" }
+        }
+      }
+    },
+    "build": { "$ref": "#/$defs/buildDeclaration" },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "contributions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/contribution" }
+    }
+  },
+  "$defs": {
+    "packageId": {
+      "type": "string",
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$"
+    },
+    "logicalContributionId": {
+      "description": "Globally stable ID. It must begin with the containing package ID followed by a slash.",
+      "type": "string",
+      "maxLength": 240,
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+/[a-z][a-z0-9]*(?:[._/-][a-z0-9]+)*$"
+    },
+    "capabilityId": {
+      "type": "string",
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9]*(?:[._/-][a-z0-9]+)*$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "httpsUrl": {
+      "type": "string",
+      "minLength": 9,
+      "pattern": "^https://[^\\s]+$"
+    },
+    "gitCommit": {
+      "description": "Full immutable Git object ID used by GitHub and true Git mirrors.",
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "hostCapabilityRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "contractVersion"],
+      "properties": {
+        "id": { "$ref": "#/$defs/capabilityId" },
+        "contractVersion": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "exactPackageDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["packageId", "approvedCommit"],
+      "properties": {
+        "packageId": { "$ref": "#/$defs/packageId" },
+        "approvedCommit": { "$ref": "#/$defs/gitCommit" },
+        "requiredContributionIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/logicalContributionId" }
+        }
+      }
+    },
+    "commandDeclaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "workingDirectory": { "$ref": "#/$defs/safeRelativePath" },
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
+      }
+    },
+    "localBuildCommands": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["build"],
+      "properties": {
+        "install": { "$ref": "#/$defs/commandDeclaration" },
+        "build": { "$ref": "#/$defs/commandDeclaration" },
+        "test": { "$ref": "#/$defs/commandDeclaration" }
+      }
+    },
+    "testOnlyCommands": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "test": { "$ref": "#/$defs/commandDeclaration" }
+      }
+    },
+    "buildDeclaration": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": { "const": "none" },
+            "commands": { "$ref": "#/$defs/testOnlyCommands" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "commands"],
+          "properties": {
+            "mode": { "const": "local" },
+            "commands": { "$ref": "#/$defs/localBuildCommands" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "artifactIds"],
+          "properties": {
+            "mode": { "const": "artifact" },
+            "artifactIds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/logicalContributionId" }
+            },
+            "commands": { "$ref": "#/$defs/testOnlyCommands" }
+          }
+        }
+      ]
+    },
+    "artifactSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "url", "priority"],
+      "properties": {
+        "kind": { "enum": ["github-release", "mirror"] },
+        "url": { "$ref": "#/$defs/httpsUrl" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 1000 }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "arch"],
+      "properties": {
+        "os": { "enum": ["android", "linux", "any"] },
+        "arch": { "enum": ["arm64", "x64", "any"] }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "fileName", "sha256", "sizeBytes", "archive", "platforms", "sources"],
+      "properties": {
+        "id": { "$ref": "#/$defs/logicalContributionId" },
+        "fileName": { "$ref": "#/$defs/safeRelativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "sizeBytes": { "type": "integer", "minimum": 1 },
+        "archive": { "enum": ["none", "zip", "tar.gz", "tar.zst"] },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/platform" }
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/artifactSource" }
+        }
+      }
+    },
+    "stringRecord": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "mcpServerBase": {
+      "type": "object",
+      "required": ["id", "name", "transport"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "transport": { "enum": ["stdio", "streamable-http"] },
+        "command": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "cwd": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "pattern": "^https?://[^\\s]+$" },
+        "env": { "$ref": "#/$defs/stringRecord" },
+        "envSecretRefs": { "$ref": "#/$defs/stringRecord" },
+        "headers": { "$ref": "#/$defs/stringRecord" },
+        "headerSecretRefs": { "$ref": "#/$defs/stringRecord" },
+        "timeoutMs": { "type": "number", "exclusiveMinimum": 0 },
+        "lifecycle": { "enum": ["keep-alive", "lazy", "lazy-keep-alive", "eager"] },
+        "auth": { "enum": ["oauth", "bearer", false] },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "mcpServerConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/mcpServerBase" },
+            {
+              "type": "object",
+              "required": ["command"],
+              "properties": { "transport": { "const": "stdio" } },
+              "not": { "required": ["url"] }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/mcpServerBase" },
+            {
+              "type": "object",
+              "required": ["url"],
+              "properties": { "transport": { "const": "streamable-http" } },
+              "not": {
+                "anyOf": [
+                  { "required": ["command"] },
+                  { "required": ["args"] },
+                  { "required": ["cwd"] }
+                ]
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        }
+      ]
+    },
+    "experienceSpaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "mainstreamExperienceSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "url", "ref", "path"],
+          "properties": {
+            "type": { "const": "git" },
+            "url": { "$ref": "#/$defs/httpsUrl" },
+            "ref": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "path": { "$ref": "#/$defs/safeRelativePath" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "url"],
+          "properties": {
+            "type": { "const": "https-json" },
+            "url": { "$ref": "#/$defs/httpsUrl" }
+          }
+        }
+      ]
+    },
+    "experienceUpdatePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "priority", "localCorrections"],
+      "properties": {
+        "strategy": { "const": "three-way-merge" },
+        "priority": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            { "const": "local-verified-correction" },
+            { "const": "mainstream" },
+            { "const": "package-base" }
+          ],
+          "items": false
+        },
+        "localCorrections": { "const": "preserve" }
+      }
+    },
+    "contributionBase": {
+      "type": "object",
+      "required": ["id", "type", "name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/logicalContributionId" },
+        "type": {
+          "enum": [
+            "pi.extension",
+            "pi.skill",
+            "pi.prompt",
+            "pi.theme",
+            "mcp.server",
+            "wuxianpi.webExtension",
+            "wuxianpi.renderer",
+            "wuxianpi.assistantTemplate",
+            "wuxianpi.context",
+            "wuxianpi.experience",
+            "openhouse.app",
+            "service-manager.service",
+            "artifact"
+          ]
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "pathContribution": {
+      "allOf": [
+        { "$ref": "#/$defs/contributionBase" },
+        {
+          "type": "object",
+          "required": ["path"],
+          "properties": {
+            "path": { "$ref": "#/$defs/safeRelativePath" },
+            "assistantSelectable": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "contribution": {
+      "oneOf": [
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/pathContribution" },
+            { "type": "object", "properties": { "type": { "const": "pi.extension" } } }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/pathContribution" },
+            { "type": "object", "properties": { "type": { "const": "pi.skill" } } }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/pathContribution" },
+            { "type": "object", "properties": { "type": { "const": "pi.prompt" } } }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/pathContribution" },
+            { "type": "object", "properties": { "type": { "const": "pi.theme" } } }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["config", "assistantSelectable"],
+              "properties": {
+                "type": { "const": "mcp.server" },
+                "config": { "$ref": "#/$defs/safeRelativePath" },
+                "assistantSelectable": { "type": "boolean" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["experienceSpaceId", "basePath", "mainstream", "updatePolicy", "assistantSelectable"],
+              "properties": {
+                "type": { "const": "wuxianpi.experience" },
+                "experienceSpaceId": { "$ref": "#/$defs/experienceSpaceId" },
+                "basePath": { "$ref": "#/$defs/safeRelativePath" },
+                "mainstream": { "$ref": "#/$defs/mainstreamExperienceSource" },
+                "updatePolicy": { "$ref": "#/$defs/experienceUpdatePolicy" },
+                "assistantSelectable": { "type": "boolean" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["manifest", "assistantSelectable"],
+              "properties": {
+                "type": { "const": "wuxianpi.webExtension" },
+                "manifest": { "$ref": "#/$defs/safeRelativePath" },
+                "assistantSelectable": { "type": "boolean" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["manifest", "contentTypes"],
+              "properties": {
+                "type": { "const": "wuxianpi.renderer" },
+                "manifest": { "$ref": "#/$defs/safeRelativePath" },
+                "contentTypes": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "$ref": "#/$defs/capabilityId" }
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["manifest", "kind", "defaultBindings"],
+              "properties": {
+                "type": { "const": "wuxianpi.assistantTemplate" },
+                "manifest": { "$ref": "#/$defs/safeRelativePath" },
+                "kind": { "enum": ["main", "functional"] },
+                "defaultBindings": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": { "$ref": "#/$defs/logicalContributionId" }
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["path", "format", "assistantSelectable"],
+              "properties": {
+                "type": { "const": "wuxianpi.context" },
+                "path": { "$ref": "#/$defs/safeRelativePath" },
+                "format": { "enum": ["markdown", "json", "directory"] },
+                "assistantSelectable": { "type": "boolean" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["manifest"],
+              "properties": {
+                "type": { "const": "openhouse.app" },
+                "manifest": { "$ref": "#/$defs/safeRelativePath" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["manifest"],
+              "properties": {
+                "type": { "const": "service-manager.service" },
+                "manifest": { "$ref": "#/$defs/safeRelativePath" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/contributionBase" },
+            {
+              "type": "object",
+              "required": ["artifactId", "purpose"],
+              "properties": {
+                "type": { "const": "artifact" },
+                "artifactId": { "$ref": "#/$defs/logicalContributionId" },
+                "purpose": { "type": "string", "minLength": 1, "maxLength": 160 }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        }
+      ]
+    }
+  }
+}

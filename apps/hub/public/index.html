@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>WuxianPi Hub</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="WuxianPi Hub 首页">
+        <span class="brand-mark" aria-hidden="true">W</span>
+        <span>WuxianPi Hub</span>
+      </a>
+      <nav class="top-actions" aria-label="主要操作">
+        <button class="icon-button" id="refreshButton" type="button" title="刷新目录" aria-label="刷新目录">↻</button>
+        <button class="command-button" id="publishButton" type="button">发布 Package</button>
+      </nav>
+    </header>
+
+    <main class="workspace">
+      <section class="catalog" aria-labelledby="catalogTitle">
+        <div class="catalog-header">
+          <div>
+            <p class="eyebrow">Package 市场</p>
+            <h1 id="catalogTitle">能力、应用与助手</h1>
+          </div>
+          <p class="result-count" id="resultCount">正在加载</p>
+        </div>
+
+        <form class="search-row" id="searchForm" role="search">
+          <label class="search-field">
+            <span class="visually-hidden">搜索 Package</span>
+            <input id="searchInput" name="q" type="search" placeholder="搜索名称、功能或 Package ID" autocomplete="off">
+          </label>
+          <label class="select-field">
+            <span class="visually-hidden">贡献类型</span>
+            <select id="contributionSelect" name="contributionType">
+              <option value="">全部贡献</option>
+              <option value="pi.extension">Pi Extension</option>
+              <option value="pi.skill">Skill</option>
+              <option value="mcp.server">MCP</option>
+              <option value="wuxianpi.webExtension">Web UI</option>
+              <option value="wuxianpi.renderer">消息渲染器</option>
+              <option value="wuxianpi.assistantTemplate">助手模板</option>
+              <option value="wuxianpi.context">上下文</option>
+              <option value="wuxianpi.experience">经验</option>
+              <option value="openhouse.app">OpenHouse App</option>
+              <option value="service-manager.service">后台服务</option>
+            </select>
+          </label>
+          <button class="command-button primary" type="submit">搜索</button>
+        </form>
+
+        <div class="category-tabs" id="categoryTabs" role="tablist" aria-label="Package 分类">
+          <button class="category-tab active" type="button" role="tab" data-category="">全部</button>
+          <button class="category-tab" type="button" role="tab" data-category="app">应用</button>
+          <button class="category-tab" type="button" role="tab" data-category="assistant">助手</button>
+          <button class="category-tab" type="button" role="tab" data-category="capability">能力</button>
+          <button class="category-tab" type="button" role="tab" data-category="skill">Skill</button>
+          <button class="category-tab" type="button" role="tab" data-category="interface">界面</button>
+          <button class="category-tab" type="button" role="tab" data-category="knowledge-experience">知识与经验</button>
+          <button class="category-tab" type="button" role="tab" data-category="solution">解决方案</button>
+        </div>
+
+        <div class="status-banner hidden" id="statusBanner" role="status"></div>
+        <div class="package-list" id="packageList" aria-live="polite"></div>
+        <button class="load-more hidden" id="loadMoreButton" type="button">加载更多</button>
+      </section>
+
+      <aside class="detail-panel" id="detailPanel" aria-labelledby="detailTitle">
+        <div class="detail-empty" id="detailEmpty">
+          <span class="empty-mark" aria-hidden="true">W</span>
+          <p>选择一个 Package 查看详情</p>
+        </div>
+        <div class="detail-content hidden" id="detailContent">
+          <div class="detail-toolbar">
+            <button class="icon-button mobile-only" id="closeDetailButton" type="button" aria-label="关闭详情">×</button>
+            <span class="release-state">已审核</span>
+          </div>
+          <p class="package-id" id="detailId"></p>
+          <h2 id="detailTitle"></h2>
+          <p class="detail-summary" id="detailSummary"></p>
+          <div class="chip-row" id="detailCategories"></div>
+          <dl class="facts" id="detailFacts"></dl>
+          <div class="detail-actions">
+            <a class="command-button primary" id="installPlanLink" target="_blank" rel="noreferrer">安装计划</a>
+            <a class="command-button" id="sourceLink" target="_blank" rel="noreferrer">源代码</a>
+          </div>
+          <section class="detail-section">
+            <h3>包含内容</h3>
+            <div class="contribution-list" id="contributionList"></div>
+          </section>
+          <section class="detail-section">
+            <h3>版本</h3>
+            <div id="releaseList" class="release-list"></div>
+          </section>
+          <section class="detail-section hidden" id="screenshotSection">
+            <h3>预览</h3>
+            <div id="screenshotList" class="screenshot-list"></div>
+          </section>
+        </div>
+      </aside>
+    </main>
+
+    <dialog id="publishDialog" class="publish-dialog">
+      <form method="dialog" class="dialog-header">
+        <div>
+          <p class="eyebrow">Publisher</p>
+          <h2>提交 Package</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+      </form>
+      <form id="publishForm" class="publish-form">
+        <label>
+          <span>Publisher Token</span>
+          <input name="token" type="password" required autocomplete="current-password">
+        </label>
+        <label>
+          <span>GitHub 仓库</span>
+          <input name="repositoryUrl" type="url" placeholder="https://github.com/author/package.git" required>
+        </label>
+        <div class="two-columns">
+          <label>
+            <span>Git ref</span>
+            <input name="ref" value="main" required>
+          </label>
+          <label>
+            <span>Git 镜像</span>
+            <input name="mirrorUrl" type="url" placeholder="https://gitcode.com/author/package.git">
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <p class="form-status" id="publishStatus" role="status"></p>
+          <button class="command-button primary" type="submit">提交核验</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
