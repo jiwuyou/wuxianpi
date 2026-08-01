@@ -4,9 +4,9 @@
   "hostContractVersion": 1,
   "minHostVersion": 1,
   "runtime": {
-    "serviceId": "pi-agent",
-    "origin": "http://127.0.0.1:8765",
-    "listen": "127.0.0.1:8765",
+    "serviceId": "yuanshengwuxianpi",
+    "origin": "http://127.0.0.1:20765",
+    "listen": "127.0.0.1:20765",
     "commands": {
       "cli": "wuxianpi",
       "runtime": "wuxianpi-node",
@@ -36,15 +36,16 @@
     "sessionsDir": "$HOME/.pi/agent/sessions",
     "workspaceDir": "$HOME/workspace",
     "productDir": "$HOME/.local/share/wuxianpi",
-    "serviceSpec": "$HOME/.config/openhouseai/service-manager/services.d/pi-agent.json"
+    "serviceSpec": "$HOME/.config/openhouseai/service-manager/services.d/yuanshengwuxianpi.json"
   },
   "serviceManager": {
     "provider": "termux-process",
     "workingDirectory": "$HOME/workspace",
-    "restartMode": "always",
+    "residentByDefault": false,
+    "restartMode": "on-failure",
     "health": {
       "type": "http",
-      "url": "http://127.0.0.1:8765/health",
+      "url": "http://127.0.0.1:20765/health",
       "interval": "15s",
       "timeout": "3s"
     }
@@ -55,4 +56,3 @@
     "artifactKinds": ["web", "runtime", "base", "install-arm64"]
   }
 }
-

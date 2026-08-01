@@ -28,6 +28,13 @@ import { WebApi } from "./web-api.js";
 import { WebServices } from "./web-services.js";
 import { MarketClient } from "./market-client.js";
 import { WuxianPiPackageManager } from "./package-manager.js";
+import {
+  BROWSER_HOST_PROTOCOL,
+  BROWSER_HOST_PROTOCOL_VERSION,
+  BROWSER_HOST_WEBSOCKET_PATH,
+  parseBrowserHostClientMessage,
+} from "./browser-host-protocol.js";
+import { BrowserHostRegistry, type BrowserHostConnection } from "./browser-host-registry.js";
 
 export interface RuntimeServerOptions {
   host: string;
@@ -43,6 +50,7 @@ export interface RuntimeServerOptions {
   hubUrl?: string;
   packageManagerRoot?: string;
   maintenanceRoot?: string;
+  browserHostRequestTimeoutMs?: number;
 }
 
 interface ConnectionContext {
@@ -89,6 +97,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     maxFileBytes: options.diagnosticsMaxFileBytes,
     maxFiles: options.diagnosticsMaxFiles,
   });
+  const browserHosts = new BrowserHostRegistry({ defaultTimeoutMs: options.browserHostRequestTimeoutMs });
   const clients = new Set<WebSocket>();
   const connections = new Map<WebSocket, ConnectionContext>();
   const subscriptions = new SessionSubscriptions<WebSocket>();
@@ -104,7 +113,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     initialExecutionContext: {
       packageIds: commaSeparated(process.env.WUXIANPI_EXECUTION_PACKAGE_IDS),
       contributionIds: commaSeparated(process.env.WUXIANPI_EXECUTION_CONTRIBUTION_IDS),
-      serviceIds: commaSeparated(process.env.WUXIANPI_EXECUTION_SERVICE_IDS ?? "pi-agent,service-manager"),
+      serviceIds: commaSeparated(process.env.WUXIANPI_EXECUTION_SERVICE_IDS ?? "yuanshengwuxianpi,service-manager"),
     },
   });
   const registry = new SessionRegistry(undefined, {
@@ -126,12 +135,14 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     packageManager: 1,
     snapshotSse: 1,
     staticWebUi: staticFiles.enabled ? 1 : 0,
+    browserHost: 1,
   } as const;
   const preferredWebUiUrl = options.preferredWebUiUrl ?? "http://127.0.0.1:25808/";
   const webApi = new WebApi({
     registry,
     services: webServices,
     packageManager,
+    browserHosts,
     status: () => ({
       version: RUNTIME_VERSION,
       deploymentId,
@@ -140,10 +151,13 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       ...registry.status(),
       eventTransport: "snapshot-sse-v1",
       nativeWebsocketPath: "/v1/ws",
+      browserHostWebsocketPath: BROWSER_HOST_WEBSOCKET_PATH,
       capabilities: runtimeCapabilities,
     }),
   });
   const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
+  const browserHostWebsocketServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
+  const browserHostClients = new Set<WebSocket>();
   const httpServer = createServer((request, response) => {
     void handleHttp(request, response).catch((error) => {
       diagnostics.record("http.request.failed", {
@@ -272,7 +286,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
 
   async function handleHttp(request: IncomingMessage, response: HttpResponse): Promise<void> {
     const path = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`).pathname;
-    const runtimeOrigin = `http://${request.headers.host ?? "127.0.0.1:8765"}`;
+    const runtimeOrigin = `http://${request.headers.host ?? "127.0.0.1:20765"}`;
     if (await webApi.handle(request, response)) return;
     if (request.method === "GET" && (path === "/health" || path === "/admin/v1/health")) {
       json(response, 200, {
@@ -308,6 +322,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         protocol: PROTOCOL_NAME,
         ...registry.status(),
         websocketPath: "/v1/ws",
+        browserHostWebsocketPath: BROWSER_HOST_WEBSOCKET_PATH,
         capabilities: runtimeCapabilities,
         uiMetadataPath: "/v1/ui/metadata",
         diagnostics: diagnostics.status(),
@@ -322,6 +337,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         protocol: PROTOCOL_NAME,
         ...registry.status(),
         websocketPath: "/v1/ws",
+        browserHostWebsocketPath: BROWSER_HOST_WEBSOCKET_PATH,
         webApiPath: "/api/web/v1",
         capabilities: runtimeCapabilities,
         uiMetadataPath: "/v1/ui/metadata",
@@ -332,6 +348,11 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
 
   httpServer.on("upgrade", (request, socket, head) => {
     const path = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`).pathname;
+    if (path === BROWSER_HOST_WEBSOCKET_PATH) {
+      browserHostWebsocketServer.handleUpgrade(request, socket, head,
+        (websocket) => browserHostWebsocketServer.emit("connection", websocket, request));
+      return;
+    }
     if (path !== "/v1/ws") {
       diagnostics.record("websocket.upgrade.rejected", { path, remoteAddress: request.socket.remoteAddress });
       socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
@@ -478,6 +499,106 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     });
   });
 
+  browserHostWebsocketServer.on("connection", (websocket, request) => {
+    const connectionId = randomUUID();
+    const connectedAt = Date.now();
+    let registeredHostId: string | undefined;
+    let cleanedUp = false;
+    browserHostClients.add(websocket);
+    const connection: BrowserHostConnection = {
+      id: connectionId,
+      remoteAddress: request.socket.remoteAddress,
+      send(message) {
+        if (websocket.readyState !== WebSocket.OPEN) throw new Error("Browser Host WebSocket is not open");
+        websocket.send(stringifyMessage(message));
+      },
+      close(code, reason) { websocket.close(code, reason); },
+    };
+    diagnostics.record("browser_host.websocket.connected", {
+      connectionId, remoteAddress: connection.remoteAddress,
+    }, { headers: request.headers });
+    connection.send({
+      type: "browser.runtime.ready",
+      protocol: BROWSER_HOST_PROTOCOL,
+      protocolVersion: BROWSER_HOST_PROTOCOL_VERSION,
+      connectionId,
+    });
+
+    websocket.on("message", (data, isBinary) => {
+      if (isBinary) {
+        sendBrowserHostError(connection, new RequestError("unsupported_frame", "Binary Browser Host frames are not supported"));
+        return;
+      }
+      try {
+        const message = parseBrowserHostClientMessage(data.toString("utf8"));
+        if (message.type === "browser.register") {
+          const snapshot = browserHosts.register(connection, message);
+          registeredHostId = snapshot.hostId;
+          connection.send({
+            type: "browser.registered",
+            protocol: BROWSER_HOST_PROTOCOL,
+            protocolVersion: BROWSER_HOST_PROTOCOL_VERSION,
+            connectionId,
+            hostId: snapshot.hostId,
+            preferred: snapshot.preferred,
+          });
+          diagnostics.record("browser_host.registered", {
+            connectionId, hostId: snapshot.hostId, priority: snapshot.priority,
+            tabCount: snapshot.tabs.length, preferred: snapshot.preferred,
+          });
+        } else if (message.type === "browser.result") {
+          if (!browserHosts.acceptResult(connectionId, message)) {
+            diagnostics.record("browser_host.result.ignored", { connectionId, hostId: registeredHostId, requestId: message.id });
+          }
+        } else {
+          const snapshot = browserHosts.acceptEvent(connectionId, message);
+          diagnostics.record("browser_host.event", {
+            connectionId, hostId: snapshot.hostId, event: message.event, tabId: message.tabId,
+          });
+        }
+      } catch (error) {
+        diagnostics.record("browser_host.message.failed", {
+          connectionId, hostId: registeredHostId,
+          errorCode: error instanceof RequestError ? error.code : "runtime_error",
+        }, { error });
+        sendBrowserHostError(connection, error);
+      }
+    });
+
+    const cleanup = (trigger: string) => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      browserHostClients.delete(websocket);
+      browserHosts.disconnect(connectionId, `Browser Host connection closed (${trigger})`);
+      diagnostics.record("browser_host.websocket.closed", {
+        connectionId, hostId: registeredHostId, trigger, lifetimeMs: Date.now() - connectedAt,
+      });
+    };
+    websocket.on("close", () => cleanup("close"));
+    websocket.on("error", (error) => {
+      diagnostics.record("browser_host.websocket.error", { connectionId, hostId: registeredHostId }, { error });
+      cleanup("error");
+    });
+  });
+
+  function sendBrowserHostError(connection: BrowserHostConnection, error: unknown): void {
+    if (error instanceof RequestError) {
+      connection.send({
+        type: "browser.error",
+        protocol: BROWSER_HOST_PROTOCOL,
+        protocolVersion: BROWSER_HOST_PROTOCOL_VERSION,
+        error: { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) },
+      });
+      return;
+    }
+    connection.send({
+      type: "browser.error",
+      protocol: BROWSER_HOST_PROTOCOL,
+      protocolVersion: BROWSER_HOST_PROTOCOL_VERSION,
+      error: { code: "runtime_error", message: error instanceof Error ? error.message : String(error) },
+    });
+  }
+
   function updateSubscription(websocket: WebSocket, sessionId: string, source: string): void {
     if (!subscriptions.subscribe(websocket, sessionId)) return;
     diagnostics.record("subscription.added", {
@@ -573,6 +694,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
 
   return {
     registry,
+    browserHosts,
     nativeEvents,
     diagnostics,
     async start() {
@@ -598,10 +720,13 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     async stop(): Promise<void> {
       diagnostics.record("runtime.stop.requested", { clients: clients.size, activeSessions: registry.size });
       for (const client of clients) client.close(1001, "runtime stopping");
+      for (const client of browserHostClients) client.close(1001, "runtime stopping");
+      browserHosts.close();
       webApi.close();
       await registry.dispose();
       await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
       websocketServer.close();
+      browserHostWebsocketServer.close();
       diagnostics.record("runtime.stopped", { clients: clients.size, activeSessions: registry.size });
       await diagnostics.close();
     },

@@ -5,8 +5,7 @@ set -eu
 root=${WUXIANPI_INSTALL_ROOT:-$HOME/.local/share/wuxianpi}
 mkdir -p "$HOME/.pi/agent/sessions" "$HOME/workspace"
 exec "$HOME/.local/bin/wuxianpi-node" \
-  --listen "${OPENHOUSE_PI_LISTEN:-127.0.0.1:8765}" \
+  --listen "${OPENHOUSE_PI_LISTEN:-127.0.0.1:20765}" \
   --agent-dir "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" \
   --idle-timeout-ms "${OPENHOUSE_PI_IDLE_TIMEOUT_MS:-300000}" \
   --web-root "${WUXIANPI_WEB_ROOT:-$root/web}"
-

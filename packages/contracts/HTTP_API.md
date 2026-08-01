@@ -1,6 +1,6 @@
 # HTTP Contract
 
-Default Runtime origin: `http://127.0.0.1:8765`.
+Default Runtime origin: `http://127.0.0.1:20765`.
 
 ## Host endpoints
 
@@ -57,3 +57,33 @@ registry reloads, and global defaults. Android may store named
 `provider/modelId` bindings, but must not maintain an independent provider
 configuration as the source of truth.
 
+## Browser Host diagnostics
+
+These endpoints use the in-memory Browser Host registry described in
+`BROWSER_HOST_CONTRACT.md`:
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| `GET` | `/api/web/v1/browser/hosts` | List connected hosts, preferred host, capabilities, tabs, cached context, recent events, and pending count |
+| `POST` | `/api/web/v1/browser/invoke` | Invoke a transport-neutral Browser Host method and wait for its correlated result |
+
+Example invocation:
+
+```json
+{
+  "method": "page.getText",
+  "hostId": "native-browser",
+  "target": { "tabId": "tab-3" },
+  "params": {},
+  "timeoutMs": 30000
+}
+```
+
+`hostId` is optional and defaults to the preferred connected host. Successful
+responses return `requestId`, `hostId`, and the Android result under `data`.
+Disconnected hosts return HTTP 503 with `browser_host_offline`; timeouts return
+HTTP 504 with `browser_host_timeout`.
+
+The Runtime endpoint is core functionality. Pi-facing wrappers are supplied by
+the optional `io.wuxianpi.browser-tools` Package and are not installed or
+enabled globally by the Runtime.

@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wuxianpi.webefficacy.com/contracts/browser-host.v1.schema.json",
+  "title": "WuxianPi Browser Host v1 WebSocket messages",
+  "oneOf": [
+    { "$ref": "#/$defs/runtimeReady" },
+    { "$ref": "#/$defs/register" },
+    { "$ref": "#/$defs/registered" },
+    { "$ref": "#/$defs/invoke" },
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/protocolError" }
+  ],
+  "$defs": {
+    "protocolFields": {
+      "type": "object",
+      "properties": {
+        "protocol": { "const": "wuxianpi-browser-host-v1" },
+        "protocolVersion": { "const": 1 }
+      },
+      "required": ["protocol", "protocolVersion"]
+    },
+    "tab": {
+      "type": "object",
+      "properties": {
+        "tabId": { "type": "string", "minLength": 1 },
+        "active": { "type": "boolean" },
+        "url": { "type": "string" },
+        "title": { "type": "string" },
+        "context": { "type": ["object", "null"] }
+      },
+      "required": ["tabId"],
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "details": true
+      },
+      "required": ["code", "message"],
+      "additionalProperties": false
+    },
+    "runtimeReady": {
+      "allOf": [
+        { "$ref": "#/$defs/protocolFields" },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "browser.runtime.ready" },
+            "connectionId": { "type": "string", "minLength": 1 }
+          },
+          "required": ["type", "connectionId"],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "register": {
+      "allOf": [
+        { "$ref": "#/$defs/protocolFields" },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "browser.register" },
+            "hostId": { "type": "string", "minLength": 1 },
+            "priority": { "type": "integer", "minimum": -10000, "maximum": 10000 },
+            "implementationVersion": { "type": "string", "minLength": 1 },
+            "capabilities": { "type": "object" },
+            "tabs": { "type": "array", "items": { "$ref": "#/$defs/tab" } },
+            "context": { "type": ["object", "null"] }
+          },
+          "required": ["type", "hostId", "capabilities", "tabs"],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "registered": {
+      "allOf": [
+        { "$ref": "#/$defs/protocolFields" },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "browser.registered" },
+            "connectionId": { "type": "string", "minLength": 1 },
+            "hostId": { "type": "string", "minLength": 1 },
+            "preferred": { "type": "boolean" }
+          },
+          "required": ["type", "connectionId", "hostId", "preferred"],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "invoke": {
+      "allOf": [
+        { "$ref": "#/$defs/protocolFields" },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "browser.invoke" },
+            "id": { "type": "string", "minLength": 1 },
+            "method": { "type": "string", "pattern": "^[a-z][a-z0-9]*(\\.[A-Za-z][A-Za-z0-9]*)+$" },
+            "target": {
+              "type": "object",
+              "properties": {
+                "hostId": { "type": "string", "minLength": 1 },
+                "tabId": { "type": "string", "minLength": 1 }
+              },
+              "required": ["hostId"],
+              "additionalProperties": true
+            },
+            "params": { "type": "object" }
+          },
+          "required": ["type", "id", "method", "target", "params"],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "browser.result" },
+        "id": { "type": "string", "minLength": 1 },
+        "ok": { "type": "boolean" },
+        "result": true,
+        "error": { "$ref": "#/$defs/error" }
+      },
+      "required": ["type", "id", "ok"],
+      "allOf": [
+        {
+          "if": { "properties": { "ok": { "const": false } }, "required": ["ok"] },
+          "then": { "required": ["error"] }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "event": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "browser.event" },
+        "event": { "type": "string", "minLength": 1 },
+        "at": { "type": ["string", "number"] },
+        "tabId": { "type": "string", "minLength": 1 },
+        "data": { "type": "object" },
+        "tabs": { "type": "array", "items": { "$ref": "#/$defs/tab" } },
+        "context": { "type": ["object", "null"] }
+      },
+      "required": ["type", "event"],
+      "additionalProperties": true
+    },
+    "protocolError": {
+      "allOf": [
+        { "$ref": "#/$defs/protocolFields" },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "browser.error" },
+            "id": { "type": "string" },
+            "error": { "$ref": "#/$defs/error" }
+          },
+          "required": ["type", "error"],
+          "additionalProperties": true
+        }
+      ]
+    }
+  }
+}

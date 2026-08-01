@@ -6,6 +6,7 @@ import { boundedInteger, RequestError, stringifyMessage } from "./protocol.js";
 import type { RegistrySessionEvent, SessionRegistry } from "./session-registry.js";
 import { contentType, errorMessage, WebServices } from "./web-services.js";
 import type { WuxianPiPackageManager } from "./package-manager.js";
+import type { BrowserHostRegistry } from "./browser-host-registry.js";
 
 const API_ROOT = "/api/web/v1";
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
@@ -15,6 +16,7 @@ export interface WebApiOptions {
   registry: SessionRegistry;
   services: WebServices;
   packageManager?: WuxianPiPackageManager;
+  browserHosts: BrowserHostRegistry;
   status: () => Record<string, unknown>;
 }
 
@@ -67,6 +69,26 @@ export class WebApi {
     }
     if (method === "GET" && (path === "/" || path === "/status")) {
       json(response, 200, { ok: true, ...this.options.status() }); return;
+    }
+    if (path === "/browser/hosts" && method === "GET") {
+      json(response, 200, { ok: true, data: this.options.browserHosts.describe() }); return;
+    }
+    if (path === "/browser/invoke" && method === "POST") {
+      const body = await readJsonBody(request);
+      const target = body.target === undefined ? undefined : requireObject(body.target, "target");
+      const params = body.params === undefined ? undefined : requireObject(body.params, "params");
+      const timeoutMs = body.timeoutMs;
+      if (timeoutMs !== undefined && !Number.isInteger(timeoutMs)) {
+        throw new RequestError("invalid_payload", "timeoutMs must be an integer");
+      }
+      const hostId = optionalString(body, "hostId");
+      json(response, 200, { ok: true, data: await this.options.browserHosts.invoke({
+        method: requireString(body, "method"),
+        ...(hostId ? { hostId } : {}),
+        ...(target ? { target } : {}),
+        ...(params ? { params } : {}),
+        ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }),
+      }) }); return;
     }
     if (path === "/sessions" && method === "GET") {
       const payload = queryObject(url);
@@ -600,6 +622,10 @@ async function readFormData(request: IncomingMessage): Promise<FormData> {
 
 function queryObject(url: URL): Record<string, unknown> { return Object.fromEntries(url.searchParams); }
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
+function requireObject(value: unknown, name: string): Record<string, unknown> {
+  if (!isRecord(value)) throw new RequestError("invalid_payload", `${name} must be an object`);
+  return value;
+}
 function requireQuery(url: URL, name: string): string { const value = url.searchParams.get(name); if (!value) throw new RequestError("invalid_payload", `${name} is required`); return value; }
 function requireString(body: Record<string, unknown>, name: string): string { const value = body[name]; if (typeof value !== "string" || !value.trim()) throw new RequestError("invalid_payload", `${name} must be a non-empty string`); return value; }
 function optionalString(body: Record<string, unknown>, name: string): string | undefined { const value = body[name]; if (value === undefined || value === null || value === "") return undefined; if (typeof value !== "string") throw new RequestError("invalid_payload", `${name} must be a string`); return value; }

@@ -37,10 +37,12 @@
     "service": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "origin", "healthPath", "uiMetadataPath", "websocketPath", "webApiBasePath"],
+      "required": ["id", "origin", "residentByDefault", "restartMode", "healthPath", "uiMetadataPath", "websocketPath", "webApiBasePath"],
       "properties": {
-        "id": { "const": "pi-agent" },
-        "origin": { "const": "http://127.0.0.1:8765" },
+        "id": { "const": "yuanshengwuxianpi" },
+        "origin": { "const": "http://127.0.0.1:20765" },
+        "residentByDefault": { "const": false },
+        "restartMode": { "const": "on-failure" },
         "healthPath": { "const": "/health" },
         "uiMetadataPath": { "const": "/v1/ui/metadata" },
         "websocketPath": { "const": "/v1/ws" },
@@ -83,4 +85,3 @@
     }
   }
 }
-

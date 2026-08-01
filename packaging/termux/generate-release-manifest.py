@@ -56,8 +56,10 @@ manifest = {
     "hostContractVersion": 1,
     "protocol": {"name": "wuxianpi-sdk-v1", "version": 2},
     "service": {
-        "id": "pi-agent",
-        "origin": "http://127.0.0.1:8765",
+        "id": "yuanshengwuxianpi",
+        "origin": "http://127.0.0.1:20765",
+        "residentByDefault": False,
+        "restartMode": "on-failure",
         "healthPath": "/health",
         "uiMetadataPath": "/v1/ui/metadata",
         "websocketPath": "/v1/ws",
@@ -78,4 +80,3 @@ manifest = {
 
 args.output.parent.mkdir(parents=True, exist_ok=True)
 args.output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-

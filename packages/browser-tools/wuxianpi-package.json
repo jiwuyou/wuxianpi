@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "io.wuxianpi.browser-tools",
+  "name": "WuxianPi Browser Tools",
+  "version": "1.0.0",
+  "summary": "Optional Pi tools for controlling a connected WuxianPi Browser Host.",
+  "description": "Adds browser_operation and app_action as an assistant-selectable Pi extension. The tools call the stable WuxianPi Runtime Browser Host HTTP API and are never enabled globally.",
+  "license": "MIT",
+  "categories": ["capability", "assistant"],
+  "requires": {
+    "hostCapabilities": [
+      { "id": "wuxianpi.package", "contractVersion": 1 },
+      { "id": "pi.extension", "contractVersion": 1 }
+    ],
+    "packages": []
+  },
+  "build": { "mode": "none" },
+  "artifacts": [],
+  "contributions": [
+    {
+      "id": "io.wuxianpi.browser-tools/extension.browser-tools",
+      "type": "pi.extension",
+      "name": "Browser Host Tools",
+      "description": "Registers browser_operation and app_action for assistants that explicitly enable this contribution.",
+      "path": "extension/index.js",
+      "assistantSelectable": true
+    }
+  ]
+}

@@ -13,7 +13,7 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
   process.stdout.write("Usage: wuxianpi-node [--listen HOST:PORT] [--agent-dir PATH] [--idle-timeout-ms N] [--web-root PATH] [--preferred-web-ui-url URL]\n");
   process.exit(0);
 }
-const listen = parseListen(readOption("--listen") ?? process.env.OPENHOUSE_PI_LISTEN ?? "127.0.0.1:8765");
+const listen = parseListen(readOption("--listen") ?? process.env.OPENHOUSE_PI_LISTEN ?? "127.0.0.1:20765");
 if (!Number.isInteger(listen.port) || listen.port < 1 || listen.port > 65535) throw new Error(`Invalid listen port: ${listen.port}`);
 const idleTimeoutMs = Number(readOption("--idle-timeout-ms") ?? process.env.OPENHOUSE_PI_IDLE_TIMEOUT_MS ?? "300000");
 const agentDir = readOption("--agent-dir") ?? process.env.PI_CODING_AGENT_DIR;

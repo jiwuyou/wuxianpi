@@ -18,10 +18,12 @@ the Android application.
 ## Host responsibilities
 
 - Install or update the published WuxianPi artifacts in Termux.
-- Ask service-manager to start, stop, and recover `pi-agent`.
+- Ask service-manager to start, stop, and recover `yuanshengwuxianpi` on demand.
 - Open the Web URL returned by `GET /v1/ui/metadata`.
 - Use HTTP for model setup and WebSocket for native chat/session behavior.
 - Provide Android-only bridges and permissions when a feature needs Android.
+- When controlled browsing is available, connect the Browser Host to
+  `/v1/browser-host` and implement `BROWSER_HOST_CONTRACT.md`.
 
 ## Runtime responsibilities
 
@@ -30,6 +32,9 @@ the Android application.
 - Preserve Pi data in `$HOME/.pi/agent` across updates.
 - Serve the fixed loopback endpoints and protocol documented here.
 - Publish a release manifest with artifact versions, sizes, and SHA-256 values.
+- Broker Browser Host requests for HTTP diagnostics and Pi custom tools.
+- Keep Browser Host Pi tools outside the global Runtime tool list; optional
+  tools are delivered through assistant-selectable Package contributions.
 
 ## Non-contract details
 
@@ -43,4 +48,3 @@ Android must not read or assume:
 
 The stable filesystem contract is limited to Pi data at `$HOME/.pi/agent` and
 the default workspace at `$HOME/workspace`.
-

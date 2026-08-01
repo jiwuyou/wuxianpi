@@ -11,6 +11,10 @@ Current contract files:
 - `HOST_CONTRACT.md`: compatibility and ownership rules.
 - `HTTP_API.md`: fixed HTTP endpoints used by Android.
 - `WEBSOCKET_API.md`: fixed native chat transport.
+- `BROWSER_HOST_CONTRACT.md`: controlled-browser host registration, invocation,
+  result, event, and reconnect behavior.
+- `browser-host.v1.schema.json`: machine-readable Browser Host WebSocket
+  envelopes.
 - `SERVICE_CONTRACT.md`: Termux and service-manager integration.
 
 `hostContractVersion` is a product protocol version, not an Android
@@ -18,3 +22,6 @@ Current contract files:
 version. Contract version `1` represents the behavior already implemented by
 the current Android Host and Runtime.
 
+First-party optional Package sources, including `packages/browser-tools`, live
+beside these contracts but remain normal installable and assistant-selectable
+Packages rather than Runtime built-ins.

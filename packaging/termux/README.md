@@ -36,3 +36,21 @@ the Runtime and base versions unchanged.
 This first skeleton uses SHA-256 for release integrity. It intentionally does
 not add signing, authentication, rollback orchestration, or legacy migration.
 
+## Service lifecycle
+
+The Termux bundle registers the service-manager service with these fixed
+values:
+
+```text
+id: yuanshengwuxianpi
+origin: http://127.0.0.1:20765
+residentByDefault: false
+restart.mode: on-failure
+```
+
+Installation only writes the service definition. It does not start WuxianPi or
+make it resident. A stopped WuxianPi service is the normal idle state; callers
+start it through service-manager when the UI, model API, or agent is needed.
+Only service-manager itself is expected to be kept alive by termux-services.
+tmux is reserved for installation and repair commands and is not a production
+service supervisor.
