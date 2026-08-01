@@ -28,6 +28,16 @@ export type PackageCategory = typeof PACKAGE_CATEGORIES[number];
 export type ContributionType = typeof CONTRIBUTION_TYPES[number];
 export type SubmissionStatus = "queued" | "verifying" | "awaiting_review" | "approved" | "rejected" | "failed";
 export type ReleaseStatus = "approved" | "revoked";
+export type IssueStatus =
+  | "pending"
+  | "confirmed"
+  | "in_progress"
+  | "awaiting_verification"
+  | "resolved"
+  | "cannot_reproduce"
+  | "declined"
+  | "migrated";
+export type IssueVisibility = "public" | "maintainers";
 
 export interface PublisherIdentity {
   id: string;
@@ -97,6 +107,44 @@ export interface PackageManifest {
   artifacts: ArtifactManifest[];
   contributions: ContributionManifest[];
 }
+
+export interface SupportIssueRecord {
+  issueId: string;
+  issueNumber: number;
+  packageId: string | null;
+  component: string | null;
+  targetRepository: string | null;
+  reporterTokenHash: string;
+  reporterName: string;
+  source: "assistant" | "market";
+  confirmation: "assistant_asserted";
+  title: string;
+  body: string;
+  labels: string[];
+  environment: Record<string, unknown>;
+  visibility: IssueVisibility;
+  status: IssueStatus;
+  fixReleaseId: string | null;
+  githubUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SupportIssueComment {
+  commentId: string;
+  issueId: string;
+  actorType: "reporter" | "publisher" | "admin";
+  actorId: string;
+  actorName: string;
+  body: string;
+  createdAt: string;
+}
+
+export type IssueActor =
+  | { kind: "anonymous" }
+  | { kind: "reporter"; tokenHash: string }
+  | { kind: "publisher"; id: string; name: string }
+  | { kind: "admin"; id: string; name: string };
 
 export interface ArtifactManifest {
   id: string;

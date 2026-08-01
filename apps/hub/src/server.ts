@@ -1,10 +1,11 @@
 import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { extname, join, normalize, relative, resolve, sep } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { HubService } from "./service.js";
 import { HubError } from "./errors.js";
-import type { PublisherCredential } from "./types.js";
+import type { IssueActor, PublisherCredential } from "./types.js";
 import type { VerifiedAssetStore } from "./metadata.js";
 
 const MIME_TYPES: Record<string, string> = {
@@ -138,6 +139,41 @@ async function routeApi(
     sendJson(response, 200, service.listPackages(query), { "cache-control": "public, max-age=30" });
     return;
   }
+
+  if (parts[0] === "issues") {
+    const actor = authenticateIssueActor(options, bearer(request));
+    if (parts.length === 1 && method === "GET") {
+      sendJson(response, 200, service.listIssues(actor, query), { "cache-control": "no-store" });
+      return;
+    }
+    if (parts.length === 1 && method === "POST") {
+      sendJson(response, 201, service.createIssue(actor, await readJson(request)), { "cache-control": "no-store" });
+      return;
+    }
+    if (parts[1]) {
+      const issueId = parts[1];
+      if (parts.length === 2 && method === "GET") {
+        sendJson(response, 200, service.getIssue(actor, issueId), { "cache-control": "no-store" });
+        return;
+      }
+      if (parts.length === 3 && parts[2] === "comments" && method === "POST") {
+        sendJson(response, 201, service.commentIssue(actor, issueId, await readJson(request)), { "cache-control": "no-store" });
+        return;
+      }
+      if (parts.length === 3 && parts[2] === "status" && method === "PATCH") {
+        sendJson(response, 200, service.updateIssueStatus(actor, issueId, await readJson(request)), { "cache-control": "no-store" });
+        return;
+      }
+      if (parts.length === 3 && parts[2] === "external-links" && method === "POST") {
+        sendJson(response, 200, service.linkIssueToGithub(actor, issueId, await readJson(request)), { "cache-control": "no-store" });
+        return;
+      }
+      if (parts.length === 3 && parts[2] === "verify" && method === "POST") {
+        sendJson(response, 200, service.verifyIssue(actor, issueId, await readJson(request)), { "cache-control": "no-store" });
+        return;
+      }
+    }
+  }
   if (parts[0] === "packages" && parts[1]) {
     const packageId = parts[1];
     if (method === "GET" && parts.length === 2) {
@@ -213,6 +249,16 @@ function authenticateAdmin(expected: string, token: string | null): void {
   if (!expected) throw new HubError(503, "admin_not_configured", "Hub administrator token is not configured");
   if (!token) throw new HubError(401, "admin_auth_required", "Administrator bearer token is required");
   if (token !== expected) throw new HubError(403, "admin_auth_invalid", "Administrator bearer token is invalid");
+}
+
+function authenticateIssueActor(options: HubServerOptions, token: string | null): IssueActor {
+  if (!token) return { kind: "anonymous" };
+  if (options.adminToken && token === options.adminToken) return { kind: "admin", id: "admin", name: "WuxianPi Hub 管理员" };
+  for (const publisher of options.publisherCredentials.values()) {
+    if (publisher.token === token) return { kind: "publisher", id: publisher.id, name: publisher.name };
+  }
+  if (token.length < 24 || token.length > 512) throw new HubError(403, "issue_auth_invalid", "Issue bearer token is invalid");
+  return { kind: "reporter", tokenHash: createHash("sha256").update(token).digest("hex") };
 }
 
 async function serveStatic(publicDir: string, pathname: string, head: boolean, response: ServerResponse): Promise<void> {

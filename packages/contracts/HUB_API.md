@@ -288,6 +288,91 @@ The install-plan response is:
   platform and candidate source list.
 - `verification.status` must be `passed` before a normal client installs it.
 
+## Support Issue API
+
+GitHub remains the preferred Issue channel. These routes provide a complete
+fallback lifecycle when the user's local `gh` command cannot submit to GitHub.
+The Hub does not hold a GitHub token and does not create GitHub Issues.
+
+Reporter operations use a client-generated bearer token with at least 24
+characters. The Hub stores only its SHA-256 digest. Publisher tokens manage
+Issues belonging to their Packages; the administrator token can manage all
+Issues.
+
+### `POST /issues`
+
+```json
+{
+  "packageId": "io.example.package",
+  "component": "mcp-client",
+  "targetRepository": "owner/repository",
+  "reporterName": "WuxianPi 用户",
+  "title": "Package 能力无法加载",
+  "body": "## 复现步骤\n\n1. ...",
+  "labels": ["bug"],
+  "environment": { "arch": "arm64" },
+  "visibility": "public",
+  "source": "assistant",
+  "userConfirmed": true
+}
+```
+
+`userConfirmed=true` is the assistant's assertion that the user approved the
+submission. No UI confirmation token is required. If `targetRepository` is
+omitted for a published Package, the Hub uses that Package's source repository.
+
+### `GET /issues`
+
+Query parameters are `packageId`, `status`, `q`, `cursor`, and `limit`. Public
+Issues are visible without authentication. A reporter token also reveals that
+reporter's maintainer-only Issues; a publisher token reveals private Issues for
+the publisher's Packages.
+
+### `GET /issues/{idOrNumber}`
+
+Returns `{ "issue": {...}, "comments": [...] }`. The public Issue object never
+contains the reporter token or its digest.
+
+### `POST /issues/{idOrNumber}/comments`
+
+Reporter, publisher, or administrator bearer token required:
+
+```json
+{ "body": "补充：问题可以稳定复现。" }
+```
+
+### `PATCH /issues/{idOrNumber}/status`
+
+Package publisher or administrator token required:
+
+```json
+{
+  "status": "awaiting_verification",
+  "fixReleaseId": "rel_example",
+  "githubUrl": null
+}
+```
+
+States are `pending`, `confirmed`, `in_progress`, `awaiting_verification`,
+`resolved`, `cannot_reproduce`, `declined`, and `migrated`.
+
+### `POST /issues/{idOrNumber}/verify`
+
+Only the original reporter token may verify a fix:
+
+```json
+{ "accepted": true }
+```
+
+### `POST /issues/{idOrNumber}/external-links`
+
+Package publisher or administrator token required. The operation records a
+manually created GitHub Issue and changes the Hub Issue to `migrated`:
+
+```json
+{ "url": "https://github.com/owner/repository/issues/123" }
+```
+
 ## Publisher API
 
 Publisher routes require a publisher access token. A publisher can only mutate

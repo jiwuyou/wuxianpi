@@ -6,6 +6,8 @@ import type {
   PackagePresentationMetadata,
   PublisherIdentity,
   ReleaseRecord,
+  SupportIssueComment,
+  SupportIssueRecord,
   SourceHealth,
   SubmissionRecord,
   SubmissionStatus,
@@ -54,6 +56,38 @@ interface ReleaseRow {
   revocation: string | null;
 }
 
+interface IssueRow {
+  issue_id: string;
+  issue_number: number;
+  package_id: string | null;
+  component: string | null;
+  target_repository: string | null;
+  reporter_token_hash: string;
+  reporter_name: string;
+  source: string;
+  confirmation: string;
+  title: string;
+  body: string;
+  labels: string;
+  environment: string;
+  visibility: string;
+  status: string;
+  fix_release_id: string | null;
+  github_url: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IssueCommentRow {
+  comment_id: string;
+  issue_id: string;
+  actor_type: string;
+  actor_id: string;
+  actor_name: string;
+  body: string;
+  created_at: string;
+}
+
 const json = (value: unknown) => JSON.stringify(value);
 const parse = <T>(value: string): T => JSON.parse(value) as T;
 
@@ -72,6 +106,17 @@ type SubmissionChanges = Partial<{
   verifiedRevision: number | null;
   updatedAt: string;
 }>;
+
+interface IssueListFilters {
+  packageId: string | null;
+  status: string | null;
+  q: string | null;
+  reporterTokenHash: string | null;
+  maintainerPackageIds: string[];
+  includeAll: boolean;
+  offset: number;
+  limit: number;
+}
 
 export class HubDatabase {
   readonly sqlite: DatabaseSync;
@@ -171,9 +216,45 @@ export class HubDatabase {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS support_issues (
+        issue_number INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id TEXT NOT NULL UNIQUE,
+        package_id TEXT,
+        component TEXT,
+        target_repository TEXT,
+        reporter_token_hash TEXT NOT NULL,
+        reporter_name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        confirmation TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        labels TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        status TEXT NOT NULL,
+        fix_release_id TEXT,
+        github_url TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS support_issue_comments (
+        comment_id TEXT PRIMARY KEY,
+        issue_id TEXT NOT NULL REFERENCES support_issues(issue_id) ON DELETE CASCADE,
+        actor_type TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        actor_name TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_packages_updated ON packages(updated_at DESC, package_id);
       CREATE INDEX IF NOT EXISTS idx_releases_package ON releases(package_id, published_at DESC);
       CREATE INDEX IF NOT EXISTS idx_submissions_publisher ON submissions(publisher_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_support_issues_package ON support_issues(package_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_support_issues_status ON support_issues(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_support_issues_reporter ON support_issues(reporter_token_hash, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_support_issue_comments_issue ON support_issue_comments(issue_id, created_at ASC);
     `);
     const columns = new Set((this.sqlite.prepare("PRAGMA table_info(submissions)").all() as unknown as Array<{ name: string }>).map((row) => row.name));
     if (!columns.has("revision")) this.sqlite.exec("ALTER TABLE submissions ADD COLUMN revision INTEGER NOT NULL DEFAULT 1");
@@ -554,6 +635,11 @@ export class HubDatabase {
     } : null;
   }
 
+  listPackageIdsByPublisher(publisherId: string): string[] {
+    return (this.sqlite.prepare("SELECT package_id FROM packages WHERE publisher_id = ? ORDER BY package_id")
+      .all(publisherId) as unknown as Array<{ package_id: string }>).map((row) => row.package_id);
+  }
+
   revokeRelease(id: string, revocation: { reason: string; revokedAt: string }): void {
     this.sqlite.exec("BEGIN IMMEDIATE");
     try {
@@ -601,5 +687,130 @@ export class HubDatabase {
       INSERT INTO audit_events(event_id, actor, action, target_type, target_id, detail, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(event.id, event.actor, event.action, event.targetType, event.targetId, json(event.detail), event.createdAt);
+  }
+
+  insertIssue(record: Omit<SupportIssueRecord, "issueNumber">): SupportIssueRecord {
+    const result = this.sqlite.prepare(`
+      INSERT INTO support_issues(
+        issue_id, package_id, component, target_repository, reporter_token_hash,
+        reporter_name, source, confirmation, title, body, labels, environment,
+        visibility, status, fix_release_id, github_url, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      record.issueId, record.packageId, record.component, record.targetRepository,
+      record.reporterTokenHash, record.reporterName, record.source, record.confirmation,
+      record.title, record.body, json(record.labels), json(record.environment),
+      record.visibility, record.status, record.fixReleaseId, record.githubUrl,
+      record.createdAt, record.updatedAt,
+    );
+    return { ...record, issueNumber: Number(result.lastInsertRowid) };
+  }
+
+  getIssue(idOrNumber: string): SupportIssueRecord | null {
+    const numeric = /^\d+$/.test(idOrNumber) ? Number(idOrNumber) : null;
+    const row = (numeric === null
+      ? this.sqlite.prepare("SELECT * FROM support_issues WHERE issue_id = ?").get(idOrNumber)
+      : this.sqlite.prepare("SELECT * FROM support_issues WHERE issue_number = ?").get(numeric)) as IssueRow | undefined;
+    return row ? this.mapIssue(row) : null;
+  }
+
+  listIssues(filters: IssueListFilters): SupportIssueRecord[] {
+    const { where, values } = this.issueFilters(filters);
+    values.push(filters.limit, filters.offset);
+    return (this.sqlite.prepare(`
+      SELECT * FROM support_issues WHERE ${where.join(" AND ")}
+      ORDER BY updated_at DESC, issue_number DESC LIMIT ? OFFSET ?
+    `).all(...values) as unknown as IssueRow[]).map((row) => this.mapIssue(row));
+  }
+
+  countIssues(filters: Omit<IssueListFilters, "offset" | "limit">): number {
+    const { where, values } = this.issueFilters({ ...filters, offset: 0, limit: 1 });
+    const row = this.sqlite.prepare(`SELECT COUNT(*) AS count FROM support_issues WHERE ${where.join(" AND ")}`)
+      .get(...values) as { count: number };
+    return Number(row.count);
+  }
+
+  updateIssue(id: string, changes: Partial<Pick<SupportIssueRecord, "status" | "fixReleaseId" | "githubUrl" | "updatedAt">>): void {
+    const mapping: Record<string, string> = {
+      status: "status",
+      fixReleaseId: "fix_release_id",
+      githubUrl: "github_url",
+      updatedAt: "updated_at",
+    };
+    const values: SqlValue[] = [];
+    const assignments = Object.entries(changes).map(([key, value]) => {
+      values.push(value as SqlValue);
+      return `${mapping[key]} = ?`;
+    });
+    if (assignments.length === 0) return;
+    values.push(id);
+    this.sqlite.prepare(`UPDATE support_issues SET ${assignments.join(", ")} WHERE issue_id = ?`).run(...values);
+  }
+
+  insertIssueComment(comment: SupportIssueComment): void {
+    this.sqlite.prepare(`
+      INSERT INTO support_issue_comments(comment_id, issue_id, actor_type, actor_id, actor_name, body, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(comment.commentId, comment.issueId, comment.actorType, comment.actorId, comment.actorName, comment.body, comment.createdAt);
+  }
+
+  listIssueComments(issueId: string): SupportIssueComment[] {
+    return (this.sqlite.prepare(`
+      SELECT * FROM support_issue_comments WHERE issue_id = ? ORDER BY created_at ASC, rowid ASC
+    `).all(issueId) as unknown as IssueCommentRow[]).map((row) => ({
+      commentId: row.comment_id,
+      issueId: row.issue_id,
+      actorType: row.actor_type as SupportIssueComment["actorType"],
+      actorId: row.actor_id,
+      actorName: row.actor_name,
+      body: row.body,
+      createdAt: row.created_at,
+    }));
+  }
+
+  private issueFilters(filters: IssueListFilters): { where: string[]; values: SqlValue[] } {
+    const where = ["1 = 1"];
+    const values: SqlValue[] = [];
+    if (filters.packageId) { where.push("package_id = ?"); values.push(filters.packageId); }
+    if (filters.status) { where.push("status = ?"); values.push(filters.status); }
+    if (filters.q) {
+      const q = `%${filters.q.toLowerCase()}%`;
+      where.push("(lower(title) LIKE ? OR lower(body) LIKE ? OR lower(component) LIKE ?)");
+      values.push(q, q, q);
+    }
+    if (!filters.includeAll) {
+      const access = ["visibility = 'public'"];
+      if (filters.reporterTokenHash) { access.push("reporter_token_hash = ?"); values.push(filters.reporterTokenHash); }
+      if (filters.maintainerPackageIds.length > 0) {
+        access.push(`package_id IN (${filters.maintainerPackageIds.map(() => "?").join(", ")})`);
+        values.push(...filters.maintainerPackageIds);
+      }
+      where.push(`(${access.join(" OR ")})`);
+    }
+    return { where, values };
+  }
+
+  private mapIssue(row: IssueRow): SupportIssueRecord {
+    return {
+      issueId: row.issue_id,
+      issueNumber: row.issue_number,
+      packageId: row.package_id,
+      component: row.component,
+      targetRepository: row.target_repository,
+      reporterTokenHash: row.reporter_token_hash,
+      reporterName: row.reporter_name,
+      source: row.source as SupportIssueRecord["source"],
+      confirmation: row.confirmation as SupportIssueRecord["confirmation"],
+      title: row.title,
+      body: row.body,
+      labels: parse<string[]>(row.labels),
+      environment: parse<Record<string, unknown>>(row.environment),
+      visibility: row.visibility as SupportIssueRecord["visibility"],
+      status: row.status as SupportIssueRecord["status"],
+      fixReleaseId: row.fix_release_id,
+      githubUrl: row.github_url,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 }

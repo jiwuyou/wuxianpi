@@ -1,7 +1,7 @@
 # WuxianPi Hub
 
-Public catalog, publisher submission service, and immutable Release registry for
-WuxianPi Composite Packages.
+Public catalog, publisher submission service, immutable Release registry, and
+fallback Support Issue tracker for WuxianPi Composite Packages.
 
 ```bash
 npm ci
@@ -36,7 +36,8 @@ HUB_VERIFY_MAX_BYTES     Maximum downloaded verification object size
 ```
 
 The Hub performs static verification only. It never runs commands declared by
-third-party Packages.
+third-party Packages. Support Issues use client-generated reporter tokens; the
+Hub does not store GitHub credentials or submit GitHub Issues on a user's behalf.
 
 Build the container with `apps/hub` as the context:
 

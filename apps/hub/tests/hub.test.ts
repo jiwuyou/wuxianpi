@@ -306,6 +306,91 @@ test("public API publishes immutable exact-commit Releases and supports search",
   harness.db.close();
 });
 
+test("Hub Issues provide a complete reporter and maintainer lifecycle", async () => {
+  const harness = await createHarness();
+  const submissionId = await submitAndVerify(harness);
+  assert.equal((await approve(harness, submissionId)).response.status, 201);
+  const reporterToken = "wuxianpi-reporter-token-1234567890";
+
+  const created = await request(harness.baseUrl, "/api/v1/issues", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${reporterToken}` },
+    body: JSON.stringify({
+      packageId: "io.wuxianpi.fixture",
+      component: "fixture-runtime",
+      reporterName: "测试用户",
+      title: "Fixture 无法启动",
+      body: "## 复现步骤\n\n1. 启动 Fixture\n2. 观察错误",
+      labels: ["bug"],
+      environment: { arch: "arm64" },
+      visibility: "public",
+      source: "assistant",
+      userConfirmed: true,
+    }),
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.issue.status, "pending");
+  assert.equal(created.body.issue.targetRepository, "example/fixture");
+  assert.equal(created.body.issue.confirmation, "assistant_asserted");
+  assert.equal(created.body.issue.reporterTokenHash, undefined);
+  const issueNumber = created.body.issue.issueNumber as number;
+
+  const comment = await request(harness.baseUrl, `/api/v1/issues/${issueNumber}/comments`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${reporterToken}` },
+    body: JSON.stringify({ body: "补充：每次都可以复现。" }),
+  });
+  assert.equal(comment.response.status, 201);
+  assert.equal(comment.body.comment.actorName, "测试用户");
+
+  const progressed = await request(harness.baseUrl, `/api/v1/issues/${issueNumber}/status`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", authorization: "Bearer publisher-token" },
+    body: JSON.stringify({ status: "awaiting_verification" }),
+  });
+  assert.equal(progressed.response.status, 200);
+  assert.equal(progressed.body.issue.status, "awaiting_verification");
+
+  const verified = await request(harness.baseUrl, `/api/v1/issues/${issueNumber}/verify`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${reporterToken}` },
+    body: JSON.stringify({ accepted: true }),
+  });
+  assert.equal(verified.response.status, 200);
+  assert.equal(verified.body.issue.status, "resolved");
+  assert.equal(verified.body.comments.length, 1);
+
+  const listed = await request(harness.baseUrl, "/api/v1/issues?packageId=io.wuxianpi.fixture");
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.issues.length, 1);
+  harness.db.close();
+});
+
+test("Hub Issues trust the assistant assertion but require it to be present", async () => {
+  const harness = await createHarness();
+  const denied = await request(harness.baseUrl, "/api/v1/issues", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer wuxianpi-reporter-token-1234567890" },
+    body: JSON.stringify({ title: "Missing confirmation", body: "Draft only" }),
+  });
+  assert.equal(denied.response.status, 400);
+  assert.equal(denied.body.error.code, "user_confirmation_required");
+  const localPackage = await request(harness.baseUrl, "/api/v1/issues", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer wuxianpi-reporter-token-1234567890" },
+    body: JSON.stringify({
+      packageId: "io.local.unpublished",
+      targetRepository: "example/local-package",
+      title: "Local Package failure",
+      body: "Reproduction",
+      userConfirmed: true,
+    }),
+  });
+  assert.equal(localPackage.response.status, 201);
+  assert.equal(localPackage.body.issue.packageId, "io.local.unpublished");
+  harness.db.close();
+});
+
 test("approval rejects a ref that moved after static verification", async () => {
   const harness = await createHarness();
   const submissionId = await submitAndVerify(harness);

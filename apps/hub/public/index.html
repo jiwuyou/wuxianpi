@@ -15,6 +15,7 @@
       </a>
       <nav class="top-actions" aria-label="主要操作">
         <button class="icon-button" id="refreshButton" type="button" title="刷新目录" aria-label="刷新目录">↻</button>
+        <button class="command-button" id="issuesButton" type="button">问题</button>
         <button class="command-button" id="publishButton" type="button">发布 Package</button>
       </nav>
     </header>
@@ -89,6 +90,13 @@
             <a class="command-button" id="sourceLink" target="_blank" rel="noreferrer">源代码</a>
           </div>
           <section class="detail-section">
+            <div class="section-heading">
+              <h3>问题</h3>
+              <button class="text-button" id="detailIssuesButton" type="button">查看全部</button>
+            </div>
+            <div id="packageIssueList" class="compact-issue-list"></div>
+          </section>
+          <section class="detail-section">
             <h3>包含内容</h3>
             <div class="contribution-list" id="contributionList"></div>
           </section>
@@ -134,6 +142,62 @@
         <div class="dialog-actions">
           <p class="form-status" id="publishStatus" role="status"></p>
           <button class="command-button primary" type="submit">提交核验</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="issuesDialog" class="issues-dialog">
+      <form method="dialog" class="dialog-header">
+        <div>
+          <p class="eyebrow">Support</p>
+          <h2>问题中心</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+      </form>
+      <div class="issue-toolbar">
+        <label class="search-field">
+          <span class="visually-hidden">搜索问题</span>
+          <input id="issueSearchInput" type="search" placeholder="搜索标题、正文或组件">
+        </label>
+        <select id="issueStatusFilter" aria-label="问题状态">
+          <option value="">全部状态</option>
+          <option value="pending">待确认</option>
+          <option value="confirmed">已确认</option>
+          <option value="in_progress">修复中</option>
+          <option value="awaiting_verification">待验证</option>
+          <option value="resolved">已解决</option>
+          <option value="migrated">已迁移</option>
+        </select>
+        <button class="command-button" id="createIssueButton" type="button">提交问题</button>
+      </div>
+      <div class="issue-workspace">
+        <div id="issueList" class="issue-list"></div>
+        <article id="issueDetail" class="issue-detail">
+          <p class="issue-placeholder">选择一个问题查看详情</p>
+        </article>
+      </div>
+    </dialog>
+
+    <dialog id="createIssueDialog" class="publish-dialog">
+      <form method="dialog" class="dialog-header">
+        <div>
+          <p class="eyebrow">WuxianPi Hub</p>
+          <h2>提交问题</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+      </form>
+      <form id="createIssueForm" class="publish-form">
+        <div class="two-columns">
+          <label><span>Package ID</span><input name="packageId" placeholder="可选"></label>
+          <label><span>组件</span><input name="component" placeholder="例如 mcp-client"></label>
+        </div>
+        <label><span>目标 GitHub 仓库</span><input name="targetRepository" placeholder="owner/repository，可选"></label>
+        <label><span>标题</span><input name="title" required maxlength="256"></label>
+        <label><span>问题正文</span><textarea name="body" required maxlength="24000" rows="10"></textarea></label>
+        <label class="checkbox-label"><input name="maintainersOnly" type="checkbox"><span>仅报告者和维护者可见</span></label>
+        <div class="dialog-actions">
+          <p class="form-status" id="createIssueStatus" role="status"></p>
+          <button class="command-button primary" type="submit">提交到 Hub</button>
         </div>
       </form>
     </dialog>
