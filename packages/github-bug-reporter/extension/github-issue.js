@@ -77,6 +77,34 @@ export async function submitIssue(issue, options = {}) {
   return { repository: normalized.repository, title: normalized.title, labels: normalized.labels, url, output: result.stdout.trim() };
 }
 
+export async function viewIssue(reference, options = {}) {
+  const parsed = parseGithubIssueReference(reference);
+  const result = await (options.runGh ?? runGithubCli)([
+    "issue", "view", String(parsed.number), "--repo", parsed.repository,
+    "--json", "number,title,body,state,url,labels,comments",
+  ], { signal: options.signal, timeoutMs: options.timeoutMs });
+  return JSON.parse(result.stdout);
+}
+
+export async function commentIssue(reference, body, options = {}) {
+  const parsed = parseGithubIssueReference(reference);
+  const comment = requiredText(body, "body", 12_000);
+  const result = await (options.runGh ?? runGithubCli)([
+    "issue", "comment", String(parsed.number), "--repo", parsed.repository, "--body-file", "-",
+  ], { input: comment, signal: options.signal, timeoutMs: options.timeoutMs });
+  const url = result.stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => /^https:\/\/github\.com\//.test(line)) ?? null;
+  return { repository: parsed.repository, number: parsed.number, url, output: result.stdout.trim() };
+}
+
+export function parseGithubIssueReference(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  const url = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:[?#].*)?$/.exec(raw);
+  if (url) return { repository: `${url[1]}/${url[2]}`, number: Number(url[3]) };
+  const short = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)$/.exec(raw);
+  if (short) return { repository: short[1], number: Number(short[2]) };
+  throw new Error("GitHub Issue 引用必须是 Issue URL 或 owner/name#number");
+}
+
 export function runGithubCli(args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn("gh", args, {
@@ -139,7 +167,7 @@ export function redactSensitive(value) {
     .replace(/((?:access_token|auth_token|token|password|secret)\s*[=:]\s*)[^\s&]+/gi, "$1[REDACTED]");
 }
 
-function normalizeRepository(value) {
+export function normalizeRepository(value) {
   let repository = requiredText(value, "repository", 200);
   repository = repository.replace(/^https:\/\/github\.com\//i, "").replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
   if (!REPOSITORY_PATTERN.test(repository)) throw new Error("repository 必须是 owner/name 或 github.com 仓库地址");

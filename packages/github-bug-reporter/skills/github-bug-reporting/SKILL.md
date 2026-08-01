@@ -1,69 +1,57 @@
 ---
 name: github-bug-reporting
-description: 诊断可能的软件缺陷，整理最小复现、检查重复问题并撰写高质量 GitHub Issue；只有获得用户明确同意后才允许提交。
+description: 诊断可能的软件缺陷，整理最小复现并提交问题；优先使用 GitHub，GitHub 不可用时可降级到 WuxianPi Hub。
 ---
 
-# GitHub Bug 报告
+# 软件问题报告
 
-当试错过程暴露出可能由软件实现导致的问题时，使用本 Skill。不要把命令写错、
-依赖缺失、网络失败、权限不足、不受支持的环境或用户配置错误直接判断为软件 Bug。
+当试错过程暴露出可能由软件实现导致的问题时，使用本 Skill。不要把命令写错、依赖
+缺失、网络失败、权限不足、不受支持的环境或用户配置错误直接判断为软件 Bug。
 
-## 提出 Issue 前
+## 提交前
 
-1. 排除无关变量后，至少重新复现一次问题。
-2. 记录准确的组件、版本、Commit、运行平台以及触发问题的命令或操作。
+1. 排除无关变量后，尽量重新复现问题。
+2. 记录组件、版本、Commit、平台以及触发问题的命令或操作。
 3. 明确区分预期行为和实际行为。
-4. 先检查配置、认证、权限、依赖和已知限制。
-5. 从证据中移除凭据、私人内容、个人路径、Cookie、Authorization Header 和无关日志。
-6. 优先根据 Package 的支持信息确定仓库，其次使用 Git origin，最后由用户明确选择。
-7. 无法确定问题归属时必须询问用户，不得猜测仓库。
+4. 从报告中移除凭据、Cookie、Authorization Header、私人内容和无关日志。
+5. 优先使用调用方指定仓库，其次按组件、Package 发布仓库和 Git origin 确定归属。
+6. 无法确定归属时询问用户，不得猜测仓库。
 
-## 用户确认
+## 工作流程
 
-调用 `submit_github_issue` 前，先在对话中说明为什么它更像软件 Bug，并概述当前
-证据。工具会再次搜索可能重复的 Issue，并向用户显示最终仓库、标题、Labels 和完整
-正文。只有用户确认这份最终预览后，工具才会创建 Issue。
+先调用 `prepare_software_issue`。该工具只生成持久草稿，并搜索 GitHub 和 WuxianPi Hub
+中可能重复的问题，不会提交。
 
-不得通过 `gh issue create`、`gh api`、`curl` 或通用 Shell 命令绕过确认流程。
-如果当前环境不能显示确认界面，应在对话中保留草稿，请用户手动提交。
+向用户说明判断依据、目标仓库、标题和主要正文，并询问是否同意：
+
+> 是否同意提交这个问题？将优先提交到 GitHub；如果 GitHub 不可用，则提交到
+> WuxianPi Hub。
+
+用户同意后，模型可以直接调用 `submit_software_issue`：
+
+```json
+{
+  "draftId": "draft_...",
+  "userConfirmed": true,
+  "fallbackToHub": true
+}
+```
+
+工具信任模型对用户授权的声明，不要求交互式确认卡片或额外确认令牌。不得在用户没有
+同意时把 `userConfirmed` 设置为 `true`，也不得使用 Shell 绕过该流程。
+
+## 渠道规则
+
+- 本地 `gh` 可用并已登录时，以用户自己的 GitHub 身份提交。
+- GitHub 提交成功后，不创建 Hub Issue。
+- GitHub 不可用且 `fallbackToHub=true` 时，创建 Hub Issue。
+- `fallbackToHub=false` 时只保留草稿并返回 GitHub 错误。
+- Hub Issue 后续可以由维护者手动迁移到 GitHub。
 
 ## Issue 内容
 
-标题应简洁、可搜索。正文优先使用以下结构：
+正文优先包含：问题描述、复现步骤、预期行为、实际行为、运行环境、已脱敏日志和已经
+尝试的方法。存在高度相似的问题时，应优先建议用户补充已有 Issue。
 
-```markdown
-## 问题描述
-
-## 复现步骤
-
-1.
-2.
-3.
-
-## 预期行为
-
-## 实际行为
-
-## 运行环境
-
-- 组件及版本：
-- Commit：
-- Android、Termux 或操作系统：
-- Runtime 版本：
-
-## 已脱敏日志
-
-```text
-只保留与问题直接相关的行
-```
-
-## 已尝试的方法和临时解决方案
-```
-
-## 查重与授权
-
-查重结果只用于辅助判断。如果存在高度相似的 Issue，应优先建议用户向已有 Issue
-补充信息，而不是创建新问题。
-
-如果 `gh` 尚未登录，应引导用户使用 GitHub 配置助手。登录完成后必须重新生成并展示
-Issue 预览；完成 GitHub 授权本身不代表用户同意提交 Issue。
+提交成功后使用 `get_software_issue` 跟踪状态；需要补充信息时，在用户同意后使用
+`comment_software_issue`。

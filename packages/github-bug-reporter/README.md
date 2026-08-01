@@ -1,16 +1,13 @@
-# GitHub Bug 报告助手
+# WuxianPi 软件问题报告助手
 
-这个 WuxianPi Package 提供统一的中文 Bug 报告 Skill 和
-`submit_github_issue` Pi 工具。
+这个 Package 为 WuxianPi 助手提供统一的问题准备、提交、查看和评论工具。
 
-工具使用本地已经授权的 GitHub CLI。它会检查登录状态、搜索可能重复的 Issue，
-并通过交互确认向用户展示准确的目标仓库、标题、Labels 和完整正文。只有用户同意后，
-工具才会执行 `gh issue create`。
+提交顺序：
 
-使用条件：
+1. 使用设备本地已经登录的 `gh` 创建 GitHub Issue。
+2. GitHub 不可用且用户允许降级时，创建 WuxianPi Hub Issue。
 
-- AI 所在环境已经安装 `git` 和 `gh`；
-- 已经针对 `github.com` 完成 `gh auth login`；
-- WuxianPi 或 Pi UI 能够响应 Extension 的确认请求。
+模型通过普通对话取得用户同意，并在提交参数中设置 `userConfirmed=true`。工具不要求
+额外的 UI 确认令牌。GitHub 成功时不会重复创建 Hub Issue。
 
-Package 不包含任何凭据，也不依赖 GitHub MCP。
+Package 不包含 GitHub Token，不依赖 GitHub MCP，也不使用 Hub 机器人账号。
