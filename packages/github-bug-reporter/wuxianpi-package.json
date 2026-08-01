@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.jiwuyou.github-bug-reporter",
+  "name": "GitHub Bug 报告助手",
+  "version": "1.0.0",
+  "summary": "帮助 AI 验证软件 Bug、征得用户同意，并通过 gh 提交高质量 GitHub Issue。",
+  "description": "提供统一的中文 Bug 报告 Skill 和 submit_github_issue 工具。工具会搜索可能重复的 Issue，向用户展示最终提交内容，并且只有获得明确确认后才执行 gh issue create。",
+  "license": "MIT",
+  "categories": ["capability", "skill", "solution"],
+  "requires": {
+    "hostCapabilities": [
+      { "id": "wuxianpi.package", "contractVersion": 1 },
+      { "id": "pi.extension", "contractVersion": 1 },
+      { "id": "pi.skill", "contractVersion": 1 }
+    ],
+    "packages": []
+  },
+  "build": {
+    "mode": "none",
+    "commands": {
+      "test": {
+        "command": "node --test test/*.test.mjs",
+        "timeoutSeconds": 30
+      }
+    }
+  },
+  "artifacts": [],
+  "contributions": [
+    {
+      "id": "io.github.jiwuyou.github-bug-reporter/extension.issue-submitter",
+      "type": "pi.extension",
+      "name": "GitHub Issue 提交工具",
+      "description": "注册 submit_github_issue；执行 gh issue create 前必须获得用户的交互确认。",
+      "path": "extension/index.js",
+      "assistantSelectable": true
+    },
+    {
+      "id": "io.github.jiwuyou.github-bug-reporter/skill.bug-reporting",
+      "type": "pi.skill",
+      "name": "GitHub Bug 报告流程",
+      "description": "指导 AI 完成问题诊断、最小复现、Issue 查重、日志脱敏和用户确认后的提交。",
+      "path": "skills/github-bug-reporting",
+      "assistantSelectable": true
+    }
+  ]
+}
