@@ -1,0 +1,9 @@
+runtime.env
+secrets.env
+data/
+backups/
+.restore.*
+.secrets.env.before.*
+secrets.env.new
+data.before-restore-*
+data.failed-restore-*
