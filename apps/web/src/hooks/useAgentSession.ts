@@ -17,6 +17,7 @@ import type { PermissionDecision, PermissionRequest } from "@/lib/wuxianpi/contr
 import { getPermissionState, mutatePermission } from "@/components/wuxianpi/api";
 import { runtimeErrorText, webApi, type ModelListEntry } from "@/lib/web-api-client";
 import { includesModel, resolveSelectableDefault, selectableModels } from "@/lib/model-selection";
+import { normalizeCardState, type ExecutableCardState, type JsonValue } from "@/lib/executable-card";
 
 export interface SessionData {
   sessionId: string;
@@ -306,6 +307,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null);
+  const [cards, setCards] = useState<ExecutableCardState[]>([]);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
@@ -413,7 +415,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         tree,
         leafId: snapshot.leafId ?? null,
         context: {
-          messages: snapshot.history ?? [],
+          messages: (snapshot.history ?? []).map(normalizeToolCalls),
           entryIds: snapshot.entries ?? [],
           thinkingLevel: snapshot.context?.thinkingLevel ?? String(state?.thinkingLevel ?? "off"),
           model: snapshot.context?.model ?? (snapshot.state?.model as { provider: string; modelId: string } | null | undefined) ?? null,
@@ -425,6 +427,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setActiveLeafId(d.leafId);
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
+      setCards((snapshot.cards ?? []).flatMap((value) => {
+        const card = normalizeCardState(value);
+        return card ? [card] : [];
+      }));
       setCurrentModelOverride(null);
       setError(null);
       if (Array.isArray(state?.extensionStatuses)) setExtensionStatuses(state.extensionStatuses);
@@ -445,8 +451,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
       const snapshot = await webApi.snapshot(sid, leafId);
-      setMessages(snapshot.history ?? []);
+      setMessages((snapshot.history ?? []).map(normalizeToolCalls));
       setEntryIds(snapshot.entries ?? []);
+      setCards((snapshot.cards ?? []).flatMap((value) => {
+        const card = normalizeCardState(value);
+        return card ? [card] : [];
+      }));
     } catch (e) {
       console.error("Failed to load context:", e);
     }
@@ -571,8 +581,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (event.type === "heartbeat") return;
         if (event.type === "snapshot") {
           settle();
-          setMessages(event.history ?? []);
+          setMessages((event.history ?? []).map(normalizeToolCalls));
           setEntryIds(event.entries ?? []);
+          setCards((event.cards ?? []).flatMap((value) => {
+            const card = normalizeCardState(value);
+            return card ? [card] : [];
+          }));
           setActiveLeafId(event.leafId ?? null);
           return;
         }
@@ -830,9 +844,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (request.id && request.capabilityId) setPermissionRequest(request);
         break;
       }
+      case "card_updated": {
+        const card = normalizeCardState(event.card);
+        if (card) setCards((current) => [...current.filter((item) => item.spec.cardId !== card.spec.cardId), card]);
+        break;
+      }
     }
   }, [addNotice, finishPromptWithoutStream, flushStreamingMessage, handleExtensionUiRequest, loadSession, onAgentEnd, queueStreamingMessage]);
   handleAgentEventRef.current = handleAgentEvent;
+
+  const submitCard = useCallback(async (cardId: string, workflowDigest: string, values: Record<string, JsonValue>) => {
+    const sid = sessionIdRef.current;
+    if (!sid) throw new Error("Session is not ready");
+    const requestId = createNoticeId();
+    setCards((current) => current.map((card) => card.spec.cardId === cardId
+      ? { ...card, state: "running", requestId, values, result: undefined, error: undefined }
+      : card));
+    try {
+      const card = await webApi.submitCard(sid, cardId, { requestId, workflowDigest, values });
+      setCards((current) => [...current.filter((item) => item.spec.cardId !== card.spec.cardId), card]);
+    } catch (error) {
+      setCards((current) => current.map((card) => card.spec.cardId === cardId
+        ? { ...card, state: "error", error: { code: "submit_failed", message: error instanceof Error ? error.message : String(error) } }
+        : card));
+      throw error;
+    }
+  }, []);
+
+  const cancelCard = useCallback(async (cardId: string) => {
+    const sid = sessionIdRef.current;
+    if (!sid) throw new Error("Session is not ready");
+    await webApi.cancelCard(sid, cardId);
+  }, []);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
@@ -1390,7 +1433,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   return {
     // State
-    data, loading, error, activeLeafId, messages, entryIds, streamState,
+    data, loading, error, activeLeafId, messages, entryIds, cards, streamState,
     agentRunning, modelNames, modelList, modelsLoaded, modelAvailabilityError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
@@ -1407,7 +1450,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, submitCard, cancelCard, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     // Subscriptions
     handleAgentEventRef,

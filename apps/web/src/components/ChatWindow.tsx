@@ -114,7 +114,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
   }, [onAgentEnd]);
 
   const {
-    loading, error, messages, entryIds, streamState,
+    loading, error, messages, entryIds, cards, streamState,
     agentRunning, modelNames, modelList, modelsLoaded, modelAvailabilityError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
@@ -129,7 +129,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
+    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, submitCard, cancelCard,
   } = useAgentSession({
     assistantId, session, newSessionCwd, onAgentEnd: handleAgentCompleted, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -185,6 +185,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
     for (const message of messages) if (message.role === "toolResult") map.set(message.toolCallId, message);
     return map;
   }, [messages]);
+  const cardStatesMap = useMemo(() => new Map(cards.map((card) => [card.spec.cardId, card])), [cards]);
   const lastUserIndex = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) if (messages[index].role === "user") return index;
     return -1;
@@ -542,6 +543,9 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
                         assistantId={assistantId}
                         sessionId={session?.id}
                         webExtensions={webExtensions}
+                        cardStates={cardStatesMap}
+                        onCardSubmit={submitCard}
+                        onCardCancel={cancelCard}
                       />
                     </Suspense>
                   </div>

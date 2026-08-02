@@ -6,6 +6,11 @@ import {
   createAgentSessionRuntime, createAgentSessionServices, getAgentDir, ModelRuntime,
   type SessionEntry, SessionManager, SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { CardExecutor } from "./card-executor.js";
+import {
+  CARD_RESULT_ENTRY, CARD_SUBMISSION_ENTRY, EXECUTABLE_CARD_TOOL, cardsFromEntries,
+  createExecutableCardTool, validateCardValues,
+} from "./executable-card.js";
 import { ExtensionUiBridge } from "./extension-ui.js";
 import type { PersistentDiagnostics } from "./diagnostics.js";
 import { ModelSetupService } from "./model-setup-service.js";
@@ -33,6 +38,10 @@ export function runDetached(operation: Promise<unknown>, onError: (error: unknow
 
 export function normalizeConfiguredToolName(name: string): string {
   return name.replace(/^pi-extension:/, "").replace(/^pi:/, "").replace(/^builtin:/, "");
+}
+
+function visibleToolNames(names: string[]): string[] {
+  return names.filter((name) => name !== EXECUTABLE_CARD_TOOL);
 }
 
 export interface RuntimeIdentity {
@@ -89,6 +98,8 @@ export class SessionRegistry {
   private readonly listeners = new Set<EventSink>();
   private readonly assistantToolsResolver?: (cwd: string) => Promise<string[] | undefined>;
   private readonly assistantResourcesResolver?: (cwd: string) => Promise<ResolvedAssistantPackageResources | undefined>;
+  private readonly cardExecutor = new CardExecutor();
+  private readonly cardExecutions = new Map<string, AbortController>();
 
   constructor(emitEvent?: EventSink, options: {
     idleTimeoutMs?: number;
@@ -423,6 +434,61 @@ export class SessionRegistry {
     });
   }
 
+  async submitCard(sessionId: string, cardId: string, input: {
+    requestId: string; workflowDigest: string; values: unknown;
+  }): Promise<unknown> {
+    return this.run(sessionId, async (slot) => {
+      requireIdle(slot, "card.submit");
+      const manager = slot.runtime.session.sessionManager;
+      const current = cardsFromEntries(manager.getBranch()).find((card) => card.spec.cardId === cardId);
+      if (!current) throw new RequestError("card_not_found", `Card not found: ${cardId}`);
+      if (current.requestId === input.requestId && current.state !== "draft") return current;
+      if (current.state === "running") throw new RequestError("card_busy", "Card is already running");
+      if (current.spec.workflowDigest !== input.workflowDigest) {
+        throw new RequestError("card_workflow_mismatch", "Card workflow changed; reload before submitting");
+      }
+      const values = validateCardValues(current.spec, input.values);
+      const startedAt = new Date().toISOString();
+      manager.appendCustomEntry(CARD_SUBMISSION_ENTRY, { cardId, requestId: input.requestId, values, startedAt });
+      const controller = new AbortController();
+      const executionKey = `${sessionId}:${cardId}`;
+      this.cardExecutions.set(executionKey, controller);
+      this.emit(slot, { type: "card_updated", card: cardsFromEntries(manager.getBranch()).find((card) => card.spec.cardId === cardId) });
+      try {
+        const result = await this.cardExecutor.execute(current.spec, values, {
+          cwd: manager.getCwd(), env: process.env, signal: controller.signal,
+        });
+        manager.appendCustomEntry(CARD_RESULT_ENTRY, {
+          cardId, requestId: input.requestId, state: "success", result, completedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        const code = error instanceof RequestError ? error.code : controller.signal.aborted ? "card_cancelled" : "card_execution_failed";
+        manager.appendCustomEntry(CARD_RESULT_ENTRY, {
+          cardId,
+          requestId: input.requestId,
+          state: code === "card_cancelled" ? "cancelled" : "error",
+          ...(error instanceof RequestError && error.details !== undefined ? { result: error.details } : {}),
+          error: { code, message: error instanceof Error ? error.message : String(error) },
+          completedAt: new Date().toISOString(),
+        });
+      } finally {
+        this.cardExecutions.delete(executionKey);
+      }
+      const card = cardsFromEntries(manager.getBranch()).find((candidate) => candidate.spec.cardId === cardId);
+      this.emit(slot, { type: "card_updated", card });
+      return card;
+    });
+  }
+
+  async cancelCard(sessionId: string, cardId: string): Promise<unknown> {
+    const slot = await this.getOrOpen(sessionId);
+    const controller = this.cardExecutions.get(`${sessionId}:${cardId}`);
+    if (!controller) throw new RequestError("card_not_running", "Card is not running");
+    controller.abort();
+    this.emit(slot, { type: "card_cancelling", cardId });
+    return { cardId, cancelling: true };
+  }
+
   async tree(sessionId: string): Promise<unknown> {
     return this.control(sessionId, async (slot) => ({
       tree: slot.runtime.session.sessionManager.getTree(),
@@ -436,7 +502,9 @@ export class SessionRegistry {
 
   async tools(sessionId: string): Promise<unknown> {
     return this.control(sessionId, async (slot) => ({
-      tools: slot.runtime.session.getAllTools(), activeToolNames: slot.runtime.session.getActiveToolNames(), toolSource: slot.toolSource,
+      tools: slot.runtime.session.getAllTools().filter((tool) => tool.name !== EXECUTABLE_CARD_TOOL),
+      activeToolNames: visibleToolNames(slot.runtime.session.getActiveToolNames()),
+      toolSource: slot.toolSource,
     }));
   }
 
@@ -451,9 +519,9 @@ export class SessionRegistry {
   private setToolsOnSlot(slot: RuntimeSlot, toolNames: string[], source: "assistant" | "override") {
     requireIdle(slot, "session.setTools");
     const available = new Set(slot.runtime.session.getAllTools().map((tool) => tool.name));
-    const requested = [...new Set(toolNames.map(normalizeConfiguredToolName).filter(Boolean))];
+    const requested = [...new Set([...toolNames.map(normalizeConfiguredToolName).filter(Boolean), EXECUTABLE_CARD_TOOL])];
     const unknown = requested.filter((name) => !available.has(name));
-    const availableToolNames = [...available];
+    const availableToolNames = [...available].filter((name) => name !== EXECUTABLE_CARD_TOOL);
     const warnings = unknown.length > 0 ? [{
       code: "unknown_tool",
       message: `Unknown tool name(s) ignored: ${unknown.join(", ")}`,
@@ -470,7 +538,7 @@ export class SessionRegistry {
     }
     slot.runtime.session.setActiveToolsByName(requested.filter((name) => available.has(name)));
     slot.toolSource = source;
-    return { activeToolNames: slot.runtime.session.getActiveToolNames(), warnings, toolSource: source };
+    return { activeToolNames: visibleToolNames(slot.runtime.session.getActiveToolNames()), warnings, toolSource: source };
   }
 
   async sessionModels(sessionId: string): Promise<unknown> {
@@ -634,8 +702,8 @@ export class SessionRegistry {
         followUp: [...session.getFollowUpMessages()],
       },
       isPromptRunning: identity.isRunning,
-      tools: session.getAllTools(),
-      activeToolNames: session.getActiveToolNames(),
+      tools: session.getAllTools().filter((tool) => tool.name !== EXECUTABLE_CARD_TOOL),
+      activeToolNames: visibleToolNames(session.getActiveToolNames()),
       toolSource: slot.toolSource,
       slashCommands: { commands: this.commandsOf(slot) },
       sessionStats: session.getSessionStats(),
@@ -663,6 +731,7 @@ export class SessionRegistry {
       history: context.messages,
       entries: entryIds,
       sessionEntries,
+      cards: cardsFromEntries(manager.getBranch(leafId ?? undefined)),
       leafId: leafId ?? null,
       tree: manager.getTree(),
       context: {
@@ -728,8 +797,12 @@ export class SessionRegistry {
           },
         } : {}),
       });
-      return { ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
-        services, diagnostics: services.diagnostics };
+      return { ...(await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+        customTools: [createExecutableCardTool()],
+      })), services, diagnostics: services.diagnostics };
     };
     const runtime = await createAgentSessionRuntime(createRuntime, {
       cwd: manager.getCwd(), agentDir: this.agentDir, sessionManager: manager,

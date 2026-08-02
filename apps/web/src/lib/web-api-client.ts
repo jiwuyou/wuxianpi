@@ -1,4 +1,5 @@
 import type { AgentMessage, SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { ExecutableCardState, JsonValue } from "@/lib/executable-card";
 import type {
   InstalledPackageListResponse,
   LocalContribution,
@@ -23,6 +24,7 @@ export interface SessionSnapshot {
   history?: AgentMessage[];
   entries?: string[];
   sessionEntries?: Array<Record<string, unknown>>;
+  cards?: ExecutableCardState[];
   leafId?: string | null;
   tree?: SessionTreeNode[];
   context?: {
@@ -655,6 +657,7 @@ export function normalizeSnapshot(body: unknown, fallbackSessionId: string): Ses
     history,
     entries: normalizedEntries.ids,
     sessionEntries: explicitSessionEntries,
+    cards: Array.isArray(root.cards) ? root.cards as ExecutableCardState[] : [],
     leafId: typeof root.leafId === "string" ? root.leafId : null,
     ...(treeValue ? { tree: treeValue as SessionTreeNode[] } : {}),
     context: {
@@ -764,6 +767,18 @@ export class WebApiClient {
 
   abort(sessionId: string) {
     return this.request<JsonRecord>(`/sessions/${encodeURIComponent(sessionId)}/abort`, { method: "POST", body: "{}" });
+  }
+
+  submitCard(sessionId: string, cardId: string, input: { requestId: string; workflowDigest: string; values: Record<string, JsonValue> }) {
+    return this.request<ExecutableCardState>(`/sessions/${encodeURIComponent(sessionId)}/cards/${encodeURIComponent(cardId)}/submit`, {
+      method: "POST", body: JSON.stringify(input),
+    });
+  }
+
+  cancelCard(sessionId: string, cardId: string) {
+    return this.request<JsonRecord>(`/sessions/${encodeURIComponent(sessionId)}/cards/${encodeURIComponent(cardId)}/cancel`, {
+      method: "POST", body: "{}",
+    });
   }
 
   compact(sessionId: string, customInstructions?: string) {

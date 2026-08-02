@@ -442,6 +442,19 @@ export class WebApi {
     if (action === "commands" && method === "GET") { json(response, 200, { ok: true, data: await registry.commands(sessionId) }); return; }
     if (action === "stats" && method === "GET") { json(response, 200, { ok: true, data: await registry.stats(sessionId) }); return; }
     if (action === "entries" && method === "GET") { json(response, 200, { ok: true, data: await registry.entries(sessionId, url.searchParams.get("since") ?? undefined) }); return; }
+    const cardRoute = /^cards\/([^/]+)\/(submit|cancel)$/.exec(action);
+    if (cardRoute && method === "POST") {
+      const cardId = decodeURIComponent(cardRoute[1]!);
+      if (cardRoute[2] === "cancel") {
+        json(response, 202, { ok: true, data: await registry.cancelCard(sessionId, cardId) }); return;
+      }
+      const body = await readJsonBody(request);
+      json(response, 200, { ok: true, data: await registry.submitCard(sessionId, cardId, {
+        requestId: requireString(body, "requestId"),
+        workflowDigest: requireString(body, "workflowDigest"),
+        values: body.values,
+      }) }); return;
+    }
     if (action === "prompt" && method === "POST") {
       const body = await readJsonBody(request);
       json(response, 202, { ok: true, data: await registry.prompt(sessionId, {
