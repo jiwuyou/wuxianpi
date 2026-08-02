@@ -4,6 +4,8 @@ import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, f
 import type { BuiltinSlashCommandResult, CompactResultInfo, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { SelectableToolPreset, ToolPreset } from "@/components/ToolPanel";
 import { consumeRuntimeReloadDraft } from "@/lib/runtime-deployment";
+import type { ModelListEntry } from "@/lib/web-api-client";
+import { selectableModels } from "@/lib/model-selection";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -27,7 +29,10 @@ interface Props {
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
-  modelList?: { id: string; name: string; provider: string }[];
+  modelList?: ModelListEntry[];
+  modelsLoaded?: boolean;
+  modelAvailabilityError?: string | null;
+  modelRequired?: boolean;
   onModelChange?: (provider: string, modelId: string) => void;
   onOpenModelsConfig?: () => void;
   onCompact?: () => void;
@@ -145,8 +150,8 @@ function slashMatchRank(command: SlashCommandPaletteItem, query: string): number
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, onModelChange,
-  onOpenModelsConfig,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList,
+  modelsLoaded, modelAvailabilityError, modelRequired, onModelChange, onOpenModelsConfig,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, assistantToolPresetAvailable, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo,
@@ -281,10 +286,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     draft.images.forEach((img) => URL.revokeObjectURL(img.previewUrl));
   }, []);
 
+  const modelSelectionBlocked = !!modelRequired && !!modelsLoaded && !model;
+
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length) return;
-    if (isStreaming) return;
+    if (isStreaming || modelSelectionBlocked) return;
     if (!attachedImages.length && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
       if (result.handled) {
@@ -294,7 +301,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
     onSend(msg, attachedImages.length ? attachedImages : undefined);
     clearInput();
-  }, [value, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput]);
+  }, [value, attachedImages, isStreaming, modelSelectionBlocked, onBuiltinCommand, onSend, clearInput]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -572,17 +579,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     slashItemRefs.current[slashActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [slashActiveIndex, slashMenuOpen]);
 
-  // Build model options: prefer modelList (has provider info), fallback to modelNames
-  const modelOptions: ModelOption[] = (() => {
-    if (modelList && modelList.length > 0) {
-      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name })).sort(compareModelOptions);
-    }
-    return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
-      provider: model?.provider ?? "unknown",
-      modelId,
-      name,
-    })).sort(compareModelOptions);
-  })();
+  const modelOptions: ModelOption[] = selectableModels(modelList ?? [])
+    .map((entry) => ({ provider: entry.provider, modelId: entry.id, name: entry.name }))
+    .sort(compareModelOptions);
 
   // Group options by provider, preserving insertion order
   const modelsByProvider: { provider: string; options: ModelOption[] }[] = [];
@@ -592,10 +591,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     else modelsByProvider.push({ provider: opt.provider, options: [opt] });
   }
 
+  const currentModelOption = model
+    ? modelOptions.find((option) => option.modelId === model.modelId && option.provider === model.provider)
+    : undefined;
   const displayModelName = model
-    ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name ?? model.modelId)
+    ? (currentModelOption?.name ?? modelNames?.[`${model.provider}:${model.modelId}`] ?? model.modelId)
     : null;
   const currentName = displayModelName;
+  const currentModelUnavailable = !!model && !!modelsLoaded && !currentModelOption;
+  const modelButtonLabel = currentName ?? (modelsLoaded ? "配置模型" : "加载模型");
 
   const compactSavedTokens = compactResult
     ? Math.max(0, compactResult.tokensBefore - compactResult.estimatedTokensAfter)
@@ -959,6 +963,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               isStreaming && (onSteer || onFollowUp)
                 ? "输入后发送到待处理…"
                 : isStreaming ? "Pi 正在运行…"
+                : modelSelectionBlocked ? "请先配置可用模型"
                 : "输入消息，或输入 / 使用命令"
             }
             rows={1}
@@ -1031,21 +1036,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={modelSelectionBlocked || (!value.trim() && !attachedImages.length)}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: !modelSelectionBlocked && (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "#fff" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: !modelSelectionBlocked && (value.trim() || attachedImages.length) ? "#fff" : "var(--text-dim)",
+                cursor: !modelSelectionBlocked && (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
-                letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
+                letterSpacing: 0,
+                boxShadow: !modelSelectionBlocked && (value.trim() || attachedImages.length) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >
@@ -1095,7 +1100,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </svg>
             </button>
             {/* Model selector — visible always, disabled during streaming */}
-            {modelOptions.length > 0 && currentName && onModelChange && (
+            {onModelChange && (modelsLoaded || currentName || onOpenModelsConfig) && (
                 <div ref={dropdownRef} style={{ position: "relative" }}>
                   <button
                     onClick={(e) => {
@@ -1136,7 +1141,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
                       <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
                     </svg>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{currentName}</span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{modelButtonLabel}</span>
+                    {currentModelUnavailable && <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>不可用</span>}
                   </button>
                   {modelDropdownOpen && modelDropdownRect && (() => {
                     const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
@@ -1182,6 +1188,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           </svg>
                           配置模型
                         </button>
+                      )}
+                      {modelAvailabilityError && (
+                        <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 11, borderBottom: "1px solid var(--border)", maxWidth: 280 }}>
+                          模型状态检查失败，已保留上次可用列表
+                        </div>
+                      )}
+                      {currentModelUnavailable && (
+                        <div style={{ padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, borderBottom: "1px solid var(--border)" }}>
+                          当前模型 {model?.provider}/{model?.modelId} 已不可用
+                        </div>
+                      )}
+                      {modelOptions.length === 0 && (
+                        <div style={{ padding: "10px 12px", color: "var(--text-dim)", fontSize: 12 }}>
+                          暂无可用模型
+                        </div>
                       )}
                       {modelsByProvider.map((group, gi) => (
                         <div key={group.provider}>

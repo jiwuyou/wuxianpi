@@ -15,7 +15,8 @@ import type { SelectableToolPreset, ToolEntry, ToolPreset } from "@/components/T
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { PermissionDecision, PermissionRequest } from "@/lib/wuxianpi/contracts";
 import { getPermissionState, mutatePermission } from "@/components/wuxianpi/api";
-import { runtimeErrorText, webApi } from "@/lib/web-api-client";
+import { runtimeErrorText, webApi, type ModelListEntry } from "@/lib/web-api-client";
+import { includesModel, resolveSelectableDefault, selectableModels } from "@/lib/model-selection";
 
 export interface SessionData {
   sessionId: string;
@@ -248,13 +249,13 @@ export interface AttachedImage {
 }
 
 type SelectedModel = { provider: string; modelId: string };
-type ModelEntry = { id: string; name: string; provider: string };
 type ModelsResponse = {
   models: Record<string, string>;
-  modelList?: ModelEntry[];
+  modelList?: ModelListEntry[];
   defaultModel?: SelectedModel | null;
   thinkingLevels?: Record<string, string[]>;
   thinkingLevelMaps?: Record<string, Record<string, string | null>>;
+  availabilityError?: string;
 };
 
 type SlashCommandsResponse = {
@@ -278,7 +279,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
-  const [modelList, setModelList] = useState<ModelEntry[]>([]);
+  const [modelList, setModelList] = useState<ModelListEntry[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [modelAvailabilityError, setModelAvailabilityError] = useState<string | null>(null);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
@@ -835,6 +838,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return;
     if (agentRunning) return;
+    if (isNew && !assistantId && modelsLoaded && !(newSessionModel ?? newSessionDefaultModel)) {
+      dispatchNotice({ type: "add", notice: { id: createNoticeId(), type: "warning", message: "请先配置一个可用模型。" } });
+      return;
+    }
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
     const promptRunId = promptRunIdRef.current + 1;
 
@@ -927,7 +934,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, promoteNewSession, waitForPromptSettlement, showToolWarnings]);
+  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, modelsLoaded, toolPreset, thinkingLevel, session, agentRunning, connectEvents, promoteNewSession, waitForPromptSettlement, showToolWarnings]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -979,6 +986,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadContext]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
+    if (!includesModel(modelList, { provider, modelId })) {
+      dispatchNotice({ type: "add", notice: { id: createNoticeId(), type: "warning", message: "该模型当前不可用，请刷新或重新配置模型。" } });
+      return;
+    }
     if (isNew) {
       setNewSessionModel({ provider, modelId });
       setPendingModel({ provider, modelId });
@@ -999,7 +1010,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to set model:", e);
     }
-  }, [isNew, setNewSessionModel]);
+  }, [isNew, modelList]);
 
   const handleCompact = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1314,26 +1325,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
 
-  // Load model list
+  // Load only models that the Runtime confirms are selectable.
   useEffect(() => {
     const modelCwd = newSessionCwd ?? session?.cwd ?? "";
     let cancelled = false;
+    setModelsLoaded(false);
     webApi.models(modelCwd || undefined).then((value) => {
       if (cancelled) return;
       const d = value as ModelsResponse;
       setModelNames(d.models);
       setModelThinkingLevels(d.thinkingLevels ?? {});
       setModelThinkingLevelMaps(d.thinkingLevelMaps ?? {});
-      const nextModelList = d.modelList ?? [];
-      setModelList(nextModelList);
-      if (isNew) {
-        const match = d.defaultModel
-          ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
-          : undefined;
-        const displayModel = match ?? nextModelList[0];
-        setNewSessionDefaultModel(displayModel ? { provider: displayModel.provider, modelId: displayModel.id } : null);
+      setModelAvailabilityError(d.availabilityError ?? null);
+      if (!d.availabilityError) {
+        const nextModelList = selectableModels(d.modelList ?? []);
+        setModelList(nextModelList);
+        if (isNew) {
+          setNewSessionModel((current) => includesModel(nextModelList, current) ? current : null);
+          setNewSessionDefaultModel(resolveSelectableDefault(nextModelList, d.defaultModel));
+        }
       }
-    }).catch(() => {});
+      setModelsLoaded(true);
+    }).catch((reason) => {
+      if (cancelled) return;
+      setModelAvailabilityError(reason instanceof Error ? reason.message : String(reason));
+      setModelsLoaded(true);
+    });
     return () => { cancelled = true; };
   }, [isNew, modelsRefreshKey, newSessionCwd, session?.cwd]);
 
@@ -1374,7 +1391,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
+    agentRunning, modelNames, modelList, modelsLoaded, modelAvailabilityError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading,

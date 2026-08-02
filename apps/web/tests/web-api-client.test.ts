@@ -179,11 +179,13 @@ describe("WebApiClient Runtime contract", () => {
       providers: [{ id: "deepseek", name: "DeepSeek", authenticated: true }],
       models: [{ provider: "deepseek", id: "deepseek-chat", name: "DeepSeek Chat", available: true, reasoning: false }],
       defaultModel: { provider: "deepseek", modelId: "deepseek-chat" },
+      availabilityError: "temporary provider check failure",
     } })));
     const models = await new WebApiClient().models();
     expect(models.models).toEqual({ "deepseek:deepseek-chat": "DeepSeek Chat" });
-    expect(models.modelList[0]).toMatchObject({ provider: "deepseek", id: "deepseek-chat", name: "DeepSeek Chat" });
+    expect(models.modelList[0]).toMatchObject({ provider: "deepseek", id: "deepseek-chat", name: "DeepSeek Chat", available: true });
     expect(models.defaultModel).toEqual({ provider: "deepseek", modelId: "deepseek-chat" });
+    expect(models.availabilityError).toBe("temporary provider check failure");
   });
 
   it("uses the Model Setup endpoints and never retains returned API keys", async () => {

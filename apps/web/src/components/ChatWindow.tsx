@@ -115,7 +115,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
+    agentRunning, modelNames, modelList, modelsLoaded, modelAvailabilityError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading,
@@ -275,6 +275,9 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
+      modelsLoaded={modelsLoaded}
+      modelAvailabilityError={modelAvailabilityError}
+      modelRequired={isNew && !assistantId}
       onModelChange={handleModelChange}
       onOpenModelsConfig={onOpenModelsConfig}
       onCompact={session || isNew ? handleCompact : undefined}

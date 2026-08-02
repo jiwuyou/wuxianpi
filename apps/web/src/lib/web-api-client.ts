@@ -243,10 +243,18 @@ function successfulPackageOperation(type: PackageOperation["type"], packageId: s
   });
 }
 
+export interface ModelListEntry {
+  id: string;
+  name: string;
+  provider: string;
+  available?: boolean;
+  reasoning?: boolean;
+}
+
 export interface NormalizedModels {
   providers: Array<Record<string, unknown>>;
   models: Record<string, string>;
-  modelList: Array<{ id: string; name: string; provider: string; available?: boolean; reasoning?: boolean }>;
+  modelList: ModelListEntry[];
   defaultModel: { provider: string; modelId: string } | null;
   thinkingLevels: Record<string, string[]>;
   thinkingLevelMaps: Record<string, Record<string, string | null>>;
