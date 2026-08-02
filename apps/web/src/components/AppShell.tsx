@@ -9,6 +9,7 @@ import { useRuntimeDeploymentSync } from "@/hooks/useRuntimeDeploymentSync";
 import { useTheme } from "@/hooks/useTheme";
 import { useBrowserNavigation } from "@/lib/browser-navigation";
 import { webApi } from "@/lib/web-api-client";
+import { assistantAvatarBackground, assistantAvatarUrl } from "@/lib/assistant-avatar";
 import { ChatWindow } from "./ChatWindow";
 import type { ChatInputHandle } from "./ChatInput";
 import {
@@ -42,6 +43,23 @@ type ShellOverlayContext = {
 
 function avatarText(assistant: AssistantSummary): string {
   return assistant.manifest.name.trim().slice(0, 1).toUpperCase() || "π";
+}
+
+function AssistantAvatarVisual({ assistant }: { assistant: AssistantSummary }) {
+  const url = assistantAvatarUrl(assistant);
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!url) return;
+    let active = true;
+    const image = new Image();
+    image.referrerPolicy = "no-referrer";
+    image.onload = () => { if (active) setLoadedUrl(url); };
+    image.src = url;
+    return () => { active = false; };
+  }, [url]);
+  return url && loadedUrl === url
+    ? <span style={{ backgroundImage: assistantAvatarBackground(url) }} />
+    : avatarText(assistant);
 }
 
 function basename(path: string): string {
@@ -391,9 +409,7 @@ export function AppShell() {
           aria-label="打开对话列表"
         >
           <div className="assistant-mini-avatar">
-            {selectedAssistant?.manifest.avatar
-              ? <span style={{ backgroundImage: `url(${selectedAssistant.manifest.avatar})` }} />
-              : selectedAssistant ? avatarText(selectedAssistant) : "π"}
+            {selectedAssistant ? <AssistantAvatarVisual assistant={selectedAssistant} /> : "π"}
           </div>
           <div className="mobile-chat-title">
             <strong>{selectedAssistant?.manifest.name ?? "WuxianPi"}</strong>
@@ -488,7 +504,7 @@ export function AppShell() {
         </header>
         {selectedAssistant && (
           <section className="shell-drawer-current">
-            <div className="assistant-mini-avatar">{selectedAssistant.manifest.avatar ? <span style={{ backgroundImage: `url(${selectedAssistant.manifest.avatar})` }} /> : avatarText(selectedAssistant)}</div>
+            <div className="assistant-mini-avatar"><AssistantAvatarVisual assistant={selectedAssistant} /></div>
             <div>
               <strong>{selectedAssistant.manifest.name}</strong>
               <small>当前助手</small>
@@ -683,7 +699,7 @@ function ConversationDrawer({
       {groups.map(({ assistant, sessions: items }) => (
         <section key={assistant.id}>
           <header>
-            <div className="assistant-mini-avatar">{avatarText(assistant)}</div>
+            <div className="assistant-mini-avatar"><AssistantAvatarVisual assistant={assistant} /></div>
             <div>
               <strong>{assistant.manifest.name}</strong>
               <small>{items.length} 个对话</small>
@@ -809,7 +825,7 @@ function AssistantsPanel({
           <article key={assistant.id} className={`assistant-card ${assistant.manifest.archived ? "archived" : ""}`}>
             <button type="button" className="assistant-card-main" onClick={() => onOpenChat(assistant)}>
               <span className="assistant-avatar">
-                {assistant.manifest.avatar ? <span style={{ backgroundImage: `url(${assistant.manifest.avatar})` }} /> : avatarText(assistant)}
+                <AssistantAvatarVisual assistant={assistant} />
               </span>
               <span className="assistant-card-copy">
                 <strong>{assistant.manifest.name}</strong>

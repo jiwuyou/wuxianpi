@@ -83,6 +83,18 @@ test("assistant lifecycle, capabilities, TTS, MCP adapter status, and extension 
 
   const assistants = await jsonFetch(`${fixture.base}/api/web/v1/assistants`);
   assert.equal(assistants.data.assistants.some((assistant) => assistant.id === "wuxianpi"), true);
+  const createdWithAvatar = await jsonFetch(`${fixture.base}/api/web/v1/assistants`, {
+    method: "POST", headers: jsonHeaders, body: JSON.stringify({
+      id: "avatar-create", manifest: { schemaVersion: 1, name: "Avatar Create" },
+      avatarAsset: { action: "upload", mimeType: "image/png", data: ONE_PIXEL_PNG },
+    }),
+  });
+  assert.match(createdWithAvatar.data.assistant.manifest.avatar, /^\.assets\/avatar-[a-f0-9]{16}\.png$/);
+  assert.equal((await fetch(`${fixture.base}/api/web/v1/assistants/avatar-create/avatar`)).status, 200);
+  await jsonFetch(`${fixture.base}/api/web/v1/assistants/avatar-create`, {
+    method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ manifest: { avatar: "../outside.png" } }),
+  });
+  assert.equal((await fetch(`${fixture.base}/api/web/v1/assistants/avatar-create/avatar`)).status, 400);
   const copied = await jsonFetch(`${fixture.base}/api/web/v1/assistants/wuxianpi/copy`, {
     method: "POST", headers: jsonHeaders, body: JSON.stringify({ targetId: "copied" }),
   });
@@ -90,6 +102,22 @@ test("assistant lifecycle, capabilities, TTS, MCP adapter status, and extension 
   const detail = await jsonFetch(`${fixture.base}/api/web/v1/assistants/copied`);
   assert.equal(detail.data.assistant.id, "copied");
   assert.equal(typeof detail.data.files.agents, "string");
+  const avatarUpdate = await jsonFetch(`${fixture.base}/api/web/v1/assistants/copied`, {
+    method: "PATCH", headers: jsonHeaders,
+    body: JSON.stringify({ avatarAsset: { action: "upload", mimeType: "image/png", data: ONE_PIXEL_PNG } }),
+  });
+  assert.match(avatarUpdate.data.assistant.manifest.avatar, /^\.assets\/avatar-[a-f0-9]{16}\.png$/);
+  const avatar = await fetch(`${fixture.base}/api/web/v1/assistants/copied/avatar`);
+  assert.equal(avatar.status, 200);
+  assert.equal(avatar.headers.get("content-type"), "image/png");
+  assert.equal(avatar.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(avatar.headers.get("cache-control"), "private, max-age=31536000, immutable");
+  assert.deepEqual(Buffer.from(await avatar.arrayBuffer()), Buffer.from(ONE_PIXEL_PNG, "base64"));
+  const invalidAvatar = await fetch(`${fixture.base}/api/web/v1/assistants/copied`, {
+    method: "PATCH", headers: jsonHeaders,
+    body: JSON.stringify({ avatarAsset: { action: "upload", mimeType: "image/png", data: Buffer.from("not a png").toString("base64") } }),
+  });
+  assert.equal(invalidAvatar.status, 400);
   await jsonFetch(`${fixture.base}/api/web/v1/assistants/copied`, {
     method: "PATCH", headers: jsonHeaders,
     body: JSON.stringify({ manifest: { tools: ["pi:read", "pi:bash"] } }),
@@ -119,6 +147,14 @@ test("assistant lifecycle, capabilities, TTS, MCP adapter status, and extension 
   form.set("file", new File([await exported.arrayBuffer()], "copied.wuxianpi.zip", { type: "application/zip" }));
   const imported = await jsonFetch(`${fixture.base}/api/web/v1/assistants/import`, { method: "POST", body: form });
   assert.equal(imported.data.assistant.id, "imported");
+  const importedAvatar = await fetch(`${fixture.base}/api/web/v1/assistants/imported/avatar`);
+  assert.equal(importedAvatar.status, 200);
+  assert.deepEqual(Buffer.from(await importedAvatar.arrayBuffer()), Buffer.from(ONE_PIXEL_PNG, "base64"));
+  const removedAvatar = await jsonFetch(`${fixture.base}/api/web/v1/assistants/copied`, {
+    method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ avatarAsset: { action: "remove" } }),
+  });
+  assert.equal(removedAvatar.data.assistant.manifest.avatar, undefined);
+  assert.equal((await fetch(`${fixture.base}/api/web/v1/assistants/copied/avatar`)).status, 404);
 
   const config = await jsonFetch(`${fixture.base}/api/web/v1/capabilities/config`, {
     method: "PATCH", headers: jsonHeaders, body: JSON.stringify({
@@ -164,6 +200,7 @@ test("assistant lifecycle, capabilities, TTS, MCP adapter status, and extension 
 });
 
 const jsonHeaders = { "content-type": "application/json" };
+const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 async function startFixture(t, name) {
   const root = await mkdtemp(join(tmpdir(), `wuxianpi-${name}-`));

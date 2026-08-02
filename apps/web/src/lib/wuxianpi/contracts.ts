@@ -235,15 +235,21 @@ export interface ExtensionBridgeResponse {
   error?: { code: string; message: string };
 }
 
+export type AssistantAvatarAssetMutation =
+  | { action: "upload"; mimeType: "image/png" | "image/jpeg" | "image/webp"; data: string }
+  | { action: "remove" };
+
 export interface AssistantCreateRequest {
   id: string;
   manifest: AssistantManifestV1;
   files?: Partial<AssistantFiles>;
+  avatarAsset?: AssistantAvatarAssetMutation;
 }
 
 export interface AssistantUpdateRequest {
   manifest?: Partial<Omit<AssistantManifestV1, "schemaVersion">>;
   files?: Partial<AssistantFiles>;
+  avatarAsset?: AssistantAvatarAssetMutation;
 }
 
 export interface NewAgentSessionRequest {

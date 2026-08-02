@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -12,6 +12,8 @@ import { RequestError } from "./protocol.js";
 import type { SessionRegistry } from "./session-registry.js";
 
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const MAX_ASSISTANT_AVATAR_BYTES = 1024 * 1024;
+const MANAGED_AVATAR_PREFIX = ".assets/avatar-";
 const DEFAULT_ASSISTANT = {
   schemaVersion: 1,
   name: "WuxianPi",
@@ -138,12 +140,21 @@ export class WebServices {
   async createAssistant(body: Record<string, unknown>) {
     const id = String(body.id ?? "");
     assertSafeId(id, "assistant id");
-    const manifest = asRecord(body.manifest, "manifest");
+    let manifest = asRecord(body.manifest, "manifest");
     validateAssistantManifest(manifest);
+    const avatarMutation = parseAvatarMutation(body.avatarAsset);
     const directory = join(this.assistantsRoot, id);
     await mkdir(this.assistantsRoot, { recursive: true, mode: 0o700 });
     await mkdir(directory, { mode: 0o700 });
     try {
+      if (avatarMutation?.action === "upload") {
+        const avatar = await writeManagedAvatar(directory, avatarMutation);
+        manifest = { ...manifest, avatar: avatar.relativePath };
+      } else if (avatarMutation?.action === "remove") {
+        manifest = { ...manifest };
+        delete manifest.avatar;
+      }
+      validateAssistantManifest(manifest);
       const files = body.files && typeof body.files === "object" ? body.files as Record<string, unknown> : {};
       await Promise.all([
         writeJson(join(directory, "assistant.json"), manifest),
@@ -162,11 +173,32 @@ export class WebServices {
 
   async updateAssistant(id: string, body: Record<string, unknown>) {
     const current = await this.getAssistant(id);
-    if (body.manifest !== undefined) {
-      const updates = asRecord(body.manifest, "manifest");
-      const manifest = { ...current.manifest, ...updates, schemaVersion: 1 };
+    const avatarMutation = parseAvatarMutation(body.avatarAsset);
+    const manifestUpdates = body.manifest !== undefined ? asRecord(body.manifest, "manifest") : undefined;
+    let manifest: Record<string, unknown> = manifestUpdates
+      ? { ...current.manifest, ...manifestUpdates, schemaVersion: 1 }
+      : { ...current.manifest };
+    validateAssistantManifest(manifest);
+    let writtenAvatar: string | undefined;
+    const previousManagedAvatar = managedAvatarPath(current.path, current.manifest.avatar);
+    try {
+      if (avatarMutation?.action === "upload") {
+        const avatar = await writeManagedAvatar(current.path, avatarMutation);
+        writtenAvatar = avatar.absolutePath;
+        manifest.avatar = avatar.relativePath;
+      } else if (avatarMutation?.action === "remove") {
+        delete manifest.avatar;
+      }
       validateAssistantManifest(manifest);
-      await writeJson(join(current.path, "assistant.json"), manifest);
+      if (body.manifest !== undefined || avatarMutation) await writeJson(join(current.path, "assistant.json"), manifest);
+    } catch (error) {
+      if (writtenAvatar) await rm(writtenAvatar, { force: true }).catch(() => undefined);
+      throw error;
+    }
+    const avatarAddressChanged = !!manifestUpdates && Object.prototype.hasOwnProperty.call(manifestUpdates, "avatar")
+      && manifest.avatar !== current.manifest.avatar;
+    if (previousManagedAvatar && previousManagedAvatar !== writtenAvatar && (avatarMutation || avatarAddressChanged)) {
+      await rm(previousManagedAvatar, { force: true }).catch(() => undefined);
     }
     if (body.files && typeof body.files === "object") {
       const files = body.files as Record<string, unknown>;
@@ -247,6 +279,30 @@ export class WebServices {
       await rm(created.path, { recursive: true, force: true });
       throw error;
     }
+  }
+
+  async assistantAvatar(id: string): Promise<{ path: string; mime: string; size: number; cacheControl: string }> {
+    const assistant = await this.getAssistant(id);
+    const avatar = typeof assistant.manifest.avatar === "string" ? assistant.manifest.avatar.trim() : "";
+    if (!avatar || /^[a-z][a-z0-9+.-]*:/i.test(avatar) || avatar.startsWith("//")) {
+      throw new RequestError("assistant_avatar_not_found", `Local avatar not found for assistant: ${id}`);
+    }
+    const target = resolve(assistant.path, avatar);
+    if (!isInside(assistant.path, target)) throw new RequestError("invalid_avatar_path", "Assistant avatar must stay inside the assistant directory");
+    let info;
+    try { info = await lstat(target); }
+    catch { throw new RequestError("assistant_avatar_not_found", `Avatar file not found for assistant: ${id}`); }
+    if (!info.isFile() || info.isSymbolicLink()) throw new RequestError("assistant_avatar_not_found", `Avatar is not a regular file for assistant: ${id}`);
+    const realTarget = await realpath(target);
+    if (!isInside(assistant.path, realTarget)) throw new RequestError("invalid_avatar_path", "Assistant avatar resolved outside the assistant directory");
+    const mime = contentType(realTarget);
+    if (!["image/png", "image/jpeg", "image/webp"].includes(mime)) throw new RequestError("invalid_avatar_type", "Assistant avatar must be PNG, JPEG, or WebP");
+    return {
+      path: realTarget,
+      mime,
+      size: info.size,
+      cacheControl: avatar.startsWith(MANAGED_AVATAR_PREFIX) ? "private, max-age=31536000, immutable" : "no-cache",
+    };
   }
 
   async fileInfo(filePath: string) {
@@ -872,6 +928,63 @@ function asMcpRequestError(error: unknown, path: string): RequestError {
   if (error instanceof RequestError) return error;
   if (error instanceof McpConfigError) return new RequestError("mcp_config_invalid", error.message);
   return new RequestError("mcp_config_failed", `Unable to access standard MCP config ${path}: ${errorMessage(error)}`);
+}
+
+type AssistantAvatarMutation =
+  | { action: "upload"; mimeType: "image/png" | "image/jpeg" | "image/webp"; data: string }
+  | { action: "remove" };
+
+function parseAvatarMutation(value: unknown): AssistantAvatarMutation | undefined {
+  if (value === undefined) return undefined;
+  const input = asRecord(value, "avatarAsset");
+  const action = String(input.action ?? "");
+  if (action === "remove") return { action };
+  if (action !== "upload") throw new RequestError("invalid_avatar_action", "avatarAsset.action must be upload or remove");
+  const mimeType = String(input.mimeType ?? "");
+  if (!["image/png", "image/jpeg", "image/webp"].includes(mimeType)) {
+    throw new RequestError("invalid_avatar_type", "Assistant avatar must be PNG, JPEG, or WebP");
+  }
+  if (typeof input.data !== "string" || !input.data) throw new RequestError("invalid_avatar_data", "avatarAsset.data is required");
+  return { action: "upload", mimeType: mimeType as "image/png" | "image/jpeg" | "image/webp", data: input.data };
+}
+
+async function writeManagedAvatar(directory: string, mutation: Extract<AssistantAvatarMutation, { action: "upload" }>): Promise<{ relativePath: string; absolutePath: string }> {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(mutation.data) || mutation.data.length % 4 !== 0) {
+    throw new RequestError("invalid_avatar_data", "Assistant avatar must be valid base64");
+  }
+  const bytes = Buffer.from(mutation.data, "base64");
+  if (bytes.length === 0 || bytes.length > MAX_ASSISTANT_AVATAR_BYTES) {
+    throw new RequestError("avatar_too_large", "Assistant avatar must not exceed 1 MiB");
+  }
+  if (!avatarMagicMatches(bytes, mutation.mimeType)) throw new RequestError("invalid_avatar_data", "Assistant avatar content does not match its MIME type");
+  const extension = mutation.mimeType === "image/png" ? "png" : mutation.mimeType === "image/jpeg" ? "jpg" : "webp";
+  const digest = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+  const relativePath = `${MANAGED_AVATAR_PREFIX}${digest}.${extension}`;
+  const absolutePath = join(directory, relativePath);
+  const assetsDirectory = dirname(absolutePath);
+  await mkdir(assetsDirectory, { recursive: true, mode: 0o700 });
+  const assetsInfo = await lstat(assetsDirectory);
+  const realAssetsDirectory = await realpath(assetsDirectory);
+  if (!assetsInfo.isDirectory() || assetsInfo.isSymbolicLink() || !isInside(directory, realAssetsDirectory)) {
+    throw new RequestError("invalid_avatar_path", "Assistant avatar assets directory is unsafe");
+  }
+  const target = join(realAssetsDirectory, basename(absolutePath));
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, bytes, { mode: 0o600 });
+  await rename(temporary, target);
+  return { relativePath, absolutePath: target };
+}
+
+function avatarMagicMatches(bytes: Buffer, mimeType: string): boolean {
+  if (mimeType === "image/png") return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (mimeType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  return bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
+}
+
+function managedAvatarPath(directory: string, value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.startsWith(MANAGED_AVATAR_PREFIX)) return undefined;
+  const target = resolve(directory, value);
+  return isInside(directory, target) ? target : undefined;
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {

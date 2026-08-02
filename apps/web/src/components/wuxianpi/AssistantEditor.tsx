@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Camera, Trash2 } from "lucide-react";
 import type {
+  AssistantAvatarAssetMutation,
   AssistantFiles,
   AssistantManifestV1,
   AssistantSummary,
@@ -11,6 +13,7 @@ import type {
 } from "@/lib/wuxianpi/contracts";
 import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
 import { createAssistant, getAssistant, updateAssistant } from "./api";
+import { assistantAvatarBackground, assistantAvatarUrl, prepareAssistantAvatar } from "@/lib/assistant-avatar";
 
 interface Props {
   assistant?: AssistantSummary | null;
@@ -89,10 +92,16 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
   const [tab, setTab] = useState<EditorTab>("identity");
   const [id, setId] = useState(assistant?.id ?? "");
   const [manifest, setManifest] = useState<AssistantManifestV1>(assistant?.manifest ?? defaultManifest());
+  const [storedAvatar, setStoredAvatar] = useState(assistant?.manifest.avatar);
   const [files, setFiles] = useState<AssistantFiles>(EMPTY_FILES);
   const [loading, setLoading] = useState(!!assistant);
   const [saving, setSaving] = useState(false);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarAsset, setAvatarAsset] = useState<AssistantAvatarAssetMutation | undefined>();
+  const [avatarPreviewUrl, setAvatarPreviewUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const avatarPreviewRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!assistant) return;
@@ -102,6 +111,7 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
       .then((detail) => {
         if (cancelled) return;
         setManifest(detail.assistant.manifest);
+        setStoredAvatar(detail.assistant.manifest.avatar);
         setFiles(detail.files);
       })
       .catch((reason) => {
@@ -122,8 +132,46 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
     return [...groups.entries()];
   }, [catalog]);
 
+  useEffect(() => () => {
+    if (avatarPreviewRef.current) URL.revokeObjectURL(avatarPreviewRef.current);
+  }, []);
+
+  const replaceAvatarPreview = (url: string | null) => {
+    if (avatarPreviewRef.current) URL.revokeObjectURL(avatarPreviewRef.current);
+    avatarPreviewRef.current = url;
+    setAvatarPreviewUrl(url);
+  };
+
   const patchManifest = <K extends keyof AssistantManifestV1>(key: K, value: AssistantManifestV1[K]) => {
     setManifest((current) => ({ ...current, [key]: value }));
+  };
+
+  const selectAvatar = async (file: File | undefined) => {
+    if (!file) return;
+    setAvatarBusy(true);
+    setError(null);
+    try {
+      const prepared = await prepareAssistantAvatar(file);
+      replaceAvatarPreview(prepared.previewUrl);
+      setAvatarAsset(prepared.mutation);
+      patchManifest("avatar", undefined);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const removeAvatar = () => {
+    replaceAvatarPreview(null);
+    setAvatarAsset({ action: "remove" });
+    patchManifest("avatar", undefined);
+  };
+
+  const setAvatarAddress = (value: string) => {
+    replaceAvatarPreview(null);
+    patchManifest("avatar", value || undefined);
+    setAvatarAsset(value ? undefined : assistant?.manifest.avatar ? { action: "remove" } : undefined);
   };
 
   const toggleCapability = (capability: CapabilityDescriptor) => {
@@ -154,8 +202,8 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
     setError(null);
     try {
       const saved = assistant
-        ? await updateAssistant(assistant.id, { manifest, files })
-        : await createAssistant({ id: normalizedId, manifest, files });
+        ? await updateAssistant(assistant.id, { manifest, files, ...(avatarAsset ? { avatarAsset } : {}) })
+        : await createAssistant({ id: normalizedId, manifest, files, ...(avatarAsset ? { avatarAsset } : {}) });
       onSaved(saved);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -165,6 +213,13 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
   };
 
   const selectedTts = manifest.tts === "inherit" ? {} : (manifest.tts ?? {});
+  const draftAvatar = manifest.avatar?.trim() ?? "";
+  const remoteAvatarUrl = /^https?:\/\//i.test(draftAvatar) ? draftAvatar : null;
+  const storedAvatarUrl = assistant && draftAvatar && draftAvatar === storedAvatar
+    ? assistantAvatarUrl({ id: assistant.id, manifest })
+    : null;
+  const avatarUrl = avatarPreviewUrl ?? remoteAvatarUrl ?? storedAvatarUrl;
+  const avatarFallback = manifest.name.trim().slice(0, 1).toUpperCase() || "π";
 
   return (
     <div className="wuxianpi-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -187,7 +242,20 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
               <label>助手 ID<input value={id} disabled={!!assistant} onChange={(event) => setId(event.target.value)} placeholder="writing-partner" /></label>
               <label>显示名称<input value={manifest.name} onChange={(event) => patchManifest("name", event.target.value)} placeholder="写作搭档" /></label>
               <label className="span-2">简介<textarea value={manifest.description ?? ""} onChange={(event) => patchManifest("description", event.target.value)} rows={2} /></label>
-              <label>头像路径或 URL<input value={manifest.avatar ?? ""} onChange={(event) => patchManifest("avatar", event.target.value)} placeholder="avatar.png" /></label>
+              <div className="assistant-avatar-field span-2">
+                <span className="assistant-avatar-preview">
+                  {avatarUrl ? <span style={{ backgroundImage: assistantAvatarBackground(avatarUrl) }} /> : avatarFallback}
+                </span>
+                <div>
+                  <strong>助手头像</strong>
+                  <div className="assistant-avatar-actions">
+                    <button type="button" className="secondary-button" disabled={avatarBusy} onClick={() => avatarInputRef.current?.click()}><Camera size={15} />{avatarBusy ? "处理中…" : "选择图片"}</button>
+                    {(avatarUrl || avatarAsset?.action === "upload") && <button type="button" className="icon-button danger" disabled={avatarBusy} onClick={removeAvatar} aria-label="删除头像" title="删除头像"><Trash2 size={16} /></button>}
+                  </div>
+                  <input ref={avatarInputRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { void selectAvatar(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+                </div>
+              </div>
+              <label>头像路径或 URL<input value={manifest.avatar ?? ""} onChange={(event) => setAvatarAddress(event.target.value)} placeholder="https://… 或 avatar.png" /></label>
               <label>开场白<input value={manifest.greeting ?? ""} onChange={(event) => patchManifest("greeting", event.target.value)} /></label>
               <label className="span-2">开场问题（每行一个）<textarea value={(manifest.starterPrompts ?? []).join("\n")} onChange={(event) => patchManifest("starterPrompts", event.target.value.split("\n").map((line) => line.trim()).filter(Boolean))} rows={4} /></label>
               <label>模型 Provider<input value={manifest.model === "inherit" ? "" : (manifest.model?.provider ?? "")} onChange={(event) => patchManifest("model", event.target.value ? { provider: event.target.value, modelId: manifest.model === "inherit" ? "" : (manifest.model?.modelId ?? "") } : "inherit")} placeholder="留空则继承" /></label>
@@ -241,7 +309,7 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
           )}
         </div>
         {error && <div className="wuxianpi-form-error">{error}</div>}
-        <footer className="wuxianpi-editor-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={saving || loading} onClick={() => void save()}>{saving ? "保存中…" : "保存助手"}</button></footer>
+        <footer className="wuxianpi-editor-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={saving || loading || avatarBusy} onClick={() => void save()}>{saving ? "保存中…" : "保存助手"}</button></footer>
       </section>
     </div>
   );

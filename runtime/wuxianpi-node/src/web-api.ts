@@ -210,6 +210,18 @@ export class WebApi {
       const assistant = await this.options.services.importAssistant(id, new Uint8Array(await file.arrayBuffer()));
       json(response, 201, { ok: true, data: { assistant } }); return;
     }
+    const assistantAvatarRoute = /^\/assistants\/([^/]+)\/avatar$/.exec(path);
+    if (assistantAvatarRoute) {
+      if (method !== "GET") throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
+      const id = decodeURIComponent(assistantAvatarRoute[1]!);
+      const avatar = await this.options.services.assistantAvatar(id);
+      await this.streamRawFile(request, response, avatar.path, {
+        "content-type": avatar.mime,
+        "cache-control": avatar.cacheControl,
+        "x-content-type-options": "nosniff",
+      });
+      return;
+    }
     const assistantActionRoute = /^\/assistants\/([^/]+)\/(copy|export)$/.exec(path);
     if (assistantActionRoute) {
       const id = decodeURIComponent(assistantActionRoute[1]!);
@@ -536,7 +548,7 @@ export class WebApi {
     }
   }
 
-  private async streamRawFile(request: IncomingMessage, response: ServerResponse, filePath: string): Promise<void> {
+  private async streamRawFile(request: IncomingMessage, response: ServerResponse, filePath: string, extraHeaders: Record<string, string> = {}): Promise<void> {
     const info = await stat(filePath);
     if (!info.isFile()) throw new RequestError("not_file", "Path is not a file");
     const range = request.headers.range ? /^bytes=(\d*)-(\d*)$/.exec(request.headers.range) : undefined;
@@ -557,6 +569,7 @@ export class WebApi {
       "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(basename(filePath))}`,
       "content-length": start === undefined ? info.size : end! - start + 1,
       ...(start === undefined ? {} : { "content-range": `bytes ${start}-${end}/${info.size}` }),
+      ...extraHeaders,
     });
     this.options.services.createReadStream(filePath, start, end).pipe(response);
   }
