@@ -7,6 +7,7 @@ import type { RegistrySessionEvent, SessionRegistry } from "./session-registry.j
 import { contentType, errorMessage, WebServices } from "./web-services.js";
 import type { WuxianPiPackageManager } from "./package-manager.js";
 import type { BrowserHostRegistry } from "./browser-host-registry.js";
+import type { HubAuth } from "./hub-auth.js";
 
 const API_ROOT = "/api/web/v1";
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
@@ -16,6 +17,8 @@ export interface WebApiOptions {
   registry: SessionRegistry;
   services: WebServices;
   packageManager?: WuxianPiPackageManager;
+  hubAuth?: HubAuth;
+  trustedOrigins?: string[];
   browserHosts: BrowserHostRegistry;
   status: () => Record<string, unknown>;
 }
@@ -64,8 +67,15 @@ export class WebApi {
   private async route(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const method = request.method ?? "GET";
     const path = url.pathname.slice(API_ROOT.length) || "/";
+    const trustedOrigin = requiresTrustedOrigin(path, method)
+      ? trustedOriginForRequest(request, this.options.trustedOrigins ?? [])
+      : undefined;
+    if (requiresTrustedOrigin(path, method)) {
+      setCorsPolicy(response, trustedOrigin === false || trustedOrigin === undefined ? null : trustedOrigin);
+      if (trustedOrigin === false) throw new RequestError("origin_not_allowed", "This Runtime operation requires a trusted local Origin", { httpStatus: 403 });
+    }
     if (method === "OPTIONS") {
-      response.writeHead(204, corsHeaders()); response.end(); return;
+      response.writeHead(204, corsHeaders(response)); response.end(); return;
     }
     if (method === "GET" && (path === "/" || path === "/status")) {
       json(response, 200, { ok: true, ...this.options.status() }); return;
@@ -329,6 +339,28 @@ export class WebApi {
     if (path === "/capabilities/tts" && method === "POST") {
       json(response, 200, await this.options.services.speak(await readJsonBody(request))); return;
     }
+    if (path === "/market/auth" && method === "GET") {
+      json(response, 200, { ok: true, data: this.marketAuthStatus() }); return;
+    }
+    if (path === "/market/auth/github/gh" && method === "POST") {
+      const body = await readJsonBody(request);
+      json(response, 200, { ok: true, data: await this.requireHubAuth().loginWithGh(optionalString(body, "label")) }); return;
+    }
+    if (path === "/market/auth/github/token" && method === "POST") {
+      const body = await readJsonBody(request);
+      const token = optionalString(body, "githubToken") ?? optionalString(body, "token");
+      if (!token) throw new RequestError("github_token_required", "githubToken is required");
+      json(response, 200, { ok: true, data: await this.requireHubAuth().exchangeGithubToken(token, optionalString(body, "label")) }); return;
+    }
+    if (path === "/market/auth/github/device/start" && method === "POST") {
+      json(response, 200, { ok: true, data: await this.requireHubAuth().startDeviceFlow(await readJsonBody(request)) }); return;
+    }
+    if (path === "/market/auth/github/device/complete" && method === "POST") {
+      json(response, 200, { ok: true, data: await this.requireHubAuth().completeDeviceFlow(await readJsonBody(request)) }); return;
+    }
+    if (path === "/market/auth/logout" && method === "POST") {
+      json(response, 200, { ok: true, data: await this.requireHubAuth().logout() }); return;
+    }
     if (path === "/market/packages" && method === "GET") {
       json(response, 200, { ok: true, data: await this.requirePackageManager().marketPackages(url.searchParams) }); return;
     }
@@ -422,6 +454,20 @@ export class WebApi {
   private requirePackageManager(): WuxianPiPackageManager {
     if (!this.options.packageManager) throw new RequestError("package_manager_unavailable", "WuxianPi Package Manager is not configured");
     return this.options.packageManager;
+  }
+
+  private requireHubAuth(): HubAuth {
+    if (!this.options.hubAuth) throw new RequestError("hub_auth_unavailable", "WuxianPi Hub authentication is not configured", { httpStatus: 503 });
+    return this.options.hubAuth;
+  }
+
+  private marketAuthStatus(): Record<string, unknown> {
+    const auth = this.requireHubAuth().status();
+    if (auth.authenticated) return { ...auth };
+    const market = this.requirePackageManager().marketClient.authStatus();
+    return market.authenticated
+      ? { ...auth, authenticated: true, source: market.source }
+      : { ...auth };
   }
 
   private async routeSession(request: IncomingMessage, response: ServerResponse, sessionId: string, action: string): Promise<void> {
@@ -601,16 +647,76 @@ function writeSse(response: ServerResponse, value: unknown): void {
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   const encoded = stringifyMessage(body);
-  response.writeHead(status, { ...corsHeaders(), "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(encoded), "cache-control": "no-store" });
+  response.writeHead(status, { ...corsHeaders(response), "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(encoded), "cache-control": "no-store" });
   response.end(encoded);
 }
 
-function corsHeaders(): Record<string, string> {
+const corsPolicies = new WeakMap<ServerResponse, string | null>();
+
+function setCorsPolicy(response: ServerResponse, origin: string | null): void {
+  corsPolicies.set(response, origin);
+}
+
+function corsHeaders(response?: ServerResponse): Record<string, string> {
+  const policy = response ? corsPolicies.get(response) : undefined;
   return {
-    "access-control-allow-origin": "*",
+    ...(policy === undefined ? { "access-control-allow-origin": "*" } : policy === null ? {} : { "access-control-allow-origin": policy }),
     "access-control-allow-methods": "GET,POST,PATCH,PUT,DELETE,OPTIONS",
     "access-control-allow-headers": "content-type,last-event-id",
+    vary: "Origin",
   };
+}
+
+function requiresTrustedOrigin(path: string, method: string): boolean {
+  if (path === "/market/auth" || path.startsWith("/market/auth/")) return true;
+  if (path.startsWith("/packages/publisher/") || path.includes("/proposals") || path.includes("/reviewer/") || path.includes("/management/")) return true;
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+  return !(path === "/packages" && method === "POST");
+}
+
+function trustedOriginForRequest(request: IncomingMessage, configuredOrigins: string[]): string | null | false {
+  const allowed = new Set(configuredOrigins.flatMap((value) => {
+    const origin = normalizeOrigin(value);
+    return origin ? [origin] : [];
+  }));
+  const host = request.headers.host;
+  if (host) {
+    const current = normalizeOrigin(`http://${host}`);
+    if (current) {
+      allowed.add(current);
+      const parsed = new URL(current);
+      if (isLoopbackHost(parsed.hostname)) {
+        for (const hostname of ["127.0.0.1", "localhost", "[::1]"]) {
+          allowed.add(`http://${hostname}:${parsed.port}`);
+        }
+      }
+    }
+  }
+  const originHeader = request.headers.origin?.trim();
+  if (originHeader) {
+    const origin = normalizeOrigin(originHeader);
+    return origin && allowed.has(origin) ? origin : false;
+  }
+  const referer = request.headers.referer?.trim();
+  if (referer) {
+    const origin = normalizeOrigin(referer);
+    return origin && allowed.has(origin) ? origin : false;
+  }
+  return null;
+}
+
+function normalizeOrigin(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    if (parsed.origin === "null" || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {

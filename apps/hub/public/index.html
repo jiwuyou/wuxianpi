@@ -16,7 +16,12 @@
       <nav class="top-actions" aria-label="主要操作">
         <button class="icon-button" id="refreshButton" type="button" title="刷新目录" aria-label="刷新目录">↻</button>
         <button class="command-button" id="issuesButton" type="button">问题</button>
+        <button class="command-button hidden" id="manageButton" type="button">管理</button>
         <button class="command-button" id="publishButton" type="button">发布 Package</button>
+        <button class="account-button" id="accountButton" type="button" aria-haspopup="dialog">
+          <span class="account-avatar" id="accountAvatar" aria-hidden="true">G</span>
+          <span id="accountLabel">登录</span>
+        </button>
       </nav>
     </header>
 
@@ -121,10 +126,7 @@
         <button class="icon-button" value="cancel" aria-label="关闭">×</button>
       </form>
       <form id="publishForm" class="publish-form">
-        <label>
-          <span>Publisher Token</span>
-          <input name="token" type="password" required autocomplete="current-password">
-        </label>
+        <p class="form-note">使用当前 Hub 账户提交。仓库会解析到完整 Git commit，审核通过后的 Release 不可修改。</p>
         <label>
           <span>GitHub 仓库</span>
           <input name="repositoryUrl" type="url" placeholder="https://github.com/author/package.git" required>
@@ -144,6 +146,72 @@
           <button class="command-button primary" type="submit">提交核验</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="accountDialog" class="account-dialog">
+      <form method="dialog" class="dialog-header">
+        <div>
+          <p class="eyebrow">Account</p>
+          <h2>Hub 账户</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+      </form>
+      <div class="account-body">
+        <section id="signedOutPanel">
+          <div class="auth-choice">
+            <h3>使用 GitHub 凭据</h3>
+            <p>已有 <code>gh</code> 时可执行 <code>gh auth token</code>，Token 只发送给 GitHub 验证身份，Hub 不保存它。</p>
+            <form id="tokenLoginForm" class="inline-form">
+              <input name="githubToken" type="password" required autocomplete="off" placeholder="GitHub Token">
+              <button class="command-button primary" type="submit">登录</button>
+            </form>
+          </div>
+          <div class="auth-divider"><span>或</span></div>
+          <div class="auth-choice">
+            <h3>GitHub 设备授权</h3>
+            <p>在 GitHub 页面输入一次性代码，当前浏览器将获得 Hub 会话。</p>
+            <button class="command-button" id="deviceLoginButton" type="button">开始设备授权</button>
+            <div class="device-code-panel hidden" id="deviceCodePanel">
+              <a id="deviceVerificationLink" target="_blank" rel="noreferrer">打开 GitHub 授权页面</a>
+              <code id="deviceUserCode"></code>
+              <button class="command-button primary" id="deviceCompleteButton" type="button">我已完成授权</button>
+            </div>
+          </div>
+          <p class="form-status" id="authStatus" role="status"></p>
+        </section>
+        <section class="hidden" id="signedInPanel">
+          <div class="identity-row">
+            <img id="identityAvatar" alt="" width="48" height="48">
+            <div><strong id="identityName"></strong><a id="identityProfile" target="_blank" rel="noreferrer"></a></div>
+            <span class="role-badge" id="identityRole"></span>
+          </div>
+          <div class="account-actions">
+            <button class="command-button" id="openManagementButton" type="button">打开管理工作台</button>
+            <button class="command-button danger-text" id="logoutButton" type="button">退出当前会话</button>
+          </div>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog id="managementDialog" class="management-dialog">
+      <form method="dialog" class="dialog-header">
+        <div>
+          <p class="eyebrow">Workspace</p>
+          <h2>市场管理</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+      </form>
+      <nav class="management-tabs" id="managementTabs" aria-label="市场管理视图">
+        <button class="active" type="button" data-management-tab="submissions">我的投稿</button>
+        <button type="button" data-management-tab="proposals">贡献提案</button>
+        <button type="button" data-management-tab="reviewer">审核队列</button>
+        <button type="button" data-management-tab="members">成员</button>
+      </nav>
+      <div class="management-toolbar">
+        <label><span>Package ID</span><input id="managementPackageId" placeholder="例如 com.example.package"></label>
+        <button class="command-button" id="managementRefreshButton" type="button">刷新</button>
+      </div>
+      <div class="management-content" id="managementContent" aria-live="polite"></div>
     </dialog>
 
     <dialog id="issuesDialog" class="issues-dialog">

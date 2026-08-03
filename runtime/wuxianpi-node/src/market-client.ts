@@ -1,13 +1,21 @@
 import { RequestError } from "./protocol.js";
 import type { InstallPlan } from "./package-types.js";
 
-const DEFAULT_HUB_URL = "https://wuxianpihub.webefficacy.com";
+export const DEFAULT_HUB_URL = "https://wuxianpihub.webefficacy.com";
+
+export interface MarketAuthCredential {
+  token: string;
+  sessionGeneration: string;
+}
 
 export interface MarketClientOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   publisherToken?: string;
+  authToken?: () => string | undefined;
+  authTokenSnapshot?: () => MarketAuthCredential | undefined;
+  onAuthFailure?: (credential: MarketAuthCredential) => Promise<void> | void;
 }
 
 export class MarketClient {
@@ -15,12 +23,18 @@ export class MarketClient {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly publisherToken?: string;
+  private readonly authTokenProvider?: () => string | undefined;
+  private readonly authTokenSnapshot?: () => MarketAuthCredential | undefined;
+  private readonly onAuthFailure?: (credential: MarketAuthCredential) => Promise<void> | void;
 
   constructor(options: MarketClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? process.env.WUXIANPI_HUB_URL ?? DEFAULT_HUB_URL).replace(/\/$/, "");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.publisherToken = options.publisherToken ?? process.env.WUXIANPI_HUB_PUBLISHER_TOKEN;
+    this.authTokenProvider = options.authToken;
+    this.authTokenSnapshot = options.authTokenSnapshot;
+    this.onAuthFailure = options.onAuthFailure;
   }
 
   listPackages(query: URLSearchParams | Record<string, string | number | undefined> = {}): Promise<Record<string, unknown>> {
@@ -69,12 +83,46 @@ export class MarketClient {
   }
 
   submitPackage(input: Record<string, unknown>): Promise<Record<string, unknown>> {
-    if (!this.publisherToken) throw new RequestError("publisher_token_missing", "WuxianPi Hub publisher token is not configured");
-    return this.request("/api/v1/publisher/submissions", {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.publisherToken}`, "content-type": "application/json" },
-      body: JSON.stringify(input),
-    });
+    return this.authenticatedRequest("/api/v1/publisher/submissions", { method: "POST", body: input });
+  }
+
+  authStatus(): { authenticated: boolean; source: "hub_session" | "legacy_publisher_token" | null } {
+    const fallbackToken = this.authTokenProvider?.();
+    const dynamic = this.authTokenSnapshot?.() ?? (fallbackToken ? { token: fallbackToken, sessionGeneration: "legacy" } : undefined);
+    return {
+      authenticated: !!(dynamic || this.publisherToken),
+      source: dynamic ? "hub_session" : this.publisherToken ? "legacy_publisher_token" : null,
+    };
+  }
+
+  authenticatedGet(path: string, query: URLSearchParams | Record<string, string | number | undefined> = {}): Promise<Record<string, unknown>> {
+    const url = new URL(`${this.baseUrl}${requireAuthenticatedPath(path)}`);
+    if (query instanceof URLSearchParams) url.search = query.toString();
+    else for (const [key, value] of Object.entries(query)) if (value !== undefined) url.searchParams.set(key, String(value));
+    return this.authenticatedRequest(url.pathname + url.search);
+  }
+
+  authenticatedRequest(path: string, options: {
+    method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+    body?: Record<string, unknown>;
+  } = {}): Promise<Record<string, unknown>> {
+    const dynamicCredential = this.authTokenSnapshot?.();
+    const dynamicToken = dynamicCredential?.token ?? this.authTokenProvider?.();
+    const token = dynamicToken ?? this.publisherToken;
+    if (!token) {
+      throw new RequestError("hub_auth_required", "Sign in to WuxianPi Hub before using publisher or management operations", { httpStatus: 401 });
+    }
+    return this.request(requireAuthenticatedPath(path), {
+      method: options.method ?? "GET",
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/json",
+        ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+    }, dynamicToken && this.onAuthFailure
+      ? () => this.onAuthFailure!(dynamicCredential ?? { token: dynamicToken, sessionGeneration: "legacy" })
+      : undefined);
   }
 
   private async get(path: string, query: URLSearchParams | Record<string, string | number | undefined> = {}): Promise<Record<string, unknown>> {
@@ -84,7 +132,7 @@ export class MarketClient {
     return this.request(url.pathname + url.search, { headers: { accept: "application/json" } });
   }
 
-  private async request(path: string, init: RequestInit): Promise<Record<string, unknown>> {
+  private async request(path: string, init: RequestInit, onAuthFailure?: () => Promise<void> | void): Promise<Record<string, unknown>> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     timer.unref();
@@ -98,9 +146,13 @@ export class MarketClient {
     }
     let payload: unknown;
     try { payload = await response.json(); }
-    catch { throw new RequestError("market_invalid_response", `WuxianPi Hub returned invalid JSON (${response.status})`, { httpStatus: 502, hubStatus: response.status }); }
+    catch {
+      if (onAuthFailure && response.status === 401) await onAuthFailure();
+      throw new RequestError("market_invalid_response", `WuxianPi Hub returned invalid JSON (${response.status})`, { httpStatus: 502, hubStatus: response.status });
+    }
     if (!response.ok) {
       const error = isRecord(payload) && isRecord(payload.error) ? payload.error : {};
+      if (onAuthFailure && (response.status === 401 || isHubAuthFailure(error.code))) await onAuthFailure();
       throw new RequestError(
         typeof error.code === "string" ? error.code : "market_request_failed",
         typeof error.message === "string" ? error.message : `WuxianPi Hub request failed (${response.status})`,
@@ -132,4 +184,17 @@ function isRecord(value: unknown): value is Record<string, any> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function requireAuthenticatedPath(path: string): string {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  if (!normalized.startsWith("/api/v1/")) {
+    throw new RequestError("invalid_market_path", "Authenticated Hub path must be under /api/v1/", { httpStatus: 400 });
+  }
+  return normalized;
+}
+
+function isHubAuthFailure(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  return /(?:auth|token|session).*(?:invalid|expired|revoked)|(?:invalid|expired|revoked).*(?:auth|token|session)/i.test(value);
 }

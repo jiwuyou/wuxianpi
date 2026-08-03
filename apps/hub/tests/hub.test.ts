@@ -8,6 +8,8 @@ import { afterEach, test } from "node:test";
 import { promisify } from "node:util";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
+import { HubAuthService } from "../src/auth-service.js";
+import type { GitHubAuthGateway, GitHubDeviceAuthorization, GitHubIdentity } from "../src/github-auth.js";
 import { RealGitGateway, type GitGateway, type CheckoutResult } from "../src/git.js";
 import type { GitSource, PackageManifest, SourceHealth } from "../src/types.js";
 import { VerifiedAssetStore, type DownloadVerifier } from "../src/metadata.js";
@@ -30,6 +32,28 @@ afterEach(async () => {
 class EmptyDownloader implements DownloadVerifier {
   async fetchBytes(): Promise<{ bytes: Uint8Array; contentType: string | null }> {
     throw new Error("No remote files are expected in this fixture");
+  }
+}
+
+class FakeGitHubAuthGateway implements GitHubAuthGateway {
+  identity: GitHubIdentity = {
+    githubId: "1001",
+    login: "fixture-user",
+    name: "Fixture User",
+    avatarUrl: null,
+    profileUrl: "https://github.com/fixture-user",
+  };
+
+  async getIdentity(): Promise<GitHubIdentity> {
+    return this.identity;
+  }
+
+  async startDeviceFlow(): Promise<GitHubDeviceAuthorization> {
+    return { deviceCode: "fixture-device-code", userCode: "ABCD-EFGH", verificationUri: "https://github.com/login/device", expiresIn: 900, interval: 5 };
+  }
+
+  async completeDeviceFlow(): Promise<GitHubIdentity> {
+    return this.identity;
   }
 }
 
@@ -217,8 +241,16 @@ async function createHarness(options: { dbPath?: string; fixture?: string; downl
   });
   const serviceOptions = { database: db, git, validator, publicUrl: "http://hub.test" };
   const service = new HubService(serviceOptions);
+  const authService = new HubAuthService({
+    database: db,
+    github: new FakeGitHubAuthGateway(),
+    githubClientId: "fixture-client-id",
+    sessionDays: 30,
+  });
   const server = createHubServer({
     service,
+    authService,
+    database: db,
     publicDir: resolve("public"),
     adminToken: "admin-token",
     publisherCredentials: new Map([["pub_test", {
@@ -234,7 +266,7 @@ async function createHarness(options: { dbPath?: string; fixture?: string; downl
   const address = server.address() as AddressInfo;
   const baseUrl = `http://127.0.0.1:${address.port}`;
   serviceOptions.publicUrl = baseUrl;
-  return { db, git, service, server, baseUrl, assetStore };
+  return { db, git, service, authService, server, baseUrl, assetStore };
 }
 
 async function request(baseUrl: string, path: string, options: RequestInit = {}) {

@@ -4,15 +4,23 @@ import { asErrorMessage, HubError } from "./errors.js";
 import type { GitGateway } from "./git.js";
 import type { PackageValidator } from "./validator.js";
 import type {
+  ContributionProposal,
   GitSource,
+  HubUser,
   IssueActor,
   IssueStatus,
+  PackageMember,
   PackagePresentationMetadata,
+  PackageRole,
+  ProposalStatus,
   PublisherIdentity,
   ReleaseRecord,
+  ReviewDecision,
   SourceHealth,
+  SubmissionReview,
   SupportIssueRecord,
   SubmissionRecord,
+  SubmissionStatus,
 } from "./types.js";
 import { CONTRIBUTION_TYPES, PACKAGE_CATEGORIES } from "./types.js";
 import { validatePublisherMetadata } from "./metadata.js";
@@ -24,6 +32,11 @@ const ISSUE_STATUSES = new Set<IssueStatus>([
   "pending", "confirmed", "in_progress", "awaiting_verification", "resolved",
   "cannot_reproduce", "declined", "migrated",
 ]);
+const PACKAGE_ROLES = new Set<PackageRole>(["owner", "maintainer", "contributor"]);
+const PROPOSAL_MUTABLE_STATUSES = new Set<ProposalStatus>([
+  "queued", "verifying", "awaiting_owner", "changes_requested", "failed",
+]);
+const REVIEWABLE_SUBMISSION_STATUSES = new Set<SubmissionStatus>(["awaiting_review"]);
 
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${randomUUID().replaceAll("-", "")}`;
@@ -87,6 +100,38 @@ function requiredIssueText(value: unknown, field: string, maxLength: number): st
   const parsed = optionalText(value, field, maxLength);
   if (!parsed) throw new HubError(400, "invalid_request", `${field} is required`);
   return parsed;
+}
+
+function requiredText(value: unknown, field: string, maxLength: number): string {
+  const parsed = optionalText(value, field, maxLength);
+  if (!parsed) throw new HubError(400, "invalid_request", `${field} is required`);
+  return parsed;
+}
+
+function parseReasonCodes(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new HubError(400, "invalid_reason_codes", "reasonCodes must contain at most 20 values");
+  }
+  return [...new Set(value.map((item) => requiredText(item, "reasonCode", 80)))];
+}
+
+function parseProposedPatch(value: unknown): Record<string, unknown> | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new HubError(400, "invalid_proposed_patch", "proposedPatch must be an object");
+  }
+  if (JSON.stringify(value).length > 64_000) {
+    throw new HubError(400, "invalid_proposed_patch", "proposedPatch exceeds 64 KiB");
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseExpectedRevision(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new HubError(400, "invalid_revision", "expectedRevision must be a positive integer");
+  }
+  return value;
 }
 
 function parseRepository(value: unknown): string | null {
@@ -194,6 +239,10 @@ export class HubService {
     const record = this.requireSubmission(submissionId);
     if (record.publisherId !== publisherId) throw new HubError(404, "submission_not_found", "The requested submission does not exist");
     if (record.status === "approved") throw new HubError(409, "immutable_submission", "An approved submission is immutable");
+    const proposal = this.options.database.getContributionProposalBySubmission(submissionId);
+    if (proposal && ["released", "withdrawn", "rejected"].includes(proposal.status)) {
+      throw new HubError(409, "proposal_immutable", "This contribution proposal can no longer be changed");
+    }
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new HubError(400, "invalid_request", "A JSON object is required");
     const input = body as Record<string, unknown>;
     const requestedRef = Object.hasOwn(input, "ref") ? parseRef(input.ref) : record.requestedRef;
@@ -224,6 +273,125 @@ export class HubService {
     }
     this.enqueueVerification(submissionId);
     return publicSubmission(this.requireSubmission(submissionId));
+  }
+
+  listPublisherSubmissions(publisherId: string) {
+    return {
+      submissions: this.options.database.listSubmissionsByPublisher(publisherId)
+        .map((record) => this.submissionGovernanceView(record)),
+    };
+  }
+
+  listReviewerSubmissions(statuses: SubmissionStatus[] = ["awaiting_review", "changes_requested"]) {
+    return {
+      submissions: this.options.database.listSubmissionsForReview(statuses)
+        .map((record) => this.submissionGovernanceView(record)),
+    };
+  }
+
+  getSubmissionGovernance(submissionId: string) {
+    return this.submissionGovernanceView(this.requireSubmission(submissionId));
+  }
+
+  async reviewSubmission(
+    submissionId: string,
+    reviewer: Pick<HubUser, "userId" | "name" | "role">,
+    body: unknown,
+  ) {
+    if (reviewer.role !== "reviewer" && reviewer.role !== "admin") {
+      throw new HubError(403, "reviewer_required", "Reviewer or administrator access is required");
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new HubError(400, "invalid_request", "A JSON object is required");
+    }
+    const input = body as Record<string, unknown>;
+    const decision = requiredText(input.decision, "decision", 40) as ReviewDecision;
+    if (!["changes_requested", "approved", "rejected"].includes(decision)) {
+      throw new HubError(400, "invalid_review_decision", "Reviewer decision must request changes, approve, or reject");
+    }
+    const message = requiredText(input.message, "message", 12_000);
+    const expectedRevision = input.expectedRevision === undefined
+      ? undefined
+      : parseExpectedRevision(input.expectedRevision);
+    if (decision === "approved" && expectedRevision === undefined) {
+      throw new HubError(400, "revision_required", "expectedRevision is required for reviewer approval");
+    }
+    const detail = {
+      reasonCodes: parseReasonCodes(input.reasonCodes),
+      message,
+      proposedPatch: parseProposedPatch(input.proposedPatch),
+    };
+    if (decision === "approved") {
+      return {
+        decision,
+        release: await this.approveSubmission(submissionId, message, reviewer.userId, expectedRevision, {
+          reviewerName: reviewer.name,
+          ...detail,
+        }),
+      };
+    }
+    if (decision === "changes_requested") {
+      this.requestSubmissionChanges(submissionId, reviewer, detail, expectedRevision);
+      return { decision, submission: this.getSubmissionGovernance(submissionId) };
+    }
+    this.rejectSubmission(submissionId, message, reviewer.userId, expectedRevision, {
+      reviewerName: reviewer.name,
+      ...detail,
+    });
+    return { decision, submission: this.getSubmissionGovernance(submissionId) };
+  }
+
+  requestSubmissionChanges(
+    submissionId: string,
+    reviewer: Pick<HubUser, "userId" | "name">,
+    detail: { reasonCodes: string[]; message: string; proposedPatch: Record<string, unknown> | null },
+    expectedRevision?: number,
+  ): void {
+    const record = this.requireSubmission(submissionId);
+    if (expectedRevision !== undefined && record.revision !== expectedRevision) {
+      throw new HubError(409, "submission_revision_stale", "The submission changed after the reviewer loaded it");
+    }
+    if (!REVIEWABLE_SUBMISSION_STATUSES.has(record.status)) {
+      throw new HubError(409, "submission_not_reviewable", "Submission is not awaiting review");
+    }
+    const timestamp = now();
+    const review = this.createReview(record, reviewer.userId, reviewer.name, "changes_requested", detail, timestamp);
+    if (!this.options.database.recordSubmissionReview(
+      review, record.status, "changes_requested", [detail.message], timestamp,
+    )) {
+      throw new HubError(409, "submission_changed", "Submission changed before the review was recorded");
+    }
+    this.options.database.addAudit({
+      id: id("audit"), actor: reviewer.userId, action: "request_changes",
+      targetType: "submission", targetId: submissionId,
+      detail: { revision: record.revision, reasonCodes: detail.reasonCodes }, createdAt: timestamp,
+    });
+  }
+
+  async withdrawSubmission(publisherId: string, submissionId: string): Promise<void> {
+    await this.pending.get(submissionId);
+    const record = this.requireSubmission(submissionId);
+    if (record.publisherId !== publisherId) {
+      throw new HubError(404, "submission_not_found", "The requested submission does not exist");
+    }
+    if (record.status === "approved") throw new HubError(409, "immutable_submission", "An approved submission is immutable");
+    if (record.status === "withdrawn") return;
+    const timestamp = now();
+    if (!this.options.database.updateSubmissionIf(submissionId, record.revision, record.status, {
+      status: "withdrawn", updatedAt: timestamp,
+    })) {
+      throw new HubError(409, "submission_changed", "Submission changed before withdrawal was recorded");
+    }
+    const proposal = this.options.database.getContributionProposalBySubmission(submissionId);
+    if (proposal && proposal.status !== "released") {
+      this.options.database.updateContributionProposal(proposal.proposalId, proposal.status, {
+        status: "withdrawn", updatedAt: timestamp,
+      });
+    }
+    this.options.database.addAudit({
+      id: id("audit"), actor: publisherId, action: "withdraw", targetType: "submission",
+      targetId: submissionId, detail: { revision: record.revision }, createdAt: timestamp,
+    });
   }
 
   async syncSubmission(publisherId: string, submissionId: string): Promise<ReturnType<typeof publicSubmission>> {
@@ -264,6 +432,9 @@ export class HubService {
     const record = this.requireSubmission(submissionId);
     if (!record.resolvedCommit) return;
     if (!this.options.database.updateSubmissionIf(submissionId, record.revision, "queued", { status: "verifying", updatedAt: now() })) return;
+    this.options.database.updateContributionProposalBySubmission(
+      submissionId, ["queued", "changes_requested", "failed"], { status: "verifying", updatedAt: now() },
+    );
     const sources: GitSource[] = [
       { kind: "github", url: record.repositoryUrl, priority: 100 },
       ...record.mirrorUrls.map((url, index) => ({ kind: "mirror" as const, url, priority: Math.max(0, 80 - index) })),
@@ -275,7 +446,7 @@ export class HubService {
       for (const health of sourceHealth) this.options.database.recordSourceHealth(health);
       try {
         const output = await this.options.validator.verify(checkout.directory, record.metadata);
-        this.options.database.updateSubmissionIf(submissionId, record.revision, "verifying", {
+        const verified = this.options.database.updateSubmissionIf(submissionId, record.revision, "verifying", {
           status: "awaiting_review",
           diagnostics: output.diagnostics,
           verification: output.verification,
@@ -285,6 +456,11 @@ export class HubService {
           verifiedRevision: record.revision,
           updatedAt: now(),
         });
+        if (verified) {
+          this.options.database.updateContributionProposalBySubmission(
+            submissionId, ["verifying", "queued"], { status: "awaiting_owner", updatedAt: now() },
+          );
+        }
       } finally {
         await checkout.cleanup();
       }
@@ -292,18 +468,44 @@ export class HubService {
       const attached = (error as { sourceHealth?: SourceHealth[] }).sourceHealth;
       if (attached) sourceHealth = attached;
       for (const health of sourceHealth) this.options.database.recordSourceHealth(health);
-      this.options.database.updateSubmissionIf(submissionId, record.revision, "verifying", {
+      const failed = this.options.database.updateSubmissionIf(submissionId, record.revision, "verifying", {
         status: "failed",
         diagnostics: [asErrorMessage(error)],
         verification: { status: "failed", verifiedAt: now(), checks: [] },
         sourceHealth,
         updatedAt: now(),
       });
+      if (failed) {
+        this.options.database.updateContributionProposalBySubmission(
+          submissionId, ["verifying", "queued"], {
+            status: "failed", rejectionReason: asErrorMessage(error), updatedAt: now(),
+          },
+        );
+      }
     }
   }
 
-  async approveSubmission(submissionId: string, notes: string | null, actor: string): Promise<{ releaseId: string; packageId: string; approvedCommit: string }> {
+  async approveSubmission(
+    submissionId: string,
+    notes: string | null,
+    actor: string,
+    expectedRevision?: number,
+    reviewDetail?: {
+      reviewerName: string;
+      reasonCodes: string[];
+      message: string;
+      proposedPatch: Record<string, unknown> | null;
+    },
+  ): Promise<{ releaseId: string; packageId: string; approvedCommit: string }> {
     const record = this.requireSubmission(submissionId);
+    if (expectedRevision !== undefined) {
+      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+        throw new HubError(400, "invalid_revision", "expectedRevision must be a positive integer");
+      }
+      if (record.revision !== expectedRevision) {
+        throw new HubError(409, "submission_revision_stale", "The submission changed after the reviewer loaded it");
+      }
+    }
     if (
       record.status !== "awaiting_review" || record.verification?.status !== "passed" ||
       record.verifiedRevision !== record.revision || !record.manifest || !record.manifestDigest || !record.resolvedCommit
@@ -313,13 +515,29 @@ export class HubService {
     const currentCommit = await this.resolveCommit(record.repositoryUrl, record.requestedRef);
     if (currentCommit !== record.resolvedCommit) throw new HubError(409, "submission_changed", "The submitted ref moved after verification; sync a new submission");
     const existingPackage = this.options.database.getPackageRow(record.manifest.id);
-    if (existingPackage && existingPackage.publisherId !== record.publisherId) throw new HubError(409, "package_owned", "Package ID belongs to another publisher");
+    const proposal = this.options.database.getContributionProposalBySubmission(submissionId);
+    if (proposal) {
+      if (proposal.packageId !== record.manifest.id) {
+        throw new HubError(409, "proposal_package_mismatch", "Contribution manifest does not target the proposal Package");
+      }
+      const acceptance = this.options.database.getContributionProposalAcceptance(proposal.proposalId);
+      const approvalRevision = expectedRevision ?? record.revision;
+      if (
+        proposal.status !== "accepted" || !proposal.acceptedBy || !proposal.acceptedAt ||
+        !acceptance || acceptance.revision !== approvalRevision || acceptance.commit !== record.resolvedCommit
+      ) {
+        throw new HubError(409, "proposal_owner_acceptance_required", "A Package owner or maintainer must accept the proposal before review approval");
+      }
+    } else if (existingPackage && existingPackage.publisherId !== record.publisherId) {
+      throw new HubError(409, "package_owned", "Package ID belongs to another publisher");
+    }
     const timestamp = now();
+    const releasePublisherId = existingPackage?.publisherId ?? record.publisherId;
     const release: ReleaseRecord = {
       releaseId: id("rel"),
       packageId: record.manifest.id,
       submissionId: record.submissionId,
-      publisherId: record.publisherId,
+      publisherId: releasePublisherId,
       version: record.manifest.version,
       approvedCommit: record.resolvedCommit,
       submittedRef: record.requestedRef,
@@ -333,13 +551,32 @@ export class HubService {
       status: "approved",
       publishedAt: timestamp,
       revocation: null,
+      attribution: proposal ? {
+        proposalId: proposal.proposalId,
+        contributorId: proposal.contributorId,
+        contributorName: proposal.contributorName,
+        repositoryUrl: record.repositoryUrl,
+        approvedCommit: record.resolvedCommit,
+      } : null,
     };
+    const review = this.createReview(
+      record,
+      actor,
+      reviewDetail?.reviewerName ?? actor,
+      "approved",
+      reviewDetail ?? {
+        reasonCodes: [],
+        message: notes ?? "Approved",
+        proposedPatch: null,
+      },
+      timestamp,
+    );
     try {
       const approved = this.options.database.approveSubmission(release, {
-        revision: record.revision,
+        revision: expectedRevision ?? record.revision,
         manifestDigest: record.manifestDigest,
         metadata: record.metadata,
-      });
+      }, review);
       if (!approved) throw new HubError(409, "submission_changed", "Submission changed after review and must be verified again");
     } catch (error) {
       if (asErrorMessage(error).includes("UNIQUE")) throw new HubError(409, "release_exists", "This immutable Package commit is already published");
@@ -352,15 +589,34 @@ export class HubService {
     return { releaseId: release.releaseId, packageId: release.packageId, approvedCommit: release.approvedCommit };
   }
 
-  rejectSubmission(submissionId: string, reason: string, actor: string): void {
+  rejectSubmission(
+    submissionId: string,
+    reason: string,
+    actor: string,
+    expectedRevision?: number,
+    reviewDetail?: {
+      reviewerName: string;
+      reasonCodes: string[];
+      message: string;
+      proposedPatch: Record<string, unknown> | null;
+    },
+  ): void {
     const record = this.requireSubmission(submissionId);
+    if (expectedRevision !== undefined && record.revision !== expectedRevision) {
+      throw new HubError(409, "submission_revision_stale", "The submission changed after the reviewer loaded it");
+    }
     if (record.status === "approved") throw new HubError(409, "immutable_submission", "An approved submission is immutable");
     const timestamp = now();
-    const rejected = this.options.database.updateSubmissionIf(submissionId, record.revision, record.status, {
-      status: "rejected",
-      diagnostics: [reason],
-      updatedAt: timestamp,
-    });
+    const detail = reviewDetail ?? {
+      reviewerName: actor,
+      reasonCodes: [],
+      message: reason,
+      proposedPatch: null,
+    };
+    const review = this.createReview(record, actor, detail.reviewerName, "rejected", detail, timestamp);
+    const rejected = this.options.database.recordSubmissionReview(
+      review, record.status, "rejected", [reason], timestamp,
+    );
     if (!rejected) throw new HubError(409, "submission_changed", "Submission changed before rejection was recorded");
     this.options.database.addAudit({ id: id("audit"), actor, action: "reject", targetType: "submission", targetId: submissionId, detail: { reason }, createdAt: timestamp });
   }
@@ -372,6 +628,217 @@ export class HubService {
     const timestamp = now();
     this.options.database.revokeRelease(releaseId, { reason, revokedAt: timestamp });
     this.options.database.addAudit({ id: id("audit"), actor, action: "revoke", targetType: "release", targetId: releaseId, detail: { reason }, createdAt: timestamp });
+  }
+
+  listPackageMembers(packageId: string): { members: PackageMember[] } {
+    this.requirePackage(packageId);
+    return { members: this.options.database.listPackageMembers(packageId) };
+  }
+
+  upsertPackageMember(
+    actor: HubUser,
+    packageId: string,
+    userId: string,
+    role: PackageRole,
+  ): PackageMember {
+    this.requirePackage(packageId);
+    if (!PACKAGE_ROLES.has(role)) throw new HubError(400, "invalid_package_role", "Unknown Package role");
+    const actorRole = this.requirePackageManager(actor, packageId);
+    if ((role === "owner" || role === "maintainer") && actor.role !== "admin" && actorRole !== "owner") {
+      throw new HubError(403, "package_owner_required", "Only a Package owner can assign owners or maintainers");
+    }
+    if (!this.options.database.getUser(userId)) throw new HubError(404, "user_not_found", "The requested user does not exist");
+    const current = this.options.database.getPackageMember(packageId, userId);
+    if (current?.role === "owner" && role !== "owner" && this.ownerCount(packageId) <= 1) {
+      throw new HubError(409, "last_owner", "A Package must retain at least one owner");
+    }
+    const timestamp = now();
+    const member = this.options.database.upsertPackageMember(packageId, userId, role, timestamp);
+    this.options.database.addAudit({
+      id: id("audit"), actor: actor.userId, action: current ? "update_member" : "add_member",
+      targetType: "package", targetId: packageId, detail: { userId, role }, createdAt: timestamp,
+    });
+    return member;
+  }
+
+  removePackageMember(actor: HubUser, packageId: string, userId: string): void {
+    this.requirePackage(packageId);
+    const actorRole = this.requirePackageManager(actor, packageId);
+    const target = this.options.database.getPackageMember(packageId, userId);
+    if (!target) throw new HubError(404, "package_member_not_found", "The requested Package member does not exist");
+    if ((target.role === "owner" || target.role === "maintainer") && actor.role !== "admin" && actorRole !== "owner") {
+      throw new HubError(403, "package_owner_required", "Only a Package owner can remove owners or maintainers");
+    }
+    if (target.role === "owner" && this.ownerCount(packageId) <= 1) {
+      throw new HubError(409, "last_owner", "A Package must retain at least one owner");
+    }
+    if (!this.options.database.removePackageMember(packageId, userId)) {
+      throw new HubError(409, "package_member_changed", "Package membership changed before removal");
+    }
+    const timestamp = now();
+    this.options.database.addAudit({
+      id: id("audit"), actor: actor.userId, action: "remove_member", targetType: "package",
+      targetId: packageId, detail: { userId, role: target.role }, createdAt: timestamp,
+    });
+  }
+
+  listContributionProposals(packageId: string) {
+    this.requirePackage(packageId);
+    return {
+      proposals: this.options.database.listContributionProposals(packageId)
+        .map((proposal) => this.proposalView(proposal)),
+    };
+  }
+
+  listContributorProposals(contributorId: string) {
+    return {
+      proposals: this.options.database.listContributionProposalsByContributor(contributorId)
+        .map((proposal) => this.proposalView(proposal)),
+    };
+  }
+
+  async createContributionProposal(contributor: HubUser, packageId: string, body: unknown) {
+    this.requirePackage(packageId);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new HubError(400, "invalid_request", "A JSON object is required");
+    }
+    const input = body as Record<string, unknown>;
+    const title = requiredText(input.title, "title", 240);
+    const summary = requiredText(input.summary, "summary", 4_000);
+    const repositoryUrl = parseRepositoryUrl(input.repositoryUrl);
+    const requestedRef = parseRef(input.ref);
+    const mirrorUrls = parseMirrorUrls(input.mirrorUrls ?? []);
+    const metadata = validatePublisherMetadata(input.metadata ?? { links: [], screenshots: [] });
+    const resolvedCommit = await this.resolveCommit(repositoryUrl, requestedRef);
+    const timestamp = now();
+    const publisher = { id: contributor.userId, name: contributor.name, profileUrl: contributor.profileUrl };
+    this.options.database.upsertPublisher(publisher, timestamp);
+    const submission: SubmissionRecord = {
+      submissionId: id("sub"), publisherId: contributor.userId, repositoryUrl, requestedRef,
+      resolvedCommit, mirrorUrls, metadata, status: "queued", diagnostics: [], verification: null,
+      manifest: null, manifestDigest: null, sourceHealth: [], revision: 1, verifiedRevision: null,
+      createdAt: timestamp, updatedAt: timestamp,
+    };
+    const proposal: ContributionProposal = {
+      proposalId: id("proposal"), packageId, submissionId: submission.submissionId,
+      contributorId: contributor.userId, contributorName: contributor.name, status: "queued",
+      title,
+      summary,
+      acceptedBy: null, acceptedAt: null, rejectionReason: null,
+      createdAt: timestamp, updatedAt: timestamp,
+    };
+    this.options.database.insertSubmission(submission);
+    this.options.database.insertContributionProposal(proposal);
+    this.enqueueVerification(submission.submissionId);
+    this.options.database.addAudit({
+      id: id("audit"), actor: contributor.userId, action: "create", targetType: "contribution_proposal",
+      targetId: proposal.proposalId, detail: { packageId, submissionId: submission.submissionId }, createdAt: timestamp,
+    });
+    return this.proposalView(this.requireProposal(proposal.proposalId));
+  }
+
+  async updateContributionProposal(contributorId: string, proposalId: string, body: unknown) {
+    const proposal = this.requireProposal(proposalId);
+    if (proposal.contributorId !== contributorId) throw new HubError(404, "proposal_not_found", "The requested proposal does not exist");
+    if (!PROPOSAL_MUTABLE_STATUSES.has(proposal.status)) {
+      throw new HubError(409, "proposal_immutable", "This contribution proposal can no longer be changed");
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new HubError(400, "invalid_request", "A JSON object is required");
+    }
+    const input = body as Record<string, unknown>;
+    const title = Object.hasOwn(input, "title") ? requiredText(input.title, "title", 240) : proposal.title;
+    const summary = Object.hasOwn(input, "summary") ? requiredText(input.summary, "summary", 4_000) : proposal.summary;
+    const submissionPatch: Record<string, unknown> = {};
+    if (Object.hasOwn(input, "ref")) submissionPatch.ref = input.ref;
+    if (Object.hasOwn(input, "mirrorUrls")) submissionPatch.mirrorUrls = input.mirrorUrls;
+    if (Object.hasOwn(input, "metadata")) submissionPatch.metadata = input.metadata;
+    await this.updateSubmission(contributorId, proposal.submissionId, submissionPatch);
+    const current = this.requireProposal(proposalId);
+    const timestamp = now();
+    const changed = this.options.database.updateContributionProposal(proposalId, current.status, {
+      title,
+      summary,
+      updatedAt: timestamp,
+    });
+    if (!changed) throw new HubError(409, "proposal_changed", "Proposal changed while the update was being recorded");
+    return this.proposalView(this.requireProposal(proposalId));
+  }
+
+  acceptContributionProposal(actor: HubUser, proposalId: string, expectedRevision: number) {
+    const proposal = this.requireProposal(proposalId);
+    this.requirePackageManager(actor, proposal.packageId);
+    const revision = parseExpectedRevision(expectedRevision);
+    const submission = this.requireSubmissionAtRevision(proposal.submissionId, revision);
+    if (proposal.status !== "awaiting_owner") {
+      throw new HubError(409, "proposal_not_ready", "Proposal verification must pass before owner acceptance");
+    }
+    if (
+      submission.status !== "awaiting_review" || submission.verification?.status !== "passed" ||
+      submission.verifiedRevision !== submission.revision || !submission.resolvedCommit || !submission.manifest
+    ) {
+      throw new HubError(409, "proposal_not_ready", "Proposal verification is not passing and unchanged");
+    }
+    if (submission.manifest.id !== proposal.packageId) {
+      throw new HubError(409, "proposal_package_mismatch", "Contribution manifest does not target the proposal Package");
+    }
+    const timestamp = now();
+    if (!this.options.database.acceptContributionProposal(
+      proposalId,
+      proposal.status,
+      actor.userId,
+      timestamp,
+      submission.revision,
+      submission.resolvedCommit,
+    )) {
+      throw new HubError(409, "proposal_changed", "Proposal changed before acceptance was recorded");
+    }
+    this.options.database.insertSubmissionReview(this.createReview(
+      submission,
+      actor.userId,
+      actor.name,
+      "accepted",
+      { reasonCodes: [], message: "Package owner accepted this contribution proposal.", proposedPatch: null },
+      timestamp,
+    ));
+    this.options.database.addAudit({
+      id: id("audit"), actor: actor.userId, action: "accept", targetType: "contribution_proposal",
+      targetId: proposalId, detail: { revision: submission.revision, commit: submission.resolvedCommit }, createdAt: timestamp,
+    });
+    return this.proposalView(this.requireProposal(proposalId));
+  }
+
+  requestContributionProposalChanges(actor: HubUser, proposalId: string, body: unknown) {
+    const proposal = this.requireProposal(proposalId);
+    this.requirePackageManager(actor, proposal.packageId);
+    const detail = this.parseReviewDetail(body);
+    this.requireSubmissionAtRevision(proposal.submissionId, detail.expectedRevision);
+    if (proposal.status !== "awaiting_owner" && proposal.status !== "accepted") {
+      throw new HubError(409, "proposal_not_reviewable", "Proposal is not awaiting owner review");
+    }
+    this.requestSubmissionChanges(proposal.submissionId, actor, detail, detail.expectedRevision);
+    return this.proposalView(this.requireProposal(proposalId));
+  }
+
+  rejectContributionProposal(actor: HubUser, proposalId: string, body: unknown) {
+    const proposal = this.requireProposal(proposalId);
+    this.requirePackageManager(actor, proposal.packageId);
+    const detail = this.parseReviewDetail(body);
+    this.requireSubmissionAtRevision(proposal.submissionId, detail.expectedRevision);
+    if (["released", "withdrawn", "rejected"].includes(proposal.status)) {
+      throw new HubError(409, "proposal_immutable", "This contribution proposal can no longer be changed");
+    }
+    this.rejectSubmission(proposal.submissionId, detail.message, actor.userId, detail.expectedRevision, {
+      reviewerName: actor.name, ...detail,
+    });
+    return this.proposalView(this.requireProposal(proposalId));
+  }
+
+  async withdrawContributionProposal(contributorId: string, proposalId: string): Promise<void> {
+    const proposal = this.requireProposal(proposalId);
+    if (proposal.contributorId !== contributorId) throw new HubError(404, "proposal_not_found", "The requested proposal does not exist");
+    if (proposal.status === "released") throw new HubError(409, "proposal_immutable", "A released proposal is immutable");
+    await this.withdrawSubmission(contributorId, proposal.submissionId);
   }
 
   listPackages(query: URLSearchParams) {
@@ -702,9 +1169,102 @@ export class HubService {
     this.options.database.addAudit({ id: id("audit"), actor: actorId, action, targetType: "support_issue", targetId: issueId, detail, createdAt });
   }
 
+  private submissionGovernanceView(record: SubmissionRecord) {
+    return {
+      ...publicSubmission(record),
+      reviews: this.options.database.listSubmissionReviews(record.submissionId),
+      revisions: this.options.database.listSubmissionRevisions(record.submissionId)
+        .map((revision) => publicSubmission(revision)),
+      proposal: this.options.database.getContributionProposalBySubmission(record.submissionId),
+    };
+  }
+
+  private proposalView(proposal: ContributionProposal) {
+    const submission = this.requireSubmission(proposal.submissionId);
+    return {
+      ...proposal,
+      submission: publicSubmission(submission),
+      reviews: this.options.database.listSubmissionReviews(proposal.submissionId),
+    };
+  }
+
+  private parseReviewDetail(body: unknown): {
+    expectedRevision: number;
+    reasonCodes: string[];
+    message: string;
+    proposedPatch: Record<string, unknown> | null;
+  } {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new HubError(400, "invalid_request", "A JSON object is required");
+    }
+    const input = body as Record<string, unknown>;
+    return {
+      expectedRevision: parseExpectedRevision(input.expectedRevision),
+      reasonCodes: parseReasonCodes(input.reasonCodes),
+      message: requiredText(input.message, "message", 12_000),
+      proposedPatch: parseProposedPatch(input.proposedPatch),
+    };
+  }
+
+  private createReview(
+    submission: SubmissionRecord,
+    reviewerId: string,
+    reviewerName: string,
+    decision: SubmissionReview["decision"],
+    detail: { reasonCodes: string[]; message: string; proposedPatch: Record<string, unknown> | null },
+    createdAt: string,
+  ): SubmissionReview {
+    return {
+      reviewId: id("review"),
+      submissionId: submission.submissionId,
+      revision: submission.revision,
+      reviewerId,
+      reviewerName,
+      decision,
+      reasonCodes: detail.reasonCodes,
+      message: detail.message,
+      proposedPatch: detail.proposedPatch,
+      createdAt,
+    };
+  }
+
+  private requirePackage(packageId: string) {
+    const record = this.options.database.getPackageRow(packageId);
+    if (!record) throw new HubError(404, "package_not_found", "The requested Package does not exist");
+    return record;
+  }
+
+  private requirePackageManager(actor: HubUser, packageId: string): PackageRole {
+    if (actor.role === "admin") return "owner";
+    const role = this.options.database.getPackageRole(packageId, actor.userId);
+    if (role !== "owner" && role !== "maintainer") {
+      throw new HubError(403, "package_maintainer_required", "Package owner or maintainer access is required");
+    }
+    return role;
+  }
+
+  private ownerCount(packageId: string): number {
+    return this.options.database.listPackageMembers(packageId)
+      .filter((member) => member.role === "owner").length;
+  }
+
+  private requireProposal(proposalId: string): ContributionProposal {
+    const proposal = this.options.database.getContributionProposal(proposalId);
+    if (!proposal) throw new HubError(404, "proposal_not_found", "The requested proposal does not exist");
+    return proposal;
+  }
+
   private requireSubmission(id: string): SubmissionRecord {
     const record = this.options.database.getSubmission(id);
     if (!record) throw new HubError(404, "submission_not_found", "The requested submission does not exist");
+    return record;
+  }
+
+  private requireSubmissionAtRevision(submissionId: string, expectedRevision: number): SubmissionRecord {
+    const record = this.requireSubmission(submissionId);
+    if (record.revision !== expectedRevision) {
+      throw new HubError(409, "submission_revision_stale", "The submission changed after the owner loaded it");
+    }
     return record;
   }
 }

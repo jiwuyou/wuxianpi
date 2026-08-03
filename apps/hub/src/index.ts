@@ -1,7 +1,9 @@
 import { HubDatabase } from "./database.js";
 import { loadConfig } from "./config.js";
 import { RealGitGateway } from "./git.js";
+import { RealGitHubAuthGateway } from "./github-auth.js";
 import { FetchDownloadVerifier, VerifiedAssetStore } from "./metadata.js";
+import { HubAuthService } from "./auth-service.js";
 import { createHubServer } from "./server.js";
 import { HubService } from "./service.js";
 import { PackageValidator } from "./validator.js";
@@ -21,9 +23,17 @@ const service = new HubService({
   validator,
   publicUrl: config.publicUrl,
 });
+const authService = new HubAuthService({
+  database,
+  github: new RealGitHubAuthGateway(),
+  githubClientId: config.githubClientId,
+  sessionDays: config.sessionDays,
+});
 service.resumePendingSubmissions();
 const server = createHubServer({
   service,
+  authService,
+  database,
   publicDir: config.publicDir,
   adminToken: config.adminToken,
   publisherCredentials: config.publisherCredentials,

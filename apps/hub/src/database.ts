@@ -2,10 +2,18 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  ContributionProposal,
+  GlobalRole,
+  HubSession,
+  HubUser,
+  PackageMember,
   PackageManifest,
   PackagePresentationMetadata,
+  PackageRole,
+  ProposalStatus,
   PublisherIdentity,
   ReleaseRecord,
+  SubmissionReview,
   SupportIssueComment,
   SupportIssueRecord,
   SourceHealth,
@@ -54,6 +62,69 @@ interface ReleaseRow {
   status: string;
   published_at: string;
   revocation: string | null;
+  attribution: string | null;
+}
+
+interface UserRow {
+  user_id: string;
+  github_id: string;
+  login: string;
+  name: string;
+  avatar_url: string | null;
+  profile_url: string;
+  role: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SessionRow {
+  session_id: string;
+  user_id: string;
+  kind: string;
+  label: string;
+  created_at: string;
+  last_used_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+}
+
+interface PackageMemberRow extends UserRow {
+  package_id: string;
+  member_user_id: string;
+  package_role: string;
+  member_created_at: string;
+  member_updated_at: string;
+}
+
+interface SubmissionReviewRow {
+  review_id: string;
+  submission_id: string;
+  revision: number;
+  reviewer_id: string;
+  reviewer_name: string;
+  decision: string;
+  reason_codes: string;
+  message: string;
+  proposed_patch: string | null;
+  created_at: string;
+}
+
+interface ContributionProposalRow {
+  proposal_id: string;
+  package_id: string;
+  submission_id: string;
+  contributor_id: string;
+  contributor_name: string;
+  status: string;
+  title: string;
+  summary: string;
+  accepted_by: string | null;
+  accepted_at: string | null;
+  accepted_revision: number | null;
+  accepted_commit: string | null;
+  rejection_reason: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface IssueRow {
@@ -106,6 +177,11 @@ type SubmissionChanges = Partial<{
   verifiedRevision: number | null;
   updatedAt: string;
 }>;
+
+type ProposalChanges = Partial<Pick<
+  ContributionProposal,
+  "status" | "title" | "summary" | "acceptedBy" | "acceptedAt" | "rejectionReason" | "updatedAt"
+>>;
 
 interface IssueListFilters {
   packageId: string | null;
@@ -194,6 +270,7 @@ export class HubDatabase {
         status TEXT NOT NULL,
         published_at TEXT NOT NULL,
         revocation TEXT,
+        attribution TEXT,
         UNIQUE(package_id, approved_commit)
       );
 
@@ -248,6 +325,78 @@ export class HubDatabase {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        github_id TEXT NOT NULL UNIQUE,
+        login TEXT NOT NULL,
+        name TEXT NOT NULL,
+        avatar_url TEXT,
+        profile_url TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS package_members (
+        package_id TEXT NOT NULL REFERENCES packages(package_id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(package_id, user_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS submission_revisions (
+        submission_id TEXT NOT NULL REFERENCES submissions(submission_id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        snapshot TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(submission_id, revision)
+      );
+
+      CREATE TABLE IF NOT EXISTS submission_reviews (
+        review_id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL REFERENCES submissions(submission_id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        reviewer_id TEXT NOT NULL,
+        reviewer_name TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        reason_codes TEXT NOT NULL,
+        message TEXT NOT NULL,
+        proposed_patch TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS contribution_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        package_id TEXT NOT NULL REFERENCES packages(package_id) ON DELETE CASCADE,
+        submission_id TEXT NOT NULL UNIQUE REFERENCES submissions(submission_id) ON DELETE CASCADE,
+        contributor_id TEXT NOT NULL REFERENCES users(user_id),
+        contributor_name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        accepted_by TEXT REFERENCES users(user_id),
+        accepted_at TEXT,
+        accepted_revision INTEGER,
+        accepted_commit TEXT,
+        rejection_reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_packages_updated ON packages(updated_at DESC, package_id);
       CREATE INDEX IF NOT EXISTS idx_releases_package ON releases(package_id, published_at DESC);
       CREATE INDEX IF NOT EXISTS idx_submissions_publisher ON submissions(publisher_id, updated_at DESC);
@@ -255,10 +404,44 @@ export class HubDatabase {
       CREATE INDEX IF NOT EXISTS idx_support_issues_status ON support_issues(status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_support_issues_reporter ON support_issues(reporter_token_hash, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_support_issue_comments_issue ON support_issue_comments(issue_id, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_users_login ON users(login COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+      CREATE INDEX IF NOT EXISTS idx_package_members_user ON package_members(user_id, package_id);
+      CREATE INDEX IF NOT EXISTS idx_submission_reviews_submission ON submission_reviews(submission_id, revision DESC, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_contribution_proposals_package ON contribution_proposals(package_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_contribution_proposals_contributor ON contribution_proposals(contributor_id, updated_at DESC);
     `);
     const columns = new Set((this.sqlite.prepare("PRAGMA table_info(submissions)").all() as unknown as Array<{ name: string }>).map((row) => row.name));
     if (!columns.has("revision")) this.sqlite.exec("ALTER TABLE submissions ADD COLUMN revision INTEGER NOT NULL DEFAULT 1");
     if (!columns.has("verified_revision")) this.sqlite.exec("ALTER TABLE submissions ADD COLUMN verified_revision INTEGER");
+    const releaseColumns = new Set((this.sqlite.prepare("PRAGMA table_info(releases)").all() as unknown as Array<{ name: string }>).map((row) => row.name));
+    if (!releaseColumns.has("attribution")) this.sqlite.exec("ALTER TABLE releases ADD COLUMN attribution TEXT");
+    const proposalColumns = new Set((this.sqlite.prepare("PRAGMA table_info(contribution_proposals)").all() as unknown as Array<{ name: string }>).map((row) => row.name));
+    if (!proposalColumns.has("accepted_revision")) this.sqlite.exec("ALTER TABLE contribution_proposals ADD COLUMN accepted_revision INTEGER");
+    if (!proposalColumns.has("accepted_commit")) this.sqlite.exec("ALTER TABLE contribution_proposals ADD COLUMN accepted_commit TEXT");
+    this.sqlite.exec(`
+      INSERT OR IGNORE INTO submission_revisions(submission_id, revision, snapshot, created_at)
+      SELECT submission_id, revision, json_object(
+        'submissionId', submission_id,
+        'publisherId', publisher_id,
+        'repositoryUrl', repository_url,
+        'requestedRef', requested_ref,
+        'resolvedCommit', resolved_commit,
+        'mirrorUrls', json(mirror_urls),
+        'metadata', json(metadata),
+        'status', status,
+        'diagnostics', json(diagnostics),
+        'verification', CASE WHEN verification IS NULL THEN NULL ELSE json(verification) END,
+        'manifest', CASE WHEN manifest IS NULL THEN NULL ELSE json(manifest) END,
+        'manifestDigest', manifest_digest,
+        'sourceHealth', json(source_health),
+        'revision', revision,
+        'verifiedRevision', verified_revision,
+        'createdAt', created_at,
+        'updatedAt', updated_at
+      ), created_at FROM submissions;
+    `);
   }
 
   upsertPublisher(publisher: PublisherIdentity, now: string): void {
@@ -278,32 +461,167 @@ export class HubDatabase {
     return row ? { id: row.publisher_id, name: row.name, profileUrl: row.profile_url } : null;
   }
 
-  insertSubmission(record: SubmissionRecord): void {
+  upsertUser(
+    identity: Pick<HubUser, "githubId" | "login" | "name" | "avatarUrl" | "profileUrl">,
+    timestamp: string,
+  ): HubUser {
+    const existing = this.sqlite.prepare("SELECT user_id FROM users WHERE github_id = ?")
+      .get(identity.githubId) as { user_id: string } | undefined;
+    const userId = existing?.user_id ?? `github:${identity.githubId}`;
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      this.sqlite.prepare(`
+        INSERT INTO users(user_id, github_id, login, name, avatar_url, profile_url, role, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'user', ?, ?)
+        ON CONFLICT(github_id) DO UPDATE SET
+          login = excluded.login,
+          name = excluded.name,
+          avatar_url = excluded.avatar_url,
+          profile_url = excluded.profile_url,
+          updated_at = excluded.updated_at
+      `).run(
+        userId, identity.githubId, identity.login, identity.name, identity.avatarUrl,
+        identity.profileUrl, timestamp, timestamp,
+      );
+      this.sqlite.prepare(`
+        INSERT INTO publishers(publisher_id, name, profile_url, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(publisher_id) DO UPDATE SET
+          name = excluded.name,
+          profile_url = excluded.profile_url,
+          updated_at = excluded.updated_at
+      `).run(userId, identity.name, identity.profileUrl, timestamp, timestamp);
+      this.sqlite.exec("COMMIT");
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getUser(userId)!;
+  }
+
+  getUser(userId: string): HubUser | null {
+    const row = this.sqlite.prepare("SELECT * FROM users WHERE user_id = ?").get(userId) as UserRow | undefined;
+    return row ? this.mapUser(row) : null;
+  }
+
+  getUserByGithubId(githubId: string): HubUser | null {
+    const row = this.sqlite.prepare("SELECT * FROM users WHERE github_id = ?").get(githubId) as UserRow | undefined;
+    return row ? this.mapUser(row) : null;
+  }
+
+  updateUserRole(userId: string, role: GlobalRole, timestamp: string): boolean {
+    const result = this.sqlite.prepare("UPDATE users SET role = ?, updated_at = ? WHERE user_id = ?")
+      .run(role, timestamp, userId);
+    return Number(result.changes) === 1;
+  }
+
+  insertSession(record: HubSession & { tokenHash: string }): void;
+  insertSession(record: HubSession, tokenHash: string): void;
+  insertSession(record: HubSession | (HubSession & { tokenHash: string }), tokenHash?: string): void {
+    const digest = tokenHash ?? (record as HubSession & { tokenHash?: string }).tokenHash;
+    if (!digest) throw new Error("session_token_hash_required");
     this.sqlite.prepare(`
-      INSERT INTO submissions(
-        submission_id, publisher_id, repository_url, requested_ref, resolved_commit,
-        mirror_urls, metadata, status, diagnostics, verification, manifest,
-        manifest_digest, source_health, revision, verified_revision, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions(
+        session_id, user_id, kind, label, token_hash, created_at,
+        last_used_at, expires_at, revoked_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      record.submissionId,
-      record.publisherId,
-      record.repositoryUrl,
-      record.requestedRef,
-      record.resolvedCommit,
-      json(record.mirrorUrls),
-      json(record.metadata),
-      record.status,
-      json(record.diagnostics),
-      record.verification ? json(record.verification) : null,
-      record.manifest ? json(record.manifest) : null,
-      record.manifestDigest,
-      json(record.sourceHealth),
-      record.revision,
-      record.verifiedRevision,
-      record.createdAt,
-      record.updatedAt,
+      record.sessionId, record.userId, record.kind, record.label, digest,
+      record.createdAt, record.lastUsedAt, record.expiresAt, record.revokedAt,
     );
+  }
+
+  getSessionByTokenHash(tokenHash: string): HubSession | null {
+    const row = this.sqlite.prepare("SELECT * FROM sessions WHERE token_hash = ?").get(tokenHash) as SessionRow | undefined;
+    return row ? this.mapSession(row) : null;
+  }
+
+  touchSession(sessionId: string, lastUsedAt: string): boolean {
+    const result = this.sqlite.prepare(`
+      UPDATE sessions SET last_used_at = ? WHERE session_id = ? AND revoked_at IS NULL
+    `).run(lastUsedAt, sessionId);
+    return Number(result.changes) === 1;
+  }
+
+  listSessions(userId: string): HubSession[] {
+    return (this.sqlite.prepare(`
+      SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC, session_id DESC
+    `).all(userId) as unknown as SessionRow[]).map((row) => this.mapSession(row));
+  }
+
+  revokeSession(sessionId: string, revokedAt: string, userId?: string): boolean {
+    const result = userId
+      ? this.sqlite.prepare(`
+          UPDATE sessions SET revoked_at = ?
+          WHERE session_id = ? AND user_id = ? AND revoked_at IS NULL
+        `).run(revokedAt, sessionId, userId)
+      : this.sqlite.prepare(`
+          UPDATE sessions SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL
+        `).run(revokedAt, sessionId);
+    return Number(result.changes) === 1;
+  }
+
+  private mapUser(row: UserRow): HubUser {
+    return {
+      userId: row.user_id,
+      githubId: row.github_id,
+      login: row.login,
+      name: row.name,
+      avatarUrl: row.avatar_url,
+      profileUrl: row.profile_url,
+      role: row.role as GlobalRole,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private mapSession(row: SessionRow): HubSession {
+    return {
+      sessionId: row.session_id,
+      userId: row.user_id,
+      kind: row.kind as HubSession["kind"],
+      label: row.label,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+    };
+  }
+
+  insertSubmission(record: SubmissionRecord): void {
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      this.sqlite.prepare(`
+        INSERT INTO submissions(
+          submission_id, publisher_id, repository_url, requested_ref, resolved_commit,
+          mirror_urls, metadata, status, diagnostics, verification, manifest,
+          manifest_digest, source_health, revision, verified_revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        record.submissionId,
+        record.publisherId,
+        record.repositoryUrl,
+        record.requestedRef,
+        record.resolvedCommit,
+        json(record.mirrorUrls),
+        json(record.metadata),
+        record.status,
+        json(record.diagnostics),
+        record.verification ? json(record.verification) : null,
+        record.manifest ? json(record.manifest) : null,
+        record.manifestDigest,
+        json(record.sourceHealth),
+        record.revision,
+        record.verifiedRevision,
+        record.createdAt,
+        record.updatedAt,
+      );
+      this.insertSubmissionRevision(record);
+      this.sqlite.exec("COMMIT");
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   updateSubmission(id: string, changes: SubmissionChanges): void {
@@ -316,12 +634,48 @@ export class HubDatabase {
   updateSubmissionIf(id: string, revision: number, status: SubmissionStatus, changes: SubmissionChanges): boolean {
     const { assignments, values } = this.serializeSubmissionChanges(changes);
     if (assignments.length === 0) return false;
-    values.push(id, revision, status);
-    const result = this.sqlite.prepare(`
-      UPDATE submissions SET ${assignments.join(", ")}
-      WHERE submission_id = ? AND revision = ? AND status = ?
-    `).run(...values);
-    return Number(result.changes) === 1;
+    const revisionChanged = changes.revision !== undefined && changes.revision !== revision;
+    if (!revisionChanged) {
+      values.push(id, revision, status);
+      const result = this.sqlite.prepare(`
+        UPDATE submissions SET ${assignments.join(", ")}
+        WHERE submission_id = ? AND revision = ? AND status = ?
+      `).run(...values);
+      return Number(result.changes) === 1;
+    }
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      values.push(id, revision, status);
+      const result = this.sqlite.prepare(`
+        UPDATE submissions SET ${assignments.join(", ")}
+        WHERE submission_id = ? AND revision = ? AND status = ?
+      `).run(...values);
+      if (Number(result.changes) !== 1) {
+        this.sqlite.exec("ROLLBACK");
+        return false;
+      }
+      const updated = this.getSubmission(id);
+      if (!updated) throw new Error("submission_missing_after_update");
+      this.insertSubmissionRevision(updated);
+      const proposal = this.sqlite.prepare(`
+        SELECT status FROM contribution_proposals WHERE submission_id = ?
+      `).get(id) as { status: ProposalStatus } | undefined;
+      if (proposal && !["released", "withdrawn", "rejected"].includes(proposal.status)) {
+        const reset = this.sqlite.prepare(`
+          UPDATE contribution_proposals SET
+            status = 'queued', accepted_by = NULL, accepted_at = NULL,
+            accepted_revision = NULL, accepted_commit = NULL,
+            rejection_reason = NULL, updated_at = ?
+          WHERE submission_id = ? AND status = ?
+        `).run(updated.updatedAt, id, proposal.status);
+        if (Number(reset.changes) !== 1) throw new Error("proposal_acceptance_reset_failed");
+      }
+      this.sqlite.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private serializeSubmissionChanges(changes: SubmissionChanges): { assignments: string[]; values: SqlValue[] } {
@@ -357,6 +711,35 @@ export class HubDatabase {
     return row ? this.mapSubmission(row) : null;
   }
 
+  listSubmissionRevisions(submissionId: string): SubmissionRecord[] {
+    return (this.sqlite.prepare(`
+      SELECT snapshot FROM submission_revisions
+      WHERE submission_id = ? ORDER BY revision DESC
+    `).all(submissionId) as unknown as Array<{ snapshot: string }>).map((row) => parse<SubmissionRecord>(row.snapshot));
+  }
+
+  listSubmissionsByPublisher(publisherId: string): SubmissionRecord[] {
+    return (this.sqlite.prepare(`
+      SELECT * FROM submissions WHERE publisher_id = ?
+      ORDER BY updated_at DESC, submission_id DESC
+    `).all(publisherId) as unknown as SubmissionRow[]).map((row) => this.mapSubmission(row));
+  }
+
+  listSubmissionsForReview(statuses: SubmissionStatus[] = ["awaiting_review"]): SubmissionRecord[] {
+    if (statuses.length === 0) return [];
+    return (this.sqlite.prepare(`
+      SELECT * FROM submissions WHERE status IN (${statuses.map(() => "?").join(", ")})
+      ORDER BY updated_at ASC, submission_id ASC
+    `).all(...statuses) as unknown as SubmissionRow[]).map((row) => this.mapSubmission(row));
+  }
+
+  private insertSubmissionRevision(record: SubmissionRecord): void {
+    this.sqlite.prepare(`
+      INSERT INTO submission_revisions(submission_id, revision, snapshot, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(record.submissionId, record.revision, json(record), record.updatedAt);
+  }
+
   listPendingSubmissionIds(): string[] {
     return (this.sqlite.prepare(`
       SELECT submission_id FROM submissions
@@ -387,7 +770,274 @@ export class HubDatabase {
     };
   }
 
-  approveSubmission(release: ReleaseRecord, expected: { revision: number; manifestDigest: string; metadata: PackagePresentationMetadata }): boolean {
+  insertSubmissionReview(review: SubmissionReview): void {
+    this.sqlite.prepare(`
+      INSERT INTO submission_reviews(
+        review_id, submission_id, revision, reviewer_id, reviewer_name,
+        decision, reason_codes, message, proposed_patch, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      review.reviewId, review.submissionId, review.revision, review.reviewerId,
+      review.reviewerName, review.decision, json(review.reasonCodes), review.message,
+      review.proposedPatch ? json(review.proposedPatch) : null, review.createdAt,
+    );
+  }
+
+  recordSubmissionReview(
+    review: SubmissionReview,
+    expectedStatus: SubmissionStatus,
+    nextStatus: SubmissionStatus,
+    diagnostics: string[],
+    updatedAt: string,
+  ): boolean {
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      const updated = this.sqlite.prepare(`
+        UPDATE submissions SET status = ?, diagnostics = ?, updated_at = ?
+        WHERE submission_id = ? AND revision = ? AND status = ?
+      `).run(nextStatus, json(diagnostics), updatedAt, review.submissionId, review.revision, expectedStatus);
+      if (Number(updated.changes) !== 1) {
+        this.sqlite.exec("ROLLBACK");
+        return false;
+      }
+      this.insertSubmissionReview(review);
+      if (nextStatus === "changes_requested") {
+        this.sqlite.prepare(`
+          UPDATE contribution_proposals SET
+            status = 'changes_requested', accepted_by = NULL, accepted_at = NULL,
+            accepted_revision = NULL, accepted_commit = NULL,
+            rejection_reason = NULL, updated_at = ?
+          WHERE submission_id = ? AND status IN ('accepted', 'awaiting_owner')
+        `).run(updatedAt, review.submissionId);
+      } else if (nextStatus === "rejected") {
+        this.sqlite.prepare(`
+          UPDATE contribution_proposals SET
+            status = 'rejected', accepted_by = NULL, accepted_at = NULL,
+            accepted_revision = NULL, accepted_commit = NULL,
+            rejection_reason = ?, updated_at = ?
+          WHERE submission_id = ? AND status <> 'released'
+        `).run(review.message, updatedAt, review.submissionId);
+      }
+      this.sqlite.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listSubmissionReviews(submissionId: string): SubmissionReview[] {
+    return (this.sqlite.prepare(`
+      SELECT * FROM submission_reviews WHERE submission_id = ?
+      ORDER BY revision DESC, created_at DESC, review_id DESC
+    `).all(submissionId) as unknown as SubmissionReviewRow[]).map((row) => ({
+      reviewId: row.review_id,
+      submissionId: row.submission_id,
+      revision: row.revision,
+      reviewerId: row.reviewer_id,
+      reviewerName: row.reviewer_name,
+      decision: row.decision as SubmissionReview["decision"],
+      reasonCodes: parse<string[]>(row.reason_codes),
+      message: row.message,
+      proposedPatch: row.proposed_patch ? parse<Record<string, unknown>>(row.proposed_patch) : null,
+      createdAt: row.created_at,
+    }));
+  }
+
+  insertContributionProposal(proposal: ContributionProposal): void {
+    this.sqlite.prepare(`
+      INSERT INTO contribution_proposals(
+        proposal_id, package_id, submission_id, contributor_id, contributor_name,
+        status, title, summary, accepted_by, accepted_at, accepted_revision,
+        accepted_commit, rejection_reason, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      proposal.proposalId, proposal.packageId, proposal.submissionId, proposal.contributorId,
+      proposal.contributorName, proposal.status, proposal.title, proposal.summary,
+      proposal.acceptedBy, proposal.acceptedAt, null, null, proposal.rejectionReason,
+      proposal.createdAt, proposal.updatedAt,
+    );
+  }
+
+  getContributionProposal(proposalId: string): ContributionProposal | null {
+    const row = this.sqlite.prepare("SELECT * FROM contribution_proposals WHERE proposal_id = ?")
+      .get(proposalId) as ContributionProposalRow | undefined;
+    return row ? this.mapContributionProposal(row) : null;
+  }
+
+  getContributionProposalBySubmission(submissionId: string): ContributionProposal | null {
+    const row = this.sqlite.prepare("SELECT * FROM contribution_proposals WHERE submission_id = ?")
+      .get(submissionId) as ContributionProposalRow | undefined;
+    return row ? this.mapContributionProposal(row) : null;
+  }
+
+  listContributionProposals(packageId: string): ContributionProposal[] {
+    return (this.sqlite.prepare(`
+      SELECT * FROM contribution_proposals WHERE package_id = ?
+      ORDER BY updated_at DESC, proposal_id DESC
+    `).all(packageId) as unknown as ContributionProposalRow[]).map((row) => this.mapContributionProposal(row));
+  }
+
+  listContributionProposalsByContributor(contributorId: string): ContributionProposal[] {
+    return (this.sqlite.prepare(`
+      SELECT * FROM contribution_proposals WHERE contributor_id = ?
+      ORDER BY updated_at DESC, proposal_id DESC
+    `).all(contributorId) as unknown as ContributionProposalRow[]).map((row) => this.mapContributionProposal(row));
+  }
+
+  acceptContributionProposal(
+    proposalId: string,
+    expectedStatus: ProposalStatus,
+    acceptedBy: string,
+    acceptedAt: string,
+    acceptedRevision: number,
+    acceptedCommit: string,
+  ): boolean {
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.sqlite.prepare(`
+        SELECT cp.submission_id, cp.status, s.revision, s.resolved_commit,
+          s.status AS submission_status, s.verified_revision
+        FROM contribution_proposals cp
+        JOIN submissions s ON s.submission_id = cp.submission_id
+        WHERE cp.proposal_id = ?
+      `).get(proposalId) as {
+        submission_id: string;
+        status: ProposalStatus;
+        revision: number;
+        resolved_commit: string | null;
+        submission_status: SubmissionStatus;
+        verified_revision: number | null;
+      } | undefined;
+      if (
+        !current || current.status !== expectedStatus || current.revision !== acceptedRevision ||
+        current.resolved_commit !== acceptedCommit || current.submission_status !== "awaiting_review" ||
+        current.verified_revision !== acceptedRevision
+      ) {
+        this.sqlite.exec("ROLLBACK");
+        return false;
+      }
+      const result = this.sqlite.prepare(`
+        UPDATE contribution_proposals SET
+          status = 'accepted', accepted_by = ?, accepted_at = ?,
+          accepted_revision = ?, accepted_commit = ?, rejection_reason = NULL,
+          updated_at = ?
+        WHERE proposal_id = ? AND status = ? AND submission_id = ?
+      `).run(
+        acceptedBy, acceptedAt, acceptedRevision, acceptedCommit, acceptedAt,
+        proposalId, expectedStatus, current.submission_id,
+      );
+      if (Number(result.changes) !== 1) {
+        this.sqlite.exec("ROLLBACK");
+        return false;
+      }
+      this.sqlite.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getContributionProposalAcceptance(proposalId: string): { revision: number; commit: string } | null {
+    const row = this.sqlite.prepare(`
+      SELECT accepted_revision, accepted_commit
+      FROM contribution_proposals WHERE proposal_id = ?
+    `).get(proposalId) as { accepted_revision: number | null; accepted_commit: string | null } | undefined;
+    if (!row || row.accepted_revision === null || row.accepted_commit === null) return null;
+    return { revision: row.accepted_revision, commit: row.accepted_commit };
+  }
+
+  updateContributionProposal(proposalId: string, expectedStatus: ProposalStatus, changes: ProposalChanges): boolean {
+    const mapping: Record<keyof ProposalChanges, string> = {
+      status: "status",
+      title: "title",
+      summary: "summary",
+      acceptedBy: "accepted_by",
+      acceptedAt: "accepted_at",
+      rejectionReason: "rejection_reason",
+      updatedAt: "updated_at",
+    };
+    const values: SqlValue[] = [];
+    const assignments = (Object.entries(changes) as Array<[keyof ProposalChanges, ProposalChanges[keyof ProposalChanges]]>)
+      .map(([key, value]) => {
+        values.push(value as SqlValue);
+        return `${mapping[key]} = ?`;
+      });
+    if (assignments.length === 0) return false;
+    if (
+      changes.acceptedBy === null || changes.acceptedAt === null ||
+      (changes.status !== undefined && changes.status !== "accepted" && changes.status !== "released")
+    ) {
+      assignments.push("accepted_revision = NULL", "accepted_commit = NULL");
+    }
+    values.push(proposalId, expectedStatus);
+    const result = this.sqlite.prepare(`
+      UPDATE contribution_proposals SET ${assignments.join(", ")}
+      WHERE proposal_id = ? AND status = ?
+    `).run(...values);
+    return Number(result.changes) === 1;
+  }
+
+  updateContributionProposalBySubmission(
+    submissionId: string,
+    expectedStatuses: ProposalStatus[],
+    changes: ProposalChanges,
+  ): boolean {
+    if (expectedStatuses.length === 0) return false;
+    const mapping: Record<keyof ProposalChanges, string> = {
+      status: "status",
+      title: "title",
+      summary: "summary",
+      acceptedBy: "accepted_by",
+      acceptedAt: "accepted_at",
+      rejectionReason: "rejection_reason",
+      updatedAt: "updated_at",
+    };
+    const values: SqlValue[] = [];
+    const assignments = (Object.entries(changes) as Array<[keyof ProposalChanges, ProposalChanges[keyof ProposalChanges]]>)
+      .map(([key, value]) => {
+        values.push(value as SqlValue);
+        return `${mapping[key]} = ?`;
+      });
+    if (assignments.length === 0) return false;
+    if (
+      changes.acceptedBy === null || changes.acceptedAt === null ||
+      (changes.status !== undefined && changes.status !== "accepted" && changes.status !== "released")
+    ) {
+      assignments.push("accepted_revision = NULL", "accepted_commit = NULL");
+    }
+    values.push(submissionId, ...expectedStatuses);
+    const result = this.sqlite.prepare(`
+      UPDATE contribution_proposals SET ${assignments.join(", ")}
+      WHERE submission_id = ? AND status IN (${expectedStatuses.map(() => "?").join(", ")})
+    `).run(...values);
+    return Number(result.changes) === 1;
+  }
+
+  private mapContributionProposal(row: ContributionProposalRow): ContributionProposal {
+    return {
+      proposalId: row.proposal_id,
+      packageId: row.package_id,
+      submissionId: row.submission_id,
+      contributorId: row.contributor_id,
+      contributorName: row.contributor_name,
+      status: row.status as ProposalStatus,
+      title: row.title,
+      summary: row.summary,
+      acceptedBy: row.accepted_by,
+      acceptedAt: row.accepted_at,
+      rejectionReason: row.rejection_reason,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  approveSubmission(
+    release: ReleaseRecord,
+    expected: { revision: number; manifestDigest: string; metadata: PackagePresentationMetadata },
+    review?: SubmissionReview,
+  ): boolean {
     const now = release.publishedAt;
     const manifest = release.manifest;
     const contributionTypes = [...new Set(manifest.contributions.map((item) => item.type))];
@@ -412,6 +1062,26 @@ export class HubDatabase {
         this.sqlite.exec("ROLLBACK");
         return false;
       }
+      const proposal = this.sqlite.prepare(`
+        SELECT status, accepted_revision, accepted_commit
+        FROM contribution_proposals WHERE submission_id = ?
+      `).get(release.submissionId) as {
+        status: string;
+        accepted_revision: number | null;
+        accepted_commit: string | null;
+      } | undefined;
+      if (
+        proposal && (
+          proposal.status !== "accepted" ||
+          proposal.accepted_revision !== expected.revision ||
+          proposal.accepted_commit !== release.approvedCommit
+        )
+      ) {
+        this.sqlite.exec("ROLLBACK");
+        return false;
+      }
+      const packageExisted = Boolean(this.sqlite.prepare("SELECT 1 FROM packages WHERE package_id = ?")
+        .get(manifest.id));
       this.sqlite.prepare(`
         INSERT INTO packages(
           package_id, publisher_id, name, summary, description, license, categories,
@@ -445,8 +1115,8 @@ export class HubDatabase {
           release_id, package_id, submission_id, publisher_id, version,
           approved_commit, submitted_ref, repository_url, mirror_urls,
           manifest_path, manifest_digest, manifest, metadata, verification,
-          status, published_at, revocation
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status, published_at, revocation, attribution
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         release.releaseId,
         release.packageId,
@@ -465,12 +1135,32 @@ export class HubDatabase {
         release.status,
         release.publishedAt,
         null,
+        release.attribution ? json(release.attribution) : null,
       );
       const updated = this.sqlite.prepare(`
         UPDATE submissions SET status = 'approved', updated_at = ?
         WHERE submission_id = ? AND revision = ? AND verified_revision = ? AND status = 'awaiting_review'
       `).run(now, release.submissionId, expected.revision, expected.revision);
       if (Number(updated.changes) !== 1) throw new Error("submission_revision_changed");
+      if (!packageExisted) {
+        const publisherUser = this.sqlite.prepare("SELECT 1 FROM users WHERE user_id = ?")
+          .get(release.publisherId);
+        if (publisherUser) {
+          this.sqlite.prepare(`
+            INSERT INTO package_members(package_id, user_id, role, created_at, updated_at)
+            VALUES (?, ?, 'owner', ?, ?)
+            ON CONFLICT(package_id, user_id) DO UPDATE SET role = 'owner', updated_at = excluded.updated_at
+          `).run(release.packageId, release.publisherId, now, now);
+        }
+      }
+      if (proposal) {
+        const released = this.sqlite.prepare(`
+          UPDATE contribution_proposals SET status = 'released', updated_at = ?
+          WHERE submission_id = ? AND status = 'accepted'
+        `).run(now, release.submissionId);
+        if (Number(released.changes) !== 1) throw new Error("proposal_acceptance_changed");
+      }
+      if (review) this.insertSubmissionReview(review);
       this.sqlite.exec("COMMIT");
       return true;
     } catch (error) {
@@ -542,6 +1232,7 @@ export class HubDatabase {
       status: row.status as ReleaseRecord["status"],
       publishedAt: row.published_at,
       revocation: row.revocation ? parse<ReleaseRecord["revocation"]>(row.revocation) : null,
+      attribution: row.attribution ? parse<ReleaseRecord["attribution"]>(row.attribution) : null,
     };
   }
 
@@ -633,6 +1324,95 @@ export class HubDatabase {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     } : null;
+  }
+
+  getPackageMember(packageId: string, userId: string): PackageMember | null {
+    const row = this.sqlite.prepare(`
+      SELECT
+        pm.package_id,
+        pm.user_id AS member_user_id,
+        pm.role AS package_role,
+        pm.created_at AS member_created_at,
+        pm.updated_at AS member_updated_at,
+        u.*
+      FROM package_members pm
+      JOIN users u ON u.user_id = pm.user_id
+      WHERE pm.package_id = ? AND pm.user_id = ?
+    `).get(packageId, userId) as PackageMemberRow | undefined;
+    return row ? this.mapPackageMember(row) : null;
+  }
+
+  listPackageMembers(packageId: string): PackageMember[] {
+    return (this.sqlite.prepare(`
+      SELECT
+        pm.package_id,
+        pm.user_id AS member_user_id,
+        pm.role AS package_role,
+        pm.created_at AS member_created_at,
+        pm.updated_at AS member_updated_at,
+        u.*
+      FROM package_members pm
+      JOIN users u ON u.user_id = pm.user_id
+      WHERE pm.package_id = ?
+      ORDER BY CASE pm.role WHEN 'owner' THEN 0 WHEN 'maintainer' THEN 1 ELSE 2 END,
+        lower(u.login), u.user_id
+    `).all(packageId) as unknown as PackageMemberRow[]).map((row) => this.mapPackageMember(row));
+  }
+
+  upsertPackageMember(packageId: string, userId: string, role: PackageRole, timestamp: string): PackageMember {
+    this.sqlite.prepare(`
+      INSERT INTO package_members(package_id, user_id, role, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(package_id, user_id) DO UPDATE SET
+        role = excluded.role,
+        updated_at = excluded.updated_at
+    `).run(packageId, userId, role, timestamp, timestamp);
+    return this.getPackageMember(packageId, userId)!;
+  }
+
+  removePackageMember(packageId: string, userId: string): boolean {
+    const result = this.sqlite.prepare("DELETE FROM package_members WHERE package_id = ? AND user_id = ?")
+      .run(packageId, userId);
+    return Number(result.changes) === 1;
+  }
+
+  getPackageRole(packageId: string, userId: string): PackageRole | null {
+    const member = this.sqlite.prepare(`
+      SELECT role FROM package_members WHERE package_id = ? AND user_id = ?
+    `).get(packageId, userId) as { role: string } | undefined;
+    if (member) return member.role as PackageRole;
+    const legacyOwner = this.sqlite.prepare(`
+      SELECT 1 FROM packages WHERE package_id = ? AND publisher_id = ?
+    `).get(packageId, userId);
+    return legacyOwner ? "owner" : null;
+  }
+
+  listPackageIdsByMember(userId: string, roles: PackageRole[] = ["owner", "maintainer", "contributor"]): string[] {
+    if (roles.length === 0) return [];
+    return (this.sqlite.prepare(`
+      SELECT package_id FROM package_members
+      WHERE user_id = ? AND role IN (${roles.map(() => "?").join(", ")})
+      UNION
+      SELECT package_id FROM packages WHERE publisher_id = ?
+      ORDER BY package_id
+    `).all(userId, ...roles, userId) as unknown as Array<{ package_id: string }>).map((row) => row.package_id);
+  }
+
+  private mapPackageMember(row: PackageMemberRow): PackageMember {
+    return {
+      packageId: row.package_id,
+      userId: row.member_user_id,
+      role: row.package_role as PackageRole,
+      user: {
+        githubId: row.github_id,
+        login: row.login,
+        name: row.name,
+        avatarUrl: row.avatar_url,
+        profileUrl: row.profile_url,
+      },
+      createdAt: row.member_created_at,
+      updatedAt: row.member_updated_at,
+    };
   }
 
   listPackageIdsByPublisher(publisherId: string): string[] {

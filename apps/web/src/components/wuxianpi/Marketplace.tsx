@@ -10,9 +10,12 @@ import {
   ExternalLink,
   FileText,
   GitCommitHorizontal,
+  Github,
   GitMerge,
   Image,
   Link2,
+  LogIn,
+  LogOut,
   LoaderCircle,
   PackageCheck,
   Plus,
@@ -48,7 +51,7 @@ import {
   type PublisherSubmissionDraft,
   type PublisherSubmissionInput,
 } from "@/lib/package-market";
-import { webApi, WebApiError } from "@/lib/web-api-client";
+import { webApi, WebApiError, type MarketAuthState } from "@/lib/web-api-client";
 
 type MarketTab = "discover" | "installed" | "updates" | "logs";
 type BusyAction = { key: string; label: string } | null;
@@ -136,8 +139,25 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [publisherOpen, setPublisherOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [marketAuth, setMarketAuth] = useState<MarketAuthState>({ authenticated: false, user: null });
   const [bindingPackage, setBindingPackage] = useState<LocalPackage | null>(null);
   const detailRequestRef = useRef(0);
+
+  const loadMarketAuth = useCallback(async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      setMarketAuth(await webApi.marketAuthStatus());
+    } catch (reason) {
+      setMarketAuth({ authenticated: false, user: null });
+      setAuthError(reason instanceof WebApiError && reason.status === 404 ? "当前 Runtime 版本尚未启用市场账户，请更新 WuxianPi Runtime。" : errorText(reason));
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
 
   const installedById = useMemo(() => new Map(installed.map((item) => [item.packageId, item])), [installed]);
   const selectedSummary = selectedPackageId ? updates.find((item) => item.packageId === selectedPackageId) ?? installedById.get(selectedPackageId) ?? null : null;
@@ -181,6 +201,7 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
   }, [loadDiscover, loadLocal]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { void loadMarketAuth(); }, [loadMarketAuth]);
 
   useEffect(() => {
     if (!notice) return;
@@ -244,9 +265,44 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
       setPublisherOpen(false);
       setNotice(`提交 ${result.submission.submissionId} 已进入 ${result.submission.status}`);
     } catch (reason) {
+      if (reason instanceof WebApiError && reason.status === 401) {
+        setMarketAuth({ authenticated: false, user: null });
+        setAuthOpen(true);
+      }
       throw reason;
     } finally {
       setBusy(null);
+    }
+  }, []);
+
+  const loginWithGh = useCallback(async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const next = await webApi.marketAuthWithGh();
+      setMarketAuth(next);
+      if (next.authenticated) {
+        setNotice(`已使用 GitHub 账户 ${next.user?.login ?? ""} 登录`);
+        setAuthOpen(false);
+      }
+    } catch (reason) {
+      setAuthError(reason instanceof WebApiError && reason.status === 404 ? "当前 Runtime 版本尚未启用市场账户，请更新 WuxianPi Runtime。" : errorText(reason));
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const logoutMarket = useCallback(async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      setMarketAuth(await webApi.marketAuthLogout());
+      setNotice("已退出 WuxianPi Hub");
+      setAuthOpen(false);
+    } catch (reason) {
+      setAuthError(errorText(reason));
+    } finally {
+      setAuthLoading(false);
     }
   }, []);
 
@@ -272,7 +328,11 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
           <button type="button" className="icon-button" onClick={() => void refresh()} aria-label="刷新市场" title="刷新">
             <RefreshCw size={17} className={loading ? "spin" : ""} />
           </button>
-          <button type="button" className="secondary-button market-publish-button" onClick={() => setPublisherOpen(true)}>
+          <button type="button" className={`secondary-button market-account-button ${marketAuth.authenticated ? "signed-in" : ""}`} onClick={() => setAuthOpen(true)} title={marketAuth.authenticated ? marketAuth.user?.login ? `已登录 @${marketAuth.user.login}` : "Runtime 已具备发布凭据" : "登录 WuxianPi Hub"}>
+            <Github size={16} />
+            <span>{marketAuth.authenticated ? marketAuth.user?.login ?? "已认证" : "登录"}</span>
+          </button>
+          <button type="button" className="secondary-button market-publish-button" onClick={() => marketAuth.authenticated ? setPublisherOpen(true) : setAuthOpen(true)}>
             <Upload size={16} />
             发布
           </button>
@@ -368,6 +428,17 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
       )}
 
       {publisherOpen && <PublisherSubmissionDialog busy={busy?.key === "publisher"} onClose={() => setPublisherOpen(false)} onSubmit={submitPublisher} />}
+      {authOpen && (
+        <MarketAuthDialog
+          auth={marketAuth}
+          loading={authLoading}
+          error={authError}
+          onClose={() => setAuthOpen(false)}
+          onLogin={() => void loginWithGh()}
+          onLogout={() => void logoutMarket()}
+          onRefresh={() => void loadMarketAuth()}
+        />
+      )}
       {bindingPackage && (
         <AssistantBindingDialog
           pkg={bindingPackage}
@@ -761,6 +832,61 @@ function AssistantBindingDialog({
           )}
         </div>
         <footer><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={!selectedAssistant || isBusy || bindingLoading || Boolean(bindingError)} onClick={() => onSave(assistantId, enabledIds, pruneExperienceSpaces(enabledIds, experienceSpaces))}>{isBusy ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}保存绑定</button></footer>
+      </section>
+    </div>
+  );
+}
+
+function MarketAuthDialog({
+  auth,
+  loading,
+  error,
+  onClose,
+  onLogin,
+  onLogout,
+  onRefresh,
+}: {
+  auth: MarketAuthState;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+  onLogin: () => void;
+  onLogout: () => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="wuxianpi-modal-backdrop">
+      <section className="market-dialog market-auth-dialog" role="dialog" aria-modal="true" aria-label="WuxianPi Hub 账户">
+        <header><div><span className="eyebrow">WUXIANPI HUB</span><h2>市场账户</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
+        <div className="market-dialog-body">
+          {error && <div className="market-banner error"><CircleX size={17} /><span>{error}</span><button type="button" onClick={onRefresh}>重试</button></div>}
+          {auth.authenticated && auth.user ? (
+            <div className="market-auth-identity">
+              {auth.user.avatarUrl ? <img src={auth.user.avatarUrl} alt="" width={48} height={48} /> : <span><Github size={23} /></span>}
+              <div><strong>{auth.user.name}</strong><small>@{auth.user.login} · {auth.user.role === "admin" ? "管理员" : auth.user.role === "reviewer" ? "审核员" : "用户"}</small></div>
+              {auth.user.profileUrl && <a href={auth.user.profileUrl} target="_blank" rel="noreferrer" aria-label="打开 GitHub 主页"><ExternalLink size={16} /></a>}
+            </div>
+          ) : auth.authenticated ? (
+            <div className="market-auth-login">
+              <ShieldCheck size={32} />
+              <div><strong>Runtime 已具备发布凭据</strong><p>当前凭据没有关联可展示的 Hub 账户身份。可以继续发布；重新使用 <code>gh</code> 登录后将切换为可撤销的设备会话。</p></div>
+            </div>
+          ) : (
+            <div className="market-auth-login">
+              <Github size={32} />
+              <div><strong>使用本机 GitHub CLI 登录</strong><p>Runtime 将读取当前 Termux 中的 <code>gh auth token</code>，向 GitHub 验证身份后只保存 Hub 设备 Token。GitHub Token 不会写入 WuxianPi 配置。</p></div>
+              {auth.ghAvailable === false && <div className="market-banner warning"><AlertTriangle size={17} /><span>当前环境没有可用的 <code>gh</code> 登录。请先在 Termux 执行 <code>gh auth login</code>。</span></div>}
+            </div>
+          )}
+        </div>
+        <footer>
+          <button type="button" className="secondary-button" onClick={onClose}>关闭</button>
+          {auth.authenticated ? (
+            <button type="button" className="secondary-button danger-text" disabled={loading} onClick={onLogout}>{loading ? <LoaderCircle size={16} className="spin" /> : <LogOut size={16} />}退出登录</button>
+          ) : (
+            <button type="button" className="primary-button" disabled={loading || auth.ghAvailable === false} onClick={onLogin}>{loading ? <LoaderCircle size={16} className="spin" /> : <LogIn size={16} />}使用 gh 登录</button>
+          )}
+        </footer>
       </section>
     </div>
   );

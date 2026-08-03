@@ -944,6 +944,9 @@ button:disabled { cursor: not-allowed !important; opacity: .48; transform: none 
 .marketplace-tabs em { display: grid; min-width: 18px; height: 18px; padding: 0 5px; place-items: center; border-radius: 9px; background: var(--bg); color: var(--text-muted); font-size: 9px; font-style: normal; }
 .marketplace-toolbar-actions, .market-detail-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
 .marketplace-toolbar-actions button, .market-detail-actions button, .market-detail-section > button, .market-dialog footer button, .publisher-metadata-section header button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+.market-account-button { max-width: 160px; }
+.market-account-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.market-account-button.signed-in { border-color: color-mix(in srgb, #16a34a 38%, var(--border)); color: #15803d; }
 .marketplace-filters { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-panel); }
 .market-search { display: grid; grid-template-columns: 18px minmax(120px, 260px) 22px; align-items: center; gap: 6px; min-height: 38px; padding: 0 8px 0 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text-muted); }
 .market-search input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); }
@@ -1052,6 +1055,7 @@ button:disabled { cursor: not-allowed !important; opacity: .48; transform: none 
 
 .market-dialog { display: flex; width: min(720px, 100%); max-height: min(820px, calc(100dvh - 36px)); flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: 0 30px 100px -35px rgba(0,0,0,.65); }
 .market-dialog.publisher-dialog { width: min(860px, 100%); }
+.market-dialog.market-auth-dialog { width: min(560px, 100%); }
 .market-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .market-dialog > header h2 { margin: 3px 0 0; font-size: 18px; }
 .market-dialog-body { flex: 1; min-height: 0; padding: 14px 16px 20px; overflow-y: auto; }
@@ -1084,6 +1088,17 @@ button:disabled { cursor: not-allowed !important; opacity: .48; transform: none 
 .publisher-source-list { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--border); }
 .publisher-source-row { display: grid; grid-template-columns: 100px minmax(0, 1fr) 90px 38px; gap: 6px; margin-top: 6px; }
 .market-inline-empty { margin: 8px 0; color: var(--text-dim); font-size: 10px; }
+.market-auth-identity { display: grid; grid-template-columns: 48px minmax(0, 1fr) 34px; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); }
+.market-auth-identity > img, .market-auth-identity > span { display: grid; width: 48px; height: 48px; place-items: center; border-radius: 50%; background: var(--bg-selected); object-fit: cover; color: var(--accent); }
+.market-auth-identity > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.market-auth-identity small { color: var(--text-muted); font-size: 10px; }
+.market-auth-identity a { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 7px; color: var(--text-muted); }
+.market-auth-identity a:hover { background: var(--bg-hover); color: var(--text); }
+.market-auth-login { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 12px; align-items: start; }
+.market-auth-login > svg { margin-top: 2px; color: var(--text-muted); }
+.market-auth-login p { margin: 6px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+.market-auth-login code { font-size: 10px; }
+.market-auth-login > .market-banner { grid-column: 1 / -1; margin: 8px 0 0; }
 
 @media (max-width: 640px) {
   .marketplace-toolbar { align-items: flex-start; padding: 7px 9px; }
@@ -1091,6 +1106,8 @@ button:disabled { cursor: not-allowed !important; opacity: .48; transform: none 
   .marketplace-tabs button span { display: none; }
   .marketplace-tabs button.active span { display: inline; }
   .market-publish-button { width: 38px; padding: 0 !important; font-size: 0; }
+  .market-account-button { width: 38px; padding: 0 !important; }
+  .market-account-button span { display: none; }
   .marketplace-filters { align-items: stretch; flex-direction: column; padding: 8px 9px; }
   .market-search { grid-template-columns: 18px minmax(0, 1fr) 22px; }
   .marketplace-workspace { grid-template-columns: 1fr; grid-template-rows: minmax(148px, 36dvh) minmax(0, 1fr); }

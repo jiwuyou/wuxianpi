@@ -18,6 +18,8 @@ HUB_ASSET_DIR            Verified screenshot cache, default ./data/assets
 HUB_PUBLIC_URL           Public origin used in publisher links
 HUB_ADMIN_TOKEN          Bearer token for administrative routes
 HUB_PUBLISHER_TOKENS     JSON object keyed by publisher ID
+HUB_GITHUB_CLIENT_ID     GitHub OAuth App client ID for Device Flow (optional)
+HUB_SESSION_DAYS         Hub session lifetime, default 30 days
 HUB_PACKAGE_SCHEMA       Path to wuxianpi-package.schema.json
 HUB_PUBLIC_DIR           Static marketplace assets
 HUB_VERIFY_MAX_BYTES     Maximum downloaded verification object size

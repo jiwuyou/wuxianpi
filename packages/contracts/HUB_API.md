@@ -373,10 +373,101 @@ manually created GitHub Issue and changes the Hub Issue to `migrated`:
 { "url": "https://github.com/owner/repository/issues/123" }
 ```
 
-## Publisher API
+## Account and session API
 
-Publisher routes require a publisher access token. A publisher can only mutate
-submissions owned by that publisher. Published Releases are immutable.
+Public catalog, Release, install-plan, and Issue listing routes remain usable
+without a Hub account. Publishing, review, Package membership, and contribution
+proposal routes require either a Hub session or the existing static publisher or
+administrator token where noted below. Hub sessions are issued by the Hub; a
+GitHub access token is used only for the initial identity exchange and is never
+stored by the Hub.
+
+### `POST /auth/github/token-exchange`
+
+Request:
+
+```json
+{
+  "githubToken": "gho_...",
+  "kind": "browser",
+  "label": "Chrome"
+}
+```
+
+The Hub calls GitHub `/user`, binds the account by GitHub's numeric user ID, and
+returns the only response containing the supplied GitHub credential:
+
+```json
+{
+  "token": "wph_...",
+  "user": {
+    "userId": "usr_...",
+    "githubId": "12345",
+    "login": "octocat",
+    "name": "The Octocat",
+    "avatarUrl": null,
+    "profileUrl": "https://github.com/octocat",
+    "role": "user",
+    "createdAt": "2026-08-03T00:00:00.000Z",
+    "updatedAt": "2026-08-03T00:00:00.000Z"
+  },
+  "session": {
+    "sessionId": "ses_...",
+    "userId": "usr_...",
+    "kind": "browser",
+    "label": "Chrome",
+    "createdAt": "2026-08-03T00:00:00.000Z",
+    "lastUsedAt": "2026-08-03T00:00:00.000Z",
+    "expiresAt": "2026-09-02T00:00:00.000Z",
+    "revokedAt": null
+  }
+}
+```
+
+The client sends `Authorization: Bearer wph_...` on subsequent protected
+requests. SQLite stores only a SHA-256 digest of this Hub token.
+
+### `POST /auth/github/device/start`
+
+Starts GitHub Device Authorization and returns `{ "authorization": {
+"deviceCode", "userCode", "verificationUri", "expiresIn", "interval" } }`.
+The device code is submitted to the complete route after the user authorizes
+the application.
+
+### `POST /auth/github/device/complete`
+
+Request: `{ "deviceCode": "...", "kind": "device", "label": "Phone" }`.
+Returns the same Hub session credential as token exchange. A still-pending
+GitHub authorization returns `409` and must be retried using the same device
+code.
+
+### `GET /me`
+
+Requires a Hub session and returns `{ "user", "session" }`.
+
+### `GET /me/sessions`, `DELETE /me/sessions/{sessionId}`, `POST /auth/logout`
+
+These routes list the current user's sessions, revoke one of the user's other
+sessions, or revoke the current session. They return `{ "sessions": [...] }`,
+`{ "sessionId", "status": "revoked" }`, and
+`{ "status": "logged_out" }` respectively. All responses are `no-store`.
+
+### `PATCH /admin/users/{userId}/role`
+
+Requires a static administrator token or an authenticated `admin` user.
+Request: `{ "role": "user" | "reviewer" | "admin" }`.
+
+## Publisher and governance API
+
+Publisher routes accept a Hub session, or the existing static publisher access
+token. A Hub user is represented as a publisher using `userId`, and can only
+mutate submissions owned by that identity. Published Releases are immutable.
+
+### `GET /publisher/submissions`
+
+Returns `{ "submissions": [...] }` for the authenticated publisher. Each item
+contains the current submission revision, verification state, diagnostics,
+immutable revision snapshots, and review history.
 
 ### `POST /publisher/submissions`
 
@@ -507,8 +598,10 @@ States are:
 
 ```text
 queued -> verifying -> awaiting_review -> approved
+                     -> changes_requested -> queued
                      -> rejected
                      -> failed
+                     -> withdrawn
 ```
 
 ### `PATCH /publisher/submissions/{submissionId}`
@@ -545,10 +638,97 @@ the current publisher metadata and source attribution unless the publisher later
 changes it through `PATCH`. The response is the same complete `submission`
 object as creation.
 
+### `POST /submissions/{submissionId}/withdraw`
+
+The owning publisher may withdraw a mutable submission. The response is
+`{ "submissionId": "...", "status": "withdrawn" }`. An approved submission
+cannot be withdrawn.
+
+### Reviewer routes
+
+Reviewer routes require a Hub session whose global role is `reviewer` or
+`admin`:
+
+- `GET /reviewer/submissions` returns `{ "submissions": [...] }` for the
+  `awaiting_review` and `changes_requested` queue.
+- `GET /reviewer/submissions/{submissionId}` returns the complete governance
+  view, including revision snapshots and review records.
+- `POST /reviewer/submissions/{submissionId}/review` accepts the review body
+  below and returns the decision result.
+
+The public UI also uses the equivalent
+`POST /submissions/{submissionId}/reviews` alias.
+
+```json
+{
+  "expectedRevision": 3,
+  "decision": "changes_requested",
+  "reasonCodes": ["runtime", "documentation"],
+  "message": "请补充运行时能力声明。",
+  "proposedPatch": { "metadata": { "links": [] } }
+}
+```
+
+`decision` is `changes_requested`, `approved`, or `rejected`. Approval always
+requires `expectedRevision`; the Hub rejects stale revisions with `409`.
+`proposedPatch` is stored as a suggestion and is never applied automatically.
+An approved decision creates an immutable Release. The legacy administrator
+approve and reject routes remain available.
+
+### Package membership
+
+All membership routes require a Hub session. Package owners and maintainers
+are enforced by the Hub service; assigning or removing an owner is restricted
+to an owner or administrator, and the last owner cannot be removed.
+
+- `GET /packages/{packageId}/members` returns `{ "members": [...] }`.
+- `PUT /packages/{packageId}/members` creates or replaces a member using
+  `{ "userId": "usr_...", "role": "owner" | "maintainer" | "contributor" }`.
+- `PUT /packages/{packageId}/members/{userId}` changes a member's role using
+  `{ "role": "..." }`.
+- `DELETE /packages/{packageId}/members/{userId}` removes a member.
+
+The collection `POST` and item `PATCH` methods are accepted as equivalent
+aliases by the current Hub web UI.
+
+### Contribution proposals
+
+Contribution proposals keep a contributor's exact Git repository and commit
+separate from the Package owner's release. They move through:
+
+```text
+queued -> verifying -> awaiting_owner -> accepted -> released
+                         |                |
+                         v                v
+                  changes_requested  awaiting_review
+```
+
+`rejected`, `withdrawn`, and `failed` are terminal states. A Package owner or
+maintainer must accept a verified proposal before a reviewer can approve its
+Release. Reviewer edits are suggestions only; they do not mutate the
+contributor's source.
+
+- `GET /packages/{packageId}/proposals` lists proposals for a Package.
+- `POST /packages/{packageId}/proposals` creates one from `title`, `summary`,
+  `repositoryUrl`, `ref`, optional `mirrorUrls`, and optional `metadata`.
+- `GET /me/proposals` lists proposals submitted by the current user.
+- `GET /proposals/{proposalId}` and `PATCH /proposals/{proposalId}` read or
+  update the contributor's proposal while it is mutable.
+- `POST /proposals/{proposalId}/accept` accepts a verified proposal with
+  `{ "expectedRevision": 3 }`.
+- `POST /proposals/{proposalId}/request-changes` and `/reject` require
+  `{ "expectedRevision": 3, "message": "...", "reasonCodes": [],
+  "proposedPatch": null }` and are owner/maintainer operations.
+- `POST /proposals/{proposalId}/withdraw` withdraws the contributor's proposal.
+
+Every operation that uses `expectedRevision` passes the caller's value to the
+service unchanged. Stale revisions return `409` and do not partially update
+the proposal or submission.
+
 ## Administrative API
 
-Administrative routes require a Hub administrator token and create an audit
-record.
+Administrative routes accept the static administrator token or an authenticated
+Hub `admin` user and create an audit record.
 
 ### `POST /admin/submissions/{submissionId}/approve`
 

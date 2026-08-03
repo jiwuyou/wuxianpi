@@ -1,11 +1,22 @@
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { extname, join, normalize, relative, resolve, sep } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { HubAuthService } from "./auth-service.js";
+import type { HubDatabase } from "./database.js";
 import type { HubService } from "./service.js";
 import { HubError } from "./errors.js";
-import type { IssueActor, PublisherCredential } from "./types.js";
+import type {
+  AuthenticatedUser,
+  GlobalRole,
+  HubActor,
+  HubUser,
+  IssueActor,
+  PublisherCredential,
+  PublisherIdentity,
+  SessionKind,
+} from "./types.js";
 import type { VerifiedAssetStore } from "./metadata.js";
 
 const MIME_TYPES: Record<string, string> = {
@@ -66,8 +77,46 @@ function requireText(body: unknown, key: string): string {
   return (body as Record<string, string>)[key]!.trim();
 }
 
+function asObject(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new HubError(400, "invalid_request", "A JSON object is required");
+  }
+  return body as Record<string, unknown>;
+}
+
+function requireBearer(request: IncomingMessage): string {
+  const token = bearer(request);
+  if (!token) throw new HubError(401, "hub_auth_required", "Hub bearer token is required");
+  return token;
+}
+
+function sessionRequest(input: Record<string, unknown>, defaultKind: SessionKind): { kind: SessionKind; label?: string } {
+  const kind = input.kind === undefined ? defaultKind : input.kind as SessionKind;
+  if (input.label !== undefined && typeof input.label !== "string") {
+    throw new HubError(400, "invalid_session_label", "label must be a string");
+  }
+  const label = input.label === undefined ? undefined : input.label;
+  return label === undefined ? { kind } : { kind, label };
+}
+
+function requireRole(value: unknown): "owner" | "maintainer" | "contributor" {
+  if (value !== "owner" && value !== "maintainer" && value !== "contributor") {
+    throw new HubError(400, "invalid_package_role", "role must be owner, maintainer, or contributor");
+  }
+  return value;
+}
+
+function requireGlobalRole(value: unknown): GlobalRole {
+  if (value !== "user" && value !== "reviewer" && value !== "admin") {
+    throw new HubError(400, "invalid_role", "role must be user, reviewer, or admin");
+  }
+  return value;
+}
+
 export interface HubServerOptions {
   service: HubService;
+  authService: HubAuthService;
+  database: HubDatabase;
   publicDir: string;
   adminToken: string;
   publisherCredentials: Map<string, PublisherCredential>;
@@ -120,6 +169,61 @@ async function routeApi(
   query: URLSearchParams,
 ): Promise<void> {
   const { service } = options;
+
+  if (parts[0] === "auth") {
+    if (parts[1] === "github" && parts[2] === "token-exchange" && method === "POST") {
+      const body = await readJson(request);
+      const input = asObject(body);
+      const credential = await options.authService.exchangeGitHubToken(
+        requireText(body, "githubToken"),
+        sessionRequest(input, "browser"),
+      );
+      sendJson(response, 200, credential, { "cache-control": "no-store" });
+      return;
+    }
+    if (parts[1] === "github" && parts[2] === "device" && parts[3] === "start" && method === "POST") {
+      const authorization = await options.authService.startGitHubDeviceFlow();
+      sendJson(response, 200, { authorization }, { "cache-control": "no-store" });
+      return;
+    }
+    if (parts[1] === "github" && parts[2] === "device" && parts[3] === "complete" && method === "POST") {
+      const body = await readJson(request);
+      const input = asObject(body);
+      const credential = await options.authService.completeGitHubDeviceFlow(
+        requireText(body, "deviceCode"),
+        sessionRequest(input, "device"),
+      );
+      sendJson(response, 200, credential, { "cache-control": "no-store" });
+      return;
+    }
+    if (parts[1] === "logout" && method === "POST") {
+      options.authService.logout(requireBearer(request));
+      sendJson(response, 200, { status: "logged_out" }, { "cache-control": "no-store" });
+      return;
+    }
+  }
+
+  if (parts[0] === "me") {
+    const token = requireBearer(request);
+    if (parts.length === 1 && method === "GET") {
+      sendJson(response, 200, options.authService.getMe(token), { "cache-control": "no-store" });
+      return;
+    }
+    if (parts.length === 2 && parts[1] === "sessions" && method === "GET") {
+      sendJson(response, 200, { sessions: options.authService.listSessions(token) }, { "cache-control": "no-store" });
+      return;
+    }
+    if (parts.length === 3 && parts[1] === "sessions" && method === "DELETE") {
+      options.authService.revokeOwnSession(token, parts[2]!);
+      sendJson(response, 200, { sessionId: parts[2], status: "revoked" }, { "cache-control": "no-store" });
+      return;
+    }
+    if (parts.length === 2 && parts[1] === "proposals" && method === "GET") {
+      const user = authenticateUser(options, token);
+      sendJson(response, 200, service.listContributorProposals(user.user.userId), { "cache-control": "no-store" });
+      return;
+    }
+  }
 
   if (method === "GET" && parts.length === 2 && parts[0] === "assets") {
     const asset = await options.assetStore.get(parts[1]!);
@@ -191,7 +295,11 @@ async function routeApi(
   }
 
   if (parts[0] === "publisher") {
-    const publisher = authenticatePublisher(options.publisherCredentials, bearer(request));
+    const publisher = authenticatePublisher(options, bearer(request));
+    if (method === "GET" && parts.length === 2 && parts[1] === "submissions") {
+      sendJson(response, 200, service.listPublisherSubmissions(publisher.id), { "cache-control": "no-store" });
+      return;
+    }
     if (method === "POST" && parts.length === 2 && parts[1] === "submissions") {
       sendJson(response, 202, { submission: await service.createSubmission(publisher, await readJson(request)) }, { "cache-control": "no-store" });
       return;
@@ -213,24 +321,135 @@ async function routeApi(
     }
   }
 
+  if (parts[0] === "reviewer" && parts[1] === "submissions") {
+    const reviewer = authenticateUser(options, bearer(request));
+    requireReviewer(reviewer);
+    if (method === "GET" && parts.length === 2) {
+      sendJson(response, 200, service.listReviewerSubmissions(), { "cache-control": "no-store" });
+      return;
+    }
+    if (parts[2] && method === "GET" && parts.length === 3) {
+      sendJson(response, 200, service.getSubmissionGovernance(parts[2]), { "cache-control": "no-store" });
+      return;
+    }
+    if (parts[2] && method === "POST" && parts.length === 4 && parts[3] === "review") {
+      const body = await readJson(request);
+      assertSubmissionRevision(service, parts[2], body);
+      sendJson(response, 200, await service.reviewSubmission(parts[2], reviewer.user, body), { "cache-control": "no-store" });
+      return;
+    }
+  }
+
+  if (parts[0] === "submissions" && parts[1] && parts[2] === "reviews" && method === "POST") {
+    const reviewer = authenticateUser(options, bearer(request));
+    requireReviewer(reviewer);
+    const body = await readJson(request);
+    assertSubmissionRevision(service, parts[1], body);
+    sendJson(response, 200, await service.reviewSubmission(parts[1], reviewer.user, body), { "cache-control": "no-store" });
+    return;
+  }
+  if (parts[0] === "submissions" && parts[1] && parts[2] === "withdraw" && method === "POST") {
+    const publisher = authenticatePublisher(options, bearer(request));
+    await service.withdrawSubmission(publisher.id, parts[1]);
+    sendJson(response, 200, { submissionId: parts[1], status: "withdrawn" }, { "cache-control": "no-store" });
+    return;
+  }
+
+  if (parts[0] === "packages" && parts[1] && parts[2] === "members") {
+    const actor = authenticateUser(options, bearer(request));
+    const packageId = parts[1];
+    if (method === "GET" && parts.length === 3) {
+      requirePackageManager(options, actor.user, packageId);
+      sendJson(response, 200, service.listPackageMembers(packageId), { "cache-control": "no-store" });
+      return;
+    }
+    if ((method === "POST" || method === "PUT") && parts.length === 3) {
+      const input = asObject(await readJson(request));
+      const member = service.upsertPackageMember(actor.user, packageId, requireText(input, "userId"), requireRole(input.role));
+      sendJson(response, 200, { member }, { "cache-control": "no-store" });
+      return;
+    }
+    if ((method === "PUT" || method === "PATCH") && parts.length === 4) {
+      const input = asObject(await readJson(request));
+      const member = service.upsertPackageMember(actor.user, packageId, parts[3]!, requireRole(input.role));
+      sendJson(response, 200, { member }, { "cache-control": "no-store" });
+      return;
+    }
+    if (method === "DELETE" && parts.length === 4) {
+      service.removePackageMember(actor.user, packageId, parts[3]!);
+      sendJson(response, 200, { packageId, userId: parts[3], status: "removed" }, { "cache-control": "no-store" });
+      return;
+    }
+  }
+
+  if (parts[0] === "packages" && parts[1] && parts[2] === "proposals") {
+    const actor = authenticateUser(options, bearer(request));
+    const packageId = parts[1];
+    if (method === "GET" && parts.length === 3) {
+      requirePackageManager(options, actor.user, packageId);
+      sendJson(response, 200, service.listContributionProposals(packageId), { "cache-control": "no-store" });
+      return;
+    }
+    if (method === "POST" && parts.length === 3) {
+      sendJson(response, 202, { proposal: await service.createContributionProposal(actor.user, packageId, await readJson(request)) }, { "cache-control": "no-store" });
+      return;
+    }
+  }
+
+  if (parts[0] === "proposals" && parts[1]) {
+    const actor = authenticateUser(options, bearer(request));
+    const proposalId = parts[1];
+    if (method === "GET" && parts.length === 2) {
+      sendJson(response, 200, { proposal: findProposal(options, actor.user, proposalId) }, { "cache-control": "no-store" });
+      return;
+    }
+    if (method === "PATCH" && parts.length === 2) {
+      sendJson(response, 200, { proposal: await service.updateContributionProposal(actor.user.userId, proposalId, await readJson(request)) }, { "cache-control": "no-store" });
+      return;
+    }
+    if (method === "POST" && parts.length === 3 && parts[2] === "accept") {
+      const input = asObject(await readJson(request));
+      sendJson(response, 200, { proposal: service.acceptContributionProposal(actor.user, proposalId, input.expectedRevision as number) }, { "cache-control": "no-store" });
+      return;
+    }
+    if (method === "POST" && parts.length === 3 && parts[2] === "request-changes") {
+      sendJson(response, 200, { proposal: service.requestContributionProposalChanges(actor.user, proposalId, await readJson(request)) }, { "cache-control": "no-store" });
+      return;
+    }
+    if (method === "POST" && parts.length === 3 && parts[2] === "reject") {
+      sendJson(response, 200, { proposal: service.rejectContributionProposal(actor.user, proposalId, await readJson(request)) }, { "cache-control": "no-store" });
+      return;
+    }
+    if (method === "POST" && parts.length === 3 && parts[2] === "withdraw") {
+      await service.withdrawContributionProposal(actor.user.userId, proposalId);
+      sendJson(response, 200, { proposalId, status: "withdrawn" }, { "cache-control": "no-store" });
+      return;
+    }
+  }
+
   if (parts[0] === "admin") {
-    authenticateAdmin(options.adminToken, bearer(request));
+    const admin = authenticateAdminActor(options, bearer(request));
+    if (method === "PATCH" && parts[1] === "users" && parts[2] && parts[3] === "role") {
+      const body = asObject(await readJson(request));
+      sendJson(response, 200, { user: options.authService.updateUserRole(admin, parts[2]!, requireGlobalRole(body.role)) }, { "cache-control": "no-store" });
+      return;
+    }
     if (method === "POST" && parts[1] === "submissions" && parts[2] && parts[3] === "approve") {
       const body = await readJson(request);
       const notes = body && typeof body === "object" && !Array.isArray(body) && typeof (body as Record<string, unknown>).notes === "string"
         ? (body as Record<string, string>).notes! : null;
-      sendJson(response, 201, await service.approveSubmission(parts[2]!, notes, "admin"), { "cache-control": "no-store" });
+      sendJson(response, 201, await service.approveSubmission(parts[2]!, notes, adminActorId(admin)), { "cache-control": "no-store" });
       return;
     }
     if (method === "POST" && parts[1] === "submissions" && parts[2] && parts[3] === "reject") {
       const body = await readJson(request);
-      service.rejectSubmission(parts[2]!, requireText(body, "reason"), "admin");
+      service.rejectSubmission(parts[2]!, requireText(body, "reason"), adminActorId(admin));
       sendJson(response, 200, { submissionId: parts[2], status: "rejected" }, { "cache-control": "no-store" });
       return;
     }
     if (method === "POST" && parts[1] === "releases" && parts[2] && parts[3] === "revoke") {
       const body = await readJson(request);
-      service.revokeRelease(parts[2]!, requireText(body, "reason"), "admin");
+      service.revokeRelease(parts[2]!, requireText(body, "reason"), adminActorId(admin));
       sendJson(response, 200, { releaseId: parts[2], status: "revoked" }, { "cache-control": "no-store" });
       return;
     }
@@ -239,16 +458,73 @@ async function routeApi(
   throw new HubError(404, "route_not_found", "The requested Hub route does not exist");
 }
 
-function authenticatePublisher(credentials: Map<string, PublisherCredential>, token: string | null): PublisherCredential {
-  if (!token) throw new HubError(401, "publisher_auth_required", "Publisher bearer token is required");
-  for (const credential of credentials.values()) if (credential.token === token) return credential;
-  throw new HubError(403, "publisher_auth_invalid", "Publisher bearer token is invalid");
+function authenticateUser(options: HubServerOptions, token: string | null): AuthenticatedUser {
+  if (!token) throw new HubError(401, "hub_auth_required", "Hub bearer token is required");
+  return options.authService.authenticate(token);
 }
 
-function authenticateAdmin(expected: string, token: string | null): void {
-  if (!expected) throw new HubError(503, "admin_not_configured", "Hub administrator token is not configured");
+function authenticatePublisher(options: HubServerOptions, token: string | null): PublisherIdentity {
+  if (!token) throw new HubError(401, "publisher_auth_required", "Publisher bearer token is required");
+  for (const credential of options.publisherCredentials.values()) {
+    if (credential.token === token) return credential;
+  }
+  if (!token.startsWith("wph_")) throw new HubError(403, "publisher_auth_invalid", "Publisher bearer token is invalid");
+  const user = authenticateUser(options, token).user;
+  return { id: user.userId, name: user.name, profileUrl: user.profileUrl };
+}
+
+function authenticateAdminActor(options: HubServerOptions, token: string | null): HubActor {
   if (!token) throw new HubError(401, "admin_auth_required", "Administrator bearer token is required");
-  if (token !== expected) throw new HubError(403, "admin_auth_invalid", "Administrator bearer token is invalid");
+  if (options.adminToken && token === options.adminToken) {
+    return { kind: "admin", id: "admin", name: "WuxianPi Hub 管理员" };
+  }
+  if (options.adminToken && !token.startsWith("wph_")) {
+    throw new HubError(403, "admin_auth_invalid", "Administrator bearer token is invalid");
+  }
+  const user = authenticateUser(options, token);
+  if (user.user.role !== "admin") throw new HubError(403, "admin_required", "Administrator access is required");
+  return user;
+}
+
+function adminActorId(actor: HubActor): string {
+  return actor.kind === "user" ? actor.user.userId : actor.id;
+}
+
+function requireReviewer(user: AuthenticatedUser): void {
+  if (user.user.role !== "reviewer" && user.user.role !== "admin") {
+    throw new HubError(403, "reviewer_required", "Reviewer or administrator access is required");
+  }
+}
+
+function requirePackageManager(options: HubServerOptions, user: HubUser, packageId: string): void {
+  if (user.role === "admin") return;
+  const member = options.database.getPackageMember(packageId, user.userId);
+  if (member?.role === "owner" || member?.role === "maintainer") return;
+  throw new HubError(403, "package_maintainer_required", "Package owner or maintainer access is required");
+}
+
+function findProposal(options: HubServerOptions, user: HubUser, proposalId: string): Record<string, unknown> {
+  const own = options.service.listContributorProposals(user.userId).proposals.find((item) => item.proposalId === proposalId);
+  if (own) return own as unknown as Record<string, unknown>;
+  const stored = options.database.getContributionProposal(proposalId);
+  const member = stored ? options.database.getPackageMember(stored.packageId, user.userId) : null;
+  if (stored && (user.role === "admin" || member?.role === "owner" || member?.role === "maintainer")) {
+    const proposal = options.service.listContributionProposals(stored.packageId).proposals.find((item) => item.proposalId === proposalId);
+    if (proposal) return proposal as unknown as Record<string, unknown>;
+  }
+  throw new HubError(404, "proposal_not_found", "The requested contribution proposal does not exist");
+}
+
+function assertSubmissionRevision(service: HubService, submissionId: string, body: unknown): void {
+  const input = asObject(body);
+  if (input.expectedRevision === undefined) return;
+  if (typeof input.expectedRevision !== "number" || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    throw new HubError(400, "invalid_revision", "expectedRevision must be a positive integer");
+  }
+  const current = service.getSubmissionGovernance(submissionId).revision;
+  if (current !== input.expectedRevision) {
+    throw new HubError(409, "submission_revision_stale", "The submission changed after the reviewer loaded it");
+  }
 }
 
 function authenticateIssueActor(options: HubServerOptions, token: string | null): IssueActor {
@@ -256,6 +532,10 @@ function authenticateIssueActor(options: HubServerOptions, token: string | null)
   if (options.adminToken && token === options.adminToken) return { kind: "admin", id: "admin", name: "WuxianPi Hub 管理员" };
   for (const publisher of options.publisherCredentials.values()) {
     if (publisher.token === token) return { kind: "publisher", id: publisher.id, name: publisher.name };
+  }
+  if (token.startsWith("wph_")) {
+    const user = authenticateUser(options, token).user;
+    return { kind: "publisher", id: user.userId, name: user.name };
   }
   if (token.length < 24 || token.length > 512) throw new HubError(403, "issue_auth_invalid", "Issue bearer token is invalid");
   return { kind: "reporter", tokenHash: createHash("sha256").update(token).digest("hex") };

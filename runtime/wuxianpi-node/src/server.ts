@@ -26,7 +26,8 @@ import { SessionRegistry } from "./session-registry.js";
 import { StaticFiles } from "./static-files.js";
 import { WebApi } from "./web-api.js";
 import { WebServices } from "./web-services.js";
-import { MarketClient } from "./market-client.js";
+import { HubAuth } from "./hub-auth.js";
+import { DEFAULT_HUB_URL, MarketClient } from "./market-client.js";
 import { WuxianPiPackageManager } from "./package-manager.js";
 import {
   BROWSER_HOST_PROTOCOL,
@@ -51,6 +52,9 @@ export interface RuntimeServerOptions {
   packageManagerRoot?: string;
   maintenanceRoot?: string;
   browserHostRequestTimeoutMs?: number;
+  hubAuthStatePath?: string;
+  hubAuthRunGhToken?: () => Promise<string>;
+  trustedOrigins?: string[];
 }
 
 interface ConnectionContext {
@@ -104,11 +108,26 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const requestOwner = new AsyncLocalStorage<WebSocket>();
   const inFlightRequests = new Map<WebSocket, number>();
   let webServices: WebServices | undefined;
+  const packageManagerRoot = options.packageManagerRoot ?? join(agentDir, "wuxianpi", "package-manager");
+  const hubUrl = options.hubUrl ?? process.env.WUXIANPI_HUB_URL ?? DEFAULT_HUB_URL;
+  const hubAuth = new HubAuth({
+    baseUrl: hubUrl,
+    statePath: options.hubAuthStatePath ?? join(packageManagerRoot, "hub-auth.json"),
+    runGhToken: options.hubAuthRunGhToken,
+  });
+  const marketClient = new MarketClient({
+    baseUrl: hubUrl,
+    authToken: () => hubAuth.token(),
+    authTokenSnapshot: () => hubAuth.credential(),
+    onAuthFailure: async (credential) => {
+      await hubAuth.clearPersistedAuthIfCurrent(credential);
+    },
+  });
   const packageManager = new WuxianPiPackageManager({
     agentDir,
-    rootDir: options.packageManagerRoot ?? join(agentDir, "wuxianpi", "package-manager"),
+    rootDir: packageManagerRoot,
     mcpConfigPath: options.mcpConfigPath,
-    marketClient: new MarketClient({ baseUrl: options.hubUrl }),
+    marketClient,
     maintenanceRoot: options.maintenanceRoot,
     initialExecutionContext: {
       packageIds: commaSeparated(process.env.WUXIANPI_EXECUTION_PACKAGE_IDS),
@@ -142,6 +161,11 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     registry,
     services: webServices,
     packageManager,
+    hubAuth,
+    trustedOrigins: [
+      ...(options.trustedOrigins ?? []),
+      options.preferredWebUiUrl ?? "http://127.0.0.1:25808/",
+    ],
     browserHosts,
     status: () => ({
       version: RUNTIME_VERSION,
@@ -697,7 +721,9 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     browserHosts,
     nativeEvents,
     diagnostics,
+    hubAuth,
     async start() {
+      await hubAuth.initialize();
       deploymentId = options.deploymentId?.trim() || await deriveDeploymentId(options.webRoot);
       await new Promise<void>((resolve, reject) => {
         httpServer.once("error", reject);

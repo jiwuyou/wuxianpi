@@ -11,7 +11,7 @@ import {
   runMutationWithRefresh,
   type HubInstallPlan,
 } from "@/lib/package-market";
-import { normalizeLocalPackage, WebApiClient } from "@/lib/web-api-client";
+import { normalizeLocalPackage, normalizeMarketAuth, WebApiClient } from "@/lib/web-api-client";
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
   status,
@@ -231,6 +231,41 @@ describe("WuxianPi Marketplace", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual(input);
   });
 
+  it("uses Runtime-owned gh authentication without exposing GitHub or Hub tokens to the browser", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ ok: true, data: { authenticated: false, ghAvailable: true, ghLogin: "example" } }))
+      .mockResolvedValueOnce(json({ ok: true, data: { authenticated: true, user: { githubId: "42", login: "example", name: "Example", role: "user" }, session: { kind: "device" } } }))
+      .mockResolvedValueOnce(json({ ok: true, data: { authenticated: false, user: null } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new WebApiClient();
+
+    const before = await client.marketAuthStatus();
+    const signedIn = await client.marketAuthWithGh();
+    const after = await client.marketAuthLogout();
+
+    expect(before).toMatchObject({ authenticated: false, ghAvailable: true, ghLogin: "example" });
+    expect(signedIn).toMatchObject({ authenticated: true, user: { login: "example" }, session: { kind: "device" } });
+    expect(after.authenticated).toBe(false);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/web/v1/market/auth",
+      "/api/web/v1/market/auth/github/gh",
+      "/api/web/v1/market/auth/logout",
+    ]);
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "POST", body: "{}" });
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "POST", body: "{}" });
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(new Headers((init as RequestInit | undefined)?.headers).has("authorization")).toBe(false);
+    }
+  });
+
+  it("normalizes version-tolerant Runtime market identity payloads", () => {
+    expect(normalizeMarketAuth({ auth: { signedIn: true, identity: { login: "octocat", avatarUrl: null }, ghAvailable: true } })).toEqual({
+      authenticated: true,
+      user: { login: "octocat", name: "octocat", avatarUrl: null },
+      ghAvailable: true,
+    });
+  });
+
   it("builds publisher screenshots with multiple explicit sources and priorities", () => {
     const input = buildPublisherSubmissionInput({
       repositoryUrl: "https://github.com/example/package.git",
@@ -290,5 +325,21 @@ describe("WuxianPi Marketplace", () => {
     expect(source).toContain("GitHub 原站");
     expect(source).toContain("Hub 暂时不可用；本地已安装 Package 仍可管理");
     expect(source).toContain("优先级数值越大越先尝试");
+    expect(source).toContain("使用本机 GitHub CLI 登录");
+    expect(source).toContain("marketAuth.authenticated ? setPublisherOpen(true) : setAuthOpen(true)");
+  });
+
+  it("keeps Hub bearer sessions memory-only and locks governance actions to the loaded revision", () => {
+    const source = readFileSync(new URL("../../hub/public/app.js", import.meta.url), "utf8");
+    expect(source).toContain('sessionToken: ""');
+    expect(source).not.toContain('localStorage.getItem("wuxianpiHubSessionToken")');
+    expect(source).not.toContain('localStorage.setItem("wuxianpiHubSessionToken"');
+    expect(source).not.toContain('localStorage.removeItem("wuxianpiHubSessionToken"');
+    expect(source).toContain('name="expectedRevision" value="${escapeHtml(item.revision ?? 1)}"');
+    expect(source).toContain('expectedRevision: Number(data.get("expectedRevision"))');
+    expect(source).toContain('expectedRevision: Number(container.dataset.revision)');
+    expect(source).toContain('message: message.trim()');
+    expect(source).not.toContain('body: JSON.stringify(reason ? { reason } : {})');
+    expect(source).toContain("审核消息不能为空");
   });
 });

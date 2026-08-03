@@ -26,8 +26,30 @@ export const CONTRIBUTION_TYPES = [
 
 export type PackageCategory = typeof PACKAGE_CATEGORIES[number];
 export type ContributionType = typeof CONTRIBUTION_TYPES[number];
-export type SubmissionStatus = "queued" | "verifying" | "awaiting_review" | "approved" | "rejected" | "failed";
+export type SubmissionStatus =
+  | "queued"
+  | "verifying"
+  | "awaiting_review"
+  | "changes_requested"
+  | "approved"
+  | "rejected"
+  | "failed"
+  | "withdrawn";
 export type ReleaseStatus = "approved" | "revoked";
+export type GlobalRole = "user" | "reviewer" | "admin";
+export type PackageRole = "owner" | "maintainer" | "contributor";
+export type SessionKind = "browser" | "device";
+export type ReviewDecision = "changes_requested" | "accepted" | "approved" | "rejected";
+export type ProposalStatus =
+  | "queued"
+  | "verifying"
+  | "awaiting_owner"
+  | "changes_requested"
+  | "accepted"
+  | "rejected"
+  | "failed"
+  | "withdrawn"
+  | "released";
 export type IssueStatus =
   | "pending"
   | "confirmed"
@@ -47,6 +69,89 @@ export interface PublisherIdentity {
 
 export interface PublisherCredential extends PublisherIdentity {
   token: string;
+}
+
+export interface HubUser {
+  userId: string;
+  githubId: string;
+  login: string;
+  name: string;
+  avatarUrl: string | null;
+  profileUrl: string;
+  role: GlobalRole;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HubSession {
+  sessionId: string;
+  userId: string;
+  kind: SessionKind;
+  label: string;
+  createdAt: string;
+  lastUsedAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+}
+
+export interface HubSessionCredential {
+  token: string;
+  user: HubUser;
+  session: HubSession;
+}
+
+export interface HubMeResponse {
+  user: HubUser;
+  session: HubSession;
+}
+
+export interface AuthenticatedUser {
+  kind: "user";
+  user: HubUser;
+  sessionId: string;
+}
+
+export type HubActor =
+  | AuthenticatedUser
+  | { kind: "publisher"; id: string; name: string; profileUrl: string | null }
+  | { kind: "admin"; id: string; name: string };
+
+export interface PackageMember {
+  packageId: string;
+  userId: string;
+  role: PackageRole;
+  user: Pick<HubUser, "githubId" | "login" | "name" | "avatarUrl" | "profileUrl">;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SubmissionReview {
+  reviewId: string;
+  submissionId: string;
+  revision: number;
+  reviewerId: string;
+  reviewerName: string;
+  decision: ReviewDecision;
+  reasonCodes: string[];
+  message: string;
+  proposedPatch: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface ContributionProposal {
+  proposalId: string;
+  packageId: string;
+  submissionId: string;
+  contributorId: string;
+  contributorName: string;
+  status: ProposalStatus;
+  title: string;
+  summary: string;
+  acceptedBy: string | null;
+  acceptedAt: string | null;
+  rejectionReason: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface GitSource {
@@ -230,4 +335,11 @@ export interface ReleaseRecord {
   status: ReleaseStatus;
   publishedAt: string;
   revocation: { reason: string; revokedAt: string } | null;
+  attribution: {
+    proposalId: string;
+    contributorId: string;
+    contributorName: string;
+    repositoryUrl: string;
+    approvedCommit: string;
+  } | null;
 }

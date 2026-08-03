@@ -50,6 +50,30 @@ export class WebApiError extends Error {
   }
 }
 
+export interface MarketAuthUser {
+  userId?: string;
+  githubId?: string;
+  login: string;
+  name: string;
+  avatarUrl?: string | null;
+  profileUrl?: string;
+  role?: "user" | "reviewer" | "admin" | string;
+}
+
+export interface MarketAuthState {
+  authenticated: boolean;
+  user: MarketAuthUser | null;
+  session?: {
+    sessionId?: string;
+    kind?: "browser" | "device" | string;
+    label?: string;
+    expiresAt?: string;
+  } | null;
+  ghAvailable?: boolean;
+  ghLogin?: string | null;
+  hubUrl?: string;
+}
+
 function record(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {};
 }
@@ -91,6 +115,36 @@ export function normalizeSessionList(body: unknown): SessionInfo[] {
 
 function recordArray(value: unknown): JsonRecord[] {
   return Array.isArray(value) ? value.map(record) : [];
+}
+
+export function normalizeMarketAuth(value: unknown): MarketAuthState {
+  const root = record(value);
+  const auth = record(root.auth ?? root.marketAuth ?? root);
+  const rawUser = record(auth.user ?? auth.identity);
+  const login = optionalText(rawUser.login ?? auth.login);
+  const authenticated = auth.authenticated === true || auth.signedIn === true || Boolean(login);
+  const rawSession = record(auth.session);
+  return {
+    authenticated,
+    user: authenticated && login ? {
+      ...(optionalText(rawUser.userId) ? { userId: optionalText(rawUser.userId) } : {}),
+      ...(optionalText(rawUser.githubId) ? { githubId: optionalText(rawUser.githubId) } : {}),
+      login,
+      name: optionalText(rawUser.name) ?? login,
+      ...(rawUser.avatarUrl === null || optionalText(rawUser.avatarUrl) ? { avatarUrl: rawUser.avatarUrl as string | null } : {}),
+      ...(optionalText(rawUser.profileUrl) ? { profileUrl: optionalText(rawUser.profileUrl) } : {}),
+      ...(optionalText(rawUser.role) ? { role: optionalText(rawUser.role) } : {}),
+    } : null,
+    ...(Object.keys(rawSession).length ? { session: {
+      ...(optionalText(rawSession.sessionId) ? { sessionId: optionalText(rawSession.sessionId) } : {}),
+      ...(optionalText(rawSession.kind) ? { kind: optionalText(rawSession.kind) } : {}),
+      ...(optionalText(rawSession.label) ? { label: optionalText(rawSession.label) } : {}),
+      ...(optionalText(rawSession.expiresAt) ? { expiresAt: optionalText(rawSession.expiresAt) } : {}),
+    } } : {}),
+    ...(typeof auth.ghAvailable === "boolean" ? { ghAvailable: auth.ghAvailable } : {}),
+    ...(auth.ghLogin === null || optionalText(auth.ghLogin) ? { ghLogin: auth.ghLogin as string | null } : {}),
+    ...(optionalText(auth.hubUrl) ? { hubUrl: optionalText(auth.hubUrl) } : {}),
+  };
 }
 
 function packageStatus(value: unknown): LocalPackage["status"] {
@@ -893,6 +947,18 @@ export class WebApiClient {
 
   marketPackages(options: { q?: string; category?: MarketCategory | ""; contributionType?: string; cursor?: string; limit?: number } = {}) {
     return this.request<PackageListResponse>("/market/packages", {}, { ...options, category: options.category || undefined });
+  }
+
+  async marketAuthStatus(): Promise<MarketAuthState> {
+    return normalizeMarketAuth(await this.request<unknown>("/market/auth"));
+  }
+
+  async marketAuthWithGh(): Promise<MarketAuthState> {
+    return normalizeMarketAuth(await this.request<unknown>("/market/auth/github/gh", { method: "POST", body: "{}" }));
+  }
+
+  async marketAuthLogout(): Promise<MarketAuthState> {
+    return normalizeMarketAuth(await this.request<unknown>("/market/auth/logout", { method: "POST", body: "{}" }));
   }
 
   async marketPackage(packageId: string, releaseId?: string): Promise<MarketPackageDetailPayload> {
