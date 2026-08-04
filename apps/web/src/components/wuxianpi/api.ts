@@ -19,6 +19,10 @@ import type {
   WebExtensionSummary,
   McpActionData,
   McpActionRequest,
+  Workspace,
+  WorkspaceCreateRequest,
+  WorkspaceListOptions,
+  WorkspaceUpdateRequest,
 } from "@/lib/wuxianpi/contracts";
 import { WebApiError, webApi } from "@/lib/web-api-client";
 
@@ -67,6 +71,26 @@ export function updateAssistant(id: string, input: AssistantUpdateRequest): Prom
 
 export function setAssistantArchived(id: string, archived: boolean): Promise<AssistantSummary> {
   return updateAssistant(id, { manifest: { archived } });
+}
+
+export function listWorkspaces(options?: WorkspaceListOptions): Promise<Workspace[]> {
+  return webApi.listWorkspaces(options);
+}
+
+export function createWorkspace(input: WorkspaceCreateRequest): Promise<Workspace> {
+  return webApi.createWorkspace(input);
+}
+
+export function getWorkspace(id: string): Promise<Workspace> {
+  return webApi.getWorkspace(id);
+}
+
+export function updateWorkspace(id: string, input: WorkspaceUpdateRequest): Promise<Workspace> {
+  return webApi.updateWorkspace(id, input);
+}
+
+export function deleteWorkspace(id: string): Promise<boolean> {
+  return webApi.deleteWorkspace(id);
 }
 
 export function cloneAssistant(id: string, newId?: string): Promise<AssistantSummary> {

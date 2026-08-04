@@ -162,6 +162,13 @@ export interface PackageAssistantBinding {
   assistantId: string;
   enabledContributionIds: string[];
   experienceSpaces: Record<string, string>;
+  functionalAssistants: Record<string, FunctionalAssistantBinding>;
+}
+
+export type FunctionalAssistantSharingMode = "isolated" | "shared" | "hybrid";
+
+export interface FunctionalAssistantBinding {
+  sharingMode: FunctionalAssistantSharingMode;
 }
 
 export interface LocalPackage {

@@ -139,8 +139,8 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     idleTimeoutMs: options.idleTimeoutMs,
     agentDir,
     diagnostics,
-    assistantToolsResolver: async (cwd) => webServices?.resolveAssistantToolNamesForCwd(cwd),
-    assistantResourcesResolver: async (cwd) => packageManager.resolveAssistantResourcesForCwd(cwd, join(agentDir, "assistants")),
+    assistantToolsResolver: async (assistantId) => (await webServices?.resolveAssistantToolNames(assistantId))?.toolNames,
+    assistantResourcesResolver: async (assistantId) => packageManager.resolveAssistantResources(assistantId),
   });
   const nativeEvents = new NativeEventProjector(registry);
   registry.subscribe((event) => routeEvent(nativeEvents.project(event)));
@@ -152,6 +152,8 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     ...CAPABILITIES,
     webApi: 1,
     packageManager: 1,
+    profileSessions: 1,
+    workspaces: 1,
     snapshotSse: 1,
     staticWebUi: staticFiles.enabled ? 1 : 0,
     browserHost: 1,

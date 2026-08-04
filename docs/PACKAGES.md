@@ -73,16 +73,20 @@ Public API details are frozen in
 
 ## Local storage
 
-A suitable local layout is:
+The production Runtime stores Package Manager data below the Pi agent directory:
 
 ```text
-~/.wuxianpi/package-manager/
+~/.pi/agent/wuxianpi/package-manager/
 ├── packages/<package-id>/
 │   ├── source/             # long-lived Git workspace
 │   ├── revisions/          # validated runtime revisions
 │   ├── artifacts/          # digest-verified downloads
 │   ├── data/               # mutable data and credentials
 │   └── logs/
+├── functional-assistants/
+│   └── <function-id>/
+│       ├── shared/
+│       └── profiles/<assistant-id>/
 ├── catalog-cache/
 ├── dependency-cache/
 ├── active-registry.json
@@ -152,6 +156,47 @@ overlay.
 Static ID conflicts and absent host capabilities fail before activation. One
 Package ID and one logical contribution ID have only one active implementation.
 
+## Stateful functional assistants
+
+A functional assistant is declared as a `wuxianpi.assistantTemplate`
+contribution with `kind: "functional"`. It is not a second Main Assistant and
+does not create a separate Pi AgentSession. It is a stateful Skill bundle that
+can expand `defaultBindings` to Skills, context, tools, and other selectable
+contributions.
+
+The Package and its dependencies are installed once. Binding the functional
+assistant to several Main Assistants creates no Package copies. Mutable data is
+kept outside Package revisions in a function-first layout:
+
+```text
+functional-assistants/<function-id>/
+├── shared/
+└── profiles/<assistant-id>/
+```
+
+Each Main Assistant binding chooses a sharing mode:
+
+| Mode | Reads | Default writes |
+| --- | --- | --- |
+| `isolated` | `profiles/<assistantId>` | `profiles/<assistantId>` |
+| `shared` | `shared` | `shared` |
+| `hybrid` | private first, then shared | `profiles/<assistantId>` |
+
+New functional-assistant bindings default to `hybrid`. Updating an ordinary
+Package binding without sending new functional-assistant settings preserves
+the existing modes. Removing a functional-assistant binding disables its
+resources but retains its data.
+
+The Runtime adds one bounded Pi tool, `functional_assistant_state`, when at
+least one functional assistant is bound. It supports `list`, `read`, and
+`write`, rejects unbound function IDs, enforces the selected sharing mode, and
+prevents absolute paths, traversal, and symlink escapes.
+
+Package updates activate new validated code and context without overwriting
+functional-assistant data. Ordinary uninstall also preserves it. Only
+`DELETE /api/web/v1/packages/<packageId>?purgeData=true` removes the Package's
+mutable data and functional-assistant state.
+
 ## Artifact policy
 
 Source, Skills, manifests, and mergeable text belong in Git. ARM binaries,
@@ -190,6 +235,7 @@ The first complete release should include:
 - local Git commits and three-way updates;
 - isolated build/test and readable logs;
 - contribution registry and assistant bindings;
+- stateful functional-assistant bindings with isolated, shared, and hybrid data;
 - Pi Extension, Skill, Prompt, Theme, MCP, Web extension, renderer, assistant
   template, context, experience, OpenHouse app, service, and artifact
   contributions;

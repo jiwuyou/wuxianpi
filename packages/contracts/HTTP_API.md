@@ -2,6 +2,24 @@
 
 Default Runtime origin: `http://127.0.0.1:20765`.
 
+The mobile Web API is rooted at:
+
+```text
+http://127.0.0.1:20765/api/web/v1
+```
+
+All examples below use the existing success envelope:
+
+```json
+{ "ok": true, "data": {} }
+```
+
+Errors use an HTTP error status and:
+
+```json
+{ "ok": false, "error": { "code": "...", "message": "..." } }
+```
+
 ## Host endpoints
 
 | Method | Path | Purpose |
@@ -28,6 +46,167 @@ Default Runtime origin: `http://127.0.0.1:20765`.
 use the advertised fallback. UI IDs and ports are metadata, not fixed Host
 constants.
 
+## Assistant, Workspace, and session ownership
+
+The user-facing Main Assistant is the WuxianPi Profile equivalent. The HTTP
+contract keeps `assistantId`, `workspaceId`, and `cwd` independent:
+
+- `assistantId` selects identity, memory, capabilities, and Package bindings;
+- `workspaceId` selects registered Workspace instructions and memory;
+- `cwd` is the actual Pi execution directory and native session grouping key.
+
+Pi SDK/source and native JSONL files are unchanged. WuxianPi stores only the
+ownership mapping and Workspace registry in
+`~/.pi/agent/wuxianpi/state.sqlite`. The Runtime requires Node.js `>=22.19.0`
+for `node:sqlite`.
+
+### Workspace endpoints
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| `GET` | `/api/web/v1/workspaces` | List active Workspaces |
+| `GET` | `/api/web/v1/workspaces?includeArchived=true` | Include archived Workspaces |
+| `POST` | `/api/web/v1/workspaces` | Register a Workspace and create its context files |
+| `GET` | `/api/web/v1/workspaces/:id` | Read one Workspace and its context |
+| `PATCH` | `/api/web/v1/workspaces/:id` | Update metadata, instructions, or memory |
+| `DELETE` | `/api/web/v1/workspaces/:id` | Delete a Workspace that owns no sessions |
+
+Create request:
+
+```http
+POST /api/web/v1/workspaces
+Content-Type: application/json
+
+{
+  "id": "wuxianpi-project",
+  "name": "WuxianPi",
+  "rootCwd": "/data/data/com.termux/files/home/projects/wuxianpi",
+  "instructions": "Use the repository checks before integration.\n",
+  "memory": "The production Runtime is runtime/wuxianpi-node.\n"
+}
+```
+
+`id` is optional; the Runtime generates one when omitted. The response is:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "workspace": {
+      "id": "wuxianpi-project",
+      "name": "WuxianPi",
+      "rootCwd": "/data/data/com.termux/files/home/projects/wuxianpi",
+      "archived": false,
+      "instructions": "Use the repository checks before integration.\n",
+      "memory": "The production Runtime is runtime/wuxianpi-node.\n"
+    }
+  }
+}
+```
+
+`PATCH` accepts any subset of `name`, `rootCwd`, `archived`, `instructions`,
+and `memory`. A new `rootCwd` is rejected when it would exclude an existing
+session `cwd`. Deletion is rejected with `workspace_has_sessions` while any
+session is bound to the Workspace. Successful deletion returns:
+
+```json
+{ "ok": true, "data": { "id": "wuxianpi-project" } }
+```
+
+### Session endpoints
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| `GET` | `/api/web/v1/sessions` | List Pi sessions with explicit ownership |
+| `GET` | `/api/web/v1/sessions?assistantId=:id` | Filter by Main Assistant |
+| `GET` | `/api/web/v1/sessions?workspaceId=:id` | Filter by Workspace |
+| `POST` | `/api/web/v1/sessions` | Create a bound WuxianPi session |
+
+Web session creation requires `assistantId`:
+
+```http
+POST /api/web/v1/sessions
+Content-Type: application/json
+
+{
+  "assistantId": "main",
+  "workspaceId": "wuxianpi-project",
+  "cwd": "/data/data/com.termux/files/home/projects/wuxianpi/runtime",
+  "provider": "openai",
+  "modelId": "gpt-5.6",
+  "thinkingLevel": "high",
+  "toolNames": ["read", "bash"]
+}
+```
+
+`workspaceId`, `cwd`, model, thinking, and tool overrides are optional. When a
+Workspace is supplied, omitted `cwd` defaults to its `rootCwd`; an explicit
+`cwd` must be equal to or below that root. Without a Workspace, omitted `cwd`
+defaults to the Assistant directory.
+
+Creation returns the Pi session identity plus WuxianPi ownership:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "sessionId": "019f...",
+    "sessionPath": "/home/u/.pi/agent/sessions/--data-.../2026-..._019f....jsonl",
+    "cwd": "/data/data/com.termux/files/home/projects/wuxianpi/runtime",
+    "isRunning": false,
+    "isIdle": true,
+    "assistantId": "main",
+    "workspaceId": "wuxianpi-project",
+    "workspaceName": "WuxianPi",
+    "ownershipState": "bound"
+  }
+}
+```
+
+Session list, history, status, and snapshot responses expose the same ownership
+fields. Sessions created directly by Pi have no SQLite binding and return:
+
+```json
+{
+  "assistantId": null,
+  "workspaceId": null,
+  "ownershipState": "unbound"
+}
+```
+
+WuxianPi never derives Assistant ownership from `cwd`. Fork and new-session
+operations inherit the source binding; existing bindings cannot be reassigned
+to another Assistant or Workspace.
+
+## Functional-assistant bindings
+
+`GET /api/web/v1/packages/bindings/:assistantId` returns the Assistant's active
+contribution IDs, experience spaces, and functional-assistant settings:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "binding": {
+      "assistantId": "main",
+      "enabledContributionIds": ["io.example.ops/assistant.ops"],
+      "experienceSpaces": {},
+      "functionalAssistants": {
+        "io.example.ops/assistant.ops": { "sharingMode": "hybrid" }
+      },
+      "updatedAt": "2026-08-04T12:00:00.000Z"
+    }
+  }
+}
+```
+
+Functional assistants are stateful Skills, not independent Pi sessions. Valid
+sharing modes are `isolated`, `shared`, and `hybrid`; new bindings default to
+`hybrid`. Package code is installed once. State is retained across Package
+updates, binding removal, and ordinary uninstall. A Package uninstall with
+`?purgeData=true` explicitly deletes its mutable data and functional-assistant
+state.
+
 ## Model setup endpoints
 
 The Android model UI and WuxianPi Web use the same Runtime-owned model setup
@@ -39,18 +218,6 @@ service:
 | `POST` | `/api/web/v1/models/fetch` | Discover models from an unsaved draft |
 | `POST` | `/api/web/v1/models/test` | Test a saved model or unsaved draft without applying it |
 | `POST` | `/api/web/v1/models/apply` | Validate and atomically apply model setup |
-
-Responses use the existing envelope:
-
-```json
-{ "ok": true, "data": {} }
-```
-
-Errors use an HTTP error status and:
-
-```json
-{ "ok": false, "error": { "code": "...", "message": "..." } }
-```
 
 The Runtime remains the authority for provider definitions, API keys, model
 registry reloads, and global defaults. Android may store named

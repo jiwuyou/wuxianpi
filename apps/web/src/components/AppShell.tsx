@@ -1,9 +1,8 @@
 "use client";
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Store } from "lucide-react";
-import type { AssistantSummary, CapabilityCatalog, GlobalWuxianPiConfigV1, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
-import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
+import { FolderKanban, Store } from "lucide-react";
+import type { AssistantSummary, CapabilityCatalog, GlobalWuxianPiConfigV1, WebExtensionSummary, Workspace } from "@/lib/wuxianpi/contracts";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import { useRuntimeDeploymentSync } from "@/hooks/useRuntimeDeploymentSync";
 import { useTheme } from "@/hooks/useTheme";
@@ -20,6 +19,7 @@ import {
   importAssistant,
   isUnavailableError,
   listAssistants,
+  listWorkspaces,
   listWebExtensions,
   setAssistantArchived,
 } from "./wuxianpi/api";
@@ -28,13 +28,14 @@ const ModelsConfig = lazy(() => import("./ModelsConfig").then((module) => ({ def
 const AssistantEditor = lazy(() => import("./wuxianpi/AssistantEditor").then((module) => ({ default: module.AssistantEditor })));
 const CapabilityCenter = lazy(() => import("./wuxianpi/CapabilityCenter").then((module) => ({ default: module.CapabilityCenter })));
 const Marketplace = lazy(() => import("./wuxianpi/Marketplace").then((module) => ({ default: module.Marketplace })));
+const WorkspaceManager = lazy(() => import("./wuxianpi/WorkspaceManager").then((module) => ({ default: module.WorkspaceManager })));
 const BranchNavigator = lazy(() => import("./BranchNavigator").then((module) => ({ default: module.BranchNavigator })));
 
 const LAST_SESSION_KEY = "wuxianpi:last-session-id";
 const LAST_ASSISTANT_KEY = "wuxianpi:last-assistant-id";
 const DEFAULT_ASSISTANT_ID = "wuxianpi";
 
-type PanelView = "assistants" | "capabilities" | "marketplace" | "settings" | null;
+type PanelView = "assistants" | "workspaces" | "capabilities" | "marketplace" | "settings" | null;
 type ShellOverlayContext = {
   panel: PanelView;
   l1Open: boolean;
@@ -77,28 +78,23 @@ function formatTime(value?: string): string {
   return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
 }
 
-function virtualAssistant(cwd: string, sessions: SessionInfo[]): AssistantSummary {
-  const encoded = encodeURIComponent(cwd).replace(/%/g, "").slice(-40) || "default";
-  const latest = [...sessions].sort((a, b) => b.modified.localeCompare(a.modified))[0];
-  return {
-    id: `legacy-${encoded}`,
-    path: cwd,
-    manifest: {
-      schemaVersion: WUXIANPI_SCHEMA_VERSION,
-      name: basename(cwd) || "通用助手",
-      description: "旧版工作区会话（兼容模式）",
-      model: "inherit",
-      tools: "inherit",
-    },
-    sessionCount: sessions.length,
-    lastActiveAt: latest?.modified,
-    diagnostics: [{ level: "info", code: "LEGACY_WORKSPACE", message: "该工作区尚未转换为助手目录" }],
-  };
+export function groupSessionsByAssistant(assistants: AssistantSummary[], sessions: SessionInfo[]) {
+  const map = new Map<string, SessionInfo[]>(assistants.map((assistant) => [assistant.id, []]));
+  const unbound: SessionInfo[] = [];
+  const unavailable: SessionInfo[] = [];
+  for (const session of sessions) {
+    if (session.ownershipState === "unbound" || !session.assistantId) unbound.push(session);
+    else if (map.has(session.assistantId)) map.get(session.assistantId)?.push(session);
+    else unavailable.push(session);
+  }
+  for (const items of [...map.values(), unbound, unavailable]) items.sort((a, b) => b.modified.localeCompare(a.modified));
+  return { map, unbound, unavailable };
 }
 
-function rememberChat(assistantId: string, sessionId: string | null) {
+function rememberChat(assistantId: string | null, sessionId: string | null) {
   try {
-    localStorage.setItem(LAST_ASSISTANT_KEY, assistantId);
+    if (assistantId) localStorage.setItem(LAST_ASSISTANT_KEY, assistantId);
+    else localStorage.removeItem(LAST_ASSISTANT_KEY);
     if (sessionId) localStorage.setItem(LAST_SESSION_KEY, sessionId);
     else localStorage.removeItem(LAST_SESSION_KEY);
   } catch {
@@ -113,11 +109,13 @@ export function AppShell() {
   useRuntimeDeploymentSync();
   const [assistants, setAssistants] = useState<AssistantSummary[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [extensions, setExtensions] = useState<WebExtensionSummary[]>([]);
   const [catalog, setCatalog] = useState<CapabilityCatalog | null>(null);
   const [globalConfig, setGlobalConfig] = useState<GlobalWuxianPiConfigV1 | null>(null);
   const [selectedAssistant, setSelectedAssistant] = useState<AssistantSummary | null>(null);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [chatKey, setChatKey] = useState(0);
   const [initialPrompt, setInitialPrompt] = useState<string | null>(null);
   const [editorAssistant, setEditorAssistant] = useState<AssistantSummary | null | undefined>(undefined);
@@ -151,24 +149,25 @@ export function AppShell() {
     setLoading(true);
     setError(null);
     try {
-      const loadedSessions = await loadSessions();
+      await loadSessions();
       try {
-        const [assistantList, capabilityCatalog, config, extensionList] = await Promise.all([
+        const [assistantList, capabilityCatalog, config, extensionList, workspaceList] = await Promise.all([
           listAssistants({ includeArchived: true }),
           getCapabilityCatalog(),
           getGlobalConfig(),
           listWebExtensions(),
+          listWorkspaces({ includeArchived: true }),
         ]);
         setAssistants(assistantList);
         setCatalog(capabilityCatalog);
         setGlobalConfig(config);
         setExtensions(extensionList);
+        setWorkspaces(workspaceList);
         setPlatformUnavailable(false);
       } catch (reason) {
         if (!isUnavailableError(reason)) throw reason;
-        const byCwd = new Map<string, SessionInfo[]>();
-        for (const session of loadedSessions) byCwd.set(session.cwd, [...(byCwd.get(session.cwd) ?? []), session]);
-        setAssistants([...byCwd.entries()].map(([cwd, items]) => virtualAssistant(cwd, items)));
+        setAssistants([]);
+        setWorkspaces([]);
         setPlatformUnavailable(true);
       }
     } catch (reason) {
@@ -186,19 +185,7 @@ export function AppShell() {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
-  const sessionsByAssistant = useMemo(() => {
-    const map = new Map<string, SessionInfo[]>();
-    for (const assistant of assistants) map.set(assistant.id, []);
-    const legacy: SessionInfo[] = [];
-    for (const session of sessions) {
-      const owner = assistants.find((assistant) => assistant.path === session.cwd);
-      if (owner) map.get(owner.id)?.push(session);
-      else legacy.push(session);
-    }
-    for (const items of map.values()) items.sort((a, b) => b.modified.localeCompare(a.modified));
-    legacy.sort((a, b) => b.modified.localeCompare(a.modified));
-    return { map, legacy };
-  }, [assistants, sessions]);
+  const sessionsByAssistant = useMemo(() => groupSessionsByAssistant(assistants, sessions), [assistants, sessions]);
 
   const visibleAssistants = useMemo(() => assistants
     .filter((assistant) => includeArchived || !assistant.manifest.archived)
@@ -211,16 +198,20 @@ export function AppShell() {
 
   const defaultAssistant = useMemo(() => {
     return assistants.find((item) => item.id === DEFAULT_ASSISTANT_ID && !item.manifest.archived)
-      ?? assistants.find((item) => !item.id.startsWith("legacy-") && !item.manifest.archived)
+      ?? assistants.find((item) => !item.manifest.archived)
       ?? assistants[0]
       ?? null;
   }, [assistants]);
 
-  const openNewChat = useCallback((assistant: AssistantSummary, prompt?: string) => {
+  const openNewChat = useCallback((assistant: AssistantSummary, prompt?: string, workspaceId: string | null = null) => {
+    const activeWorkspaceId = workspaceId && workspaces.some((workspace) => workspace.id === workspaceId && !workspace.archived)
+      ? workspaceId
+      : null;
     setBranchTree([]);
     setBranchActiveLeafId(null);
     setSelectedAssistant(assistant);
     setSelectedSession(null);
+    setSelectedWorkspaceId(activeWorkspaceId);
     setInitialPrompt(prompt ?? null);
     setChatKey((key) => key + 1);
     rememberChat(assistant.id, null);
@@ -228,23 +219,23 @@ export function AppShell() {
     setL2Open(false);
     setL1Open(false);
     setPanel(null);
-  }, [router]);
+  }, [router, workspaces]);
 
   const openSession = useCallback((session: SessionInfo) => {
     setBranchTree([]);
     setBranchActiveLeafId(null);
-    const owner = assistants.find((assistant) => assistant.path === session.cwd)
-      ?? virtualAssistant(session.cwd, sessions.filter((item) => item.cwd === session.cwd));
+    const owner = session.assistantId ? assistants.find((assistant) => assistant.id === session.assistantId) ?? null : null;
     setSelectedAssistant(owner);
     setSelectedSession(session);
+    setSelectedWorkspaceId(session.workspaceId);
     setInitialPrompt(null);
     setChatKey((key) => key + 1);
-    rememberChat(owner.id, session.id);
+    rememberChat(session.assistantId, session.id);
     router.replace(`/?session=${encodeURIComponent(session.id)}`);
     setL2Open(false);
     setL1Open(false);
     setPanel(null);
-  }, [assistants, router, sessions]);
+  }, [assistants, router]);
 
   const openModelsPage = useCallback(() => {
     setModelsReturnContext((current) => current ?? { panel, l1Open, l2Open });
@@ -384,6 +375,16 @@ export function AppShell() {
     return extensions.filter((extension) => extension.enabled && ids.includes(extension.id));
   }, [extensions, globalConfig?.defaults.webExtensions, selectedAssistant]);
 
+  const selectedWorkspace = useMemo(
+    () => selectedWorkspaceId ? workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null : null,
+    [selectedWorkspaceId, workspaces],
+  );
+  const currentWorkspaceName = selectedSession
+    ? selectedSession.workspaceName ?? (selectedSession.workspaceId ? selectedWorkspace?.name ?? "工作区不可用" : "日常对话")
+    : selectedWorkspace?.name ?? "日常对话";
+  const currentAssistantName = selectedAssistant?.manifest.name
+    ?? (selectedSession?.assistantId ? "助手不可用" : selectedSession ? "未归属 Pi 会话" : "WuxianPi");
+
   const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
     setBranchTree(tree);
     setBranchActiveLeafId(activeLeafId);
@@ -395,7 +396,7 @@ export function AppShell() {
     setL1Open(false);
   };
 
-  const hostAssistantId = assistants.find((assistant) => !assistant.id.startsWith("legacy-") && !assistant.manifest.archived)?.id;
+  const hostAssistantId = assistants.find((assistant) => !assistant.manifest.archived)?.id;
   const hostAssistantPath = assistants.find((assistant) => assistant.id === hostAssistantId)?.path;
 
   return (
@@ -409,19 +410,19 @@ export function AppShell() {
           aria-label="打开对话列表"
         >
           <div className="assistant-mini-avatar">
-            {selectedAssistant ? <AssistantAvatarVisual assistant={selectedAssistant} /> : "π"}
+            {selectedAssistant ? <AssistantAvatarVisual assistant={selectedAssistant} /> : selectedSession ? "P" : "π"}
           </div>
           <div className="mobile-chat-title">
-            <strong>{selectedAssistant?.manifest.name ?? "WuxianPi"}</strong>
-            <small>{selectedSession?.name || selectedAssistant?.manifest.description || (loading ? "加载中…" : "开始对话")}</small>
+            <strong>{currentAssistantName}</strong>
+            <small>{selectedSession?.name || currentWorkspaceName || selectedAssistant?.manifest.description || (loading ? "加载中…" : "开始对话")}</small>
           </div>
         </button>
         <button className="icon-button" type="button" onClick={() => { setL2Open(true); setL1Open(false); }} aria-label="对话列表" title="对话列表">≡</button>
         <button
           className="icon-button"
           type="button"
-          onClick={() => setEditorAssistant(selectedAssistant && !selectedAssistant.id.startsWith("legacy-") ? selectedAssistant : undefined)}
-          disabled={!selectedAssistant || selectedAssistant.id.startsWith("legacy-")}
+          onClick={() => setEditorAssistant(selectedAssistant ?? undefined)}
+          disabled={!selectedAssistant}
           aria-label="助手设置"
           title="助手设置"
         >
@@ -441,13 +442,13 @@ export function AppShell() {
       )}
 
       <div className="mobile-chat-body">
-        {error && !selectedAssistant && (
+        {error && !selectedAssistant && !selectedSession && (
           <div className="wuxianpi-state error shell-inline-state">
             <span>{error}</span>
             <button type="button" onClick={() => void loadPlatform()}>重试</button>
           </div>
         )}
-        {!error && !selectedAssistant && (
+        {!error && !selectedAssistant && !selectedSession && (
           <div className="empty-hero shell-chat-empty">
             <div>∞</div>
             <h2>{loading ? "正在准备助手…" : "还没有可用助手"}</h2>
@@ -459,19 +460,27 @@ export function AppShell() {
             )}
           </div>
         )}
-        {selectedAssistant && (
+        {(selectedAssistant || selectedSession) && (
           <ChatWindow
             key={chatKey}
             session={selectedSession}
-            newSessionCwd={selectedSession ? null : selectedAssistant.path}
-            assistantId={selectedAssistant.id.startsWith("legacy-") ? undefined : selectedAssistant.id}
-            assistant={selectedAssistant}
+            newSessionCwd={selectedSession ? null : selectedWorkspace?.rootCwd ?? null}
+            newSessionWorkspaceId={selectedSession ? null : selectedWorkspace?.id ?? null}
+            assistantId={selectedSession ? selectedSession.assistantId ?? undefined : selectedAssistant?.id}
+            assistant={selectedAssistant ?? undefined}
+            workspaceName={currentWorkspaceName}
+            workspaces={workspaces}
+            selectedWorkspaceId={selectedSession ? selectedSession.workspaceId : selectedWorkspaceId}
+            onWorkspaceChange={selectedSession ? undefined : (workspaceId) => {
+              setSelectedWorkspaceId(workspaceId);
+              setChatKey((key) => key + 1);
+            }}
             webExtensions={selectedExtensions}
             defaultTts={globalConfig?.defaults.tts}
             onAgentEnd={() => void loadSessions()}
             onSessionCreated={(session) => {
               setSelectedSession(session);
-              rememberChat(selectedAssistant.id, session.id);
+              rememberChat(session.assistantId, session.id);
               router.replace(`/?session=${encodeURIComponent(session.id)}`);
               void loadSessions();
             }}
@@ -483,7 +492,7 @@ export function AppShell() {
             }}
             chatInputRef={chatInputRef}
             initialPrompt={initialPrompt}
-            initialPromptKey={initialPrompt ? `${selectedAssistant.id}:${initialPrompt}` : null}
+            initialPromptKey={initialPrompt ? `${selectedAssistant?.id ?? selectedSession?.assistantId ?? "unbound"}:${initialPrompt}` : null}
             onInitialPromptQueued={() => setInitialPrompt(null)}
             onOpenModelsConfig={openModelsPage}
             onBranchDataChange={handleBranchDataChange}
@@ -509,19 +518,20 @@ export function AppShell() {
               <strong>{selectedAssistant.manifest.name}</strong>
               <small>当前助手</small>
             </div>
-            <button type="button" className="secondary-button compact" onClick={() => openNewChat(selectedAssistant)}>新对话</button>
+            <button type="button" className="secondary-button compact" onClick={() => openNewChat(selectedAssistant, undefined, selectedSession?.workspaceId ?? selectedWorkspaceId)}>新对话</button>
           </section>
         )}
         <nav className="shell-drawer-nav">
           <button type="button" onClick={() => openPanel("assistants")}><span>∞</span><div><strong>助手库</strong><small>创建、编辑、导入导出</small></div><em>›</em></button>
           <button type="button" onClick={() => { setL2Open(true); setL1Open(false); }}><span>◌</span><div><strong>全部对话</strong><small>按助手分组的历史列表</small></div><em>›</em></button>
+          <button type="button" onClick={() => openPanel("workspaces")}><span><FolderKanban size={18} /></span><div><strong>工作区</strong><small>项目路径、指令与记忆</small></div><em>›</em></button>
           <button type="button" onClick={() => openPanel("capabilities")}><span>⌁</span><div><strong>能力中心</strong><small>模型默认、工具、MCP、TTS</small></div><em>›</em></button>
           <button type="button" onClick={() => openPanel("marketplace")}><span><Store size={18} /></span><div><strong>WuxianPi 市场</strong><small>Package、更新与助手绑定</small></div><em>›</em></button>
           <button type="button" onClick={() => openPanel("settings")}><span>⚙</span><div><strong>设置</strong><small>主题、模型服务、运行信息</small></div><em>›</em></button>
         </nav>
         <footer className="shell-drawer-footer">
           <small>v{import.meta.env.VITE_APP_VERSION ?? "0.1.0"} · Pi {import.meta.env.VITE_PI_VERSION ?? "?"}</small>
-          <span className={`status-pill ${platformUnavailable ? "warning" : "success"}`}>{platformUnavailable ? "兼容模式" : "在线"}</span>
+          <span className={`status-pill ${platformUnavailable ? "warning" : "success"}`}>{platformUnavailable ? "助手服务不可用" : "在线"}</span>
         </footer>
       </aside>
 
@@ -565,7 +575,7 @@ export function AppShell() {
         <div className="shell-panel-layer" role="dialog" aria-modal="true">
           <header className="shell-panel-header">
             <button type="button" className="icon-button" onClick={() => setPanel(null)} aria-label="返回">‹</button>
-            <strong>{panel === "assistants" ? "助手库" : panel === "capabilities" ? "能力中心" : panel === "marketplace" ? "WuxianPi 市场" : "设置"}</strong>
+            <strong>{panel === "assistants" ? "助手库" : panel === "workspaces" ? "工作区" : panel === "capabilities" ? "能力中心" : panel === "marketplace" ? "WuxianPi 市场" : "设置"}</strong>
             <span className="shell-panel-header-spacer" />
           </header>
           <div className="shell-panel-body">
@@ -601,6 +611,14 @@ export function AppShell() {
                   onConfigChanged={setGlobalConfig}
                   onOpenModels={openModelsPage}
                 />
+              </Suspense>
+            )}
+            {panel === "workspaces" && (
+              <Suspense fallback={<div className="wuxianpi-state">正在加载工作区…</div>}>
+                <WorkspaceManager workspaces={workspaces} onChanged={(next) => {
+                  setWorkspaces(next);
+                  if (selectedWorkspaceId && !next.some((workspace) => workspace.id === selectedWorkspaceId)) setSelectedWorkspaceId(null);
+                }} />
               </Suspense>
             )}
             {panel === "marketplace" && (
@@ -641,6 +659,8 @@ export function AppShell() {
             catalog={catalog}
             config={globalConfig}
             onClose={() => setEditorAssistant(undefined)}
+            onManageWorkspaces={() => { setEditorAssistant(undefined); setPanel("workspaces"); }}
+            onOpenMarketplace={() => { setEditorAssistant(undefined); setPanel("marketplace"); }}
             onSaved={(assistant) => {
               setAssistants((current) => [assistant, ...current.filter((item) => item.id !== assistant.id)]);
               if (selectedAssistant?.id === assistant.id || !selectedAssistant) setSelectedAssistant(assistant);
@@ -668,7 +688,7 @@ function ConversationDrawer({
   onNew,
 }: {
   assistants: AssistantSummary[];
-  grouped: { map: Map<string, SessionInfo[]>; legacy: SessionInfo[] };
+  grouped: { map: Map<string, SessionInfo[]>; unbound: SessionInfo[]; unavailable: SessionInfo[] };
   activeSessionId: string | null;
   onOpen: (session: SessionInfo) => void;
   onNew: (assistant: AssistantSummary) => void;
@@ -684,7 +704,7 @@ function ConversationDrawer({
       return bTime.localeCompare(aTime);
     });
 
-  if (groups.every((group) => group.sessions.length === 0) && grouped.legacy.length === 0) {
+  if (groups.every((group) => group.sessions.length === 0) && grouped.unbound.length === 0 && grouped.unavailable.length === 0) {
     return (
       <div className="empty-hero shell-drawer-empty">
         <div>◌</div>
@@ -719,20 +739,29 @@ function ConversationDrawer({
           </div>
         </section>
       ))}
-      {grouped.legacy.length > 0 && (
+      {grouped.unbound.length > 0 && (
         <section>
           <header>
-            <div className="assistant-mini-avatar muted">L</div>
+            <div className="assistant-mini-avatar muted">P</div>
             <div>
-              <strong>旧版工作区</strong>
-              <small>{grouped.legacy.length} 个未归属对话</small>
+              <strong>未归属 Pi 会话</strong>
+              <small>{grouped.unbound.length} 个对话 · 只能继续原会话</small>
             </div>
           </header>
           <div>
-            {grouped.legacy.map((session) => (
+            {grouped.unbound.map((session) => (
               <ConversationRow key={session.id} session={session} active={session.id === activeSessionId} onOpen={onOpen} />
             ))}
           </div>
+        </section>
+      )}
+      {grouped.unavailable.length > 0 && (
+        <section>
+          <header>
+            <div className="assistant-mini-avatar muted">!</div>
+            <div><strong>助手不可用</strong><small>{grouped.unavailable.length} 个历史对话</small></div>
+          </header>
+          <div>{grouped.unavailable.map((session) => <ConversationRow key={session.id} session={session} active={session.id === activeSessionId} onOpen={onOpen} />)}</div>
         </section>
       )}
     </div>
@@ -740,11 +769,13 @@ function ConversationDrawer({
 }
 
 function ConversationRow({ session, active, onOpen }: { session: SessionInfo; active?: boolean; onOpen: (session: SessionInfo) => void }) {
+  const scope = session.workspaceName
+    ?? (session.workspaceId ? basename(session.cwd) || "工作区" : session.ownershipState === "unbound" ? basename(session.cwd) || "Pi 会话" : "日常对话");
   return (
     <button type="button" className={`conversation-row ${active ? "active" : ""}`} onClick={() => onOpen(session)}>
       <span>
         <strong>{session.name || session.firstMessage || "新对话"}</strong>
-        <small>{basename(session.cwd)} · {session.messageCount} 条消息</small>
+        <small>{scope} · {session.messageCount} 条消息</small>
       </span>
       <time>{formatTime(session.modified)}</time>
       <em>›</em>
@@ -802,7 +833,7 @@ function AssistantsPanel({
       </div>
       {platformUnavailable && (
         <div className="wuxianpi-state warning">
-          <span>助手 API 尚未启用，当前以兼容模式展示旧工作区。聊天仍然可用。</span>
+          <span>助手服务当前不可用。已有 Pi 会话仍可从对话列表打开，但不能创建新的未归属会话。</span>
         </div>
       )}
       {loading && <AssistantSkeleton />}
@@ -841,14 +872,12 @@ function AssistantsPanel({
                 ))}
               </div>
             )}
-            {!assistant.id.startsWith("legacy-") && (
-              <div className="assistant-card-actions">
-                <button type="button" onClick={() => onEdit(assistant)}>编辑</button>
-                <button type="button" onClick={() => onClone(assistant)}>复制</button>
-                <button type="button" onClick={() => onExport(assistant)}>导出</button>
-                <button type="button" onClick={() => onArchive(assistant)}>{assistant.manifest.archived ? "恢复" : "归档"}</button>
-              </div>
-            )}
+            <div className="assistant-card-actions">
+              <button type="button" onClick={() => onEdit(assistant)}>编辑</button>
+              <button type="button" onClick={() => onClone(assistant)}>复制</button>
+              <button type="button" onClick={() => onExport(assistant)}>导出</button>
+              <button type="button" onClick={() => onArchive(assistant)}>{assistant.manifest.archived ? "恢复" : "归档"}</button>
+            </div>
           </article>
         ))}
       </div>
@@ -915,7 +944,7 @@ function SettingsPage({
               <small>WuxianPi v{import.meta.env.VITE_APP_VERSION ?? "0.1.0"} · Pi v{import.meta.env.VITE_PI_VERSION ?? "unknown"}</small>
             </div>
             <span className={`status-pill ${platformUnavailable ? "warning" : "success"}`}>
-              {platformUnavailable ? "兼容模式" : "能力层在线"}
+              {platformUnavailable ? "助手服务不可用" : "能力层在线"}
             </span>
           </header>
         </section>

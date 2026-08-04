@@ -117,7 +117,13 @@ describe("WuxianPi Marketplace", () => {
       await client.updateManagedPackage("io.example", "rel_2"),
       await client.setPackageContribution("io.example", "io.example/skill.main", false),
       await client.commitPackageChanges("io.example", "fix: local workflow"),
-      await client.setPackageAssistantBinding("io.example", "coding", ["io.example/skill.main"], { "io.example/experience.main": "main.shared" }),
+      await client.setPackageAssistantBinding(
+        "io.example",
+        "coding",
+        ["io.example/skill.main"],
+        { "io.example/experience.main": "main.shared" },
+        { "io.example/assistant.reviewer": { sharingMode: "isolated" } },
+      ),
       await client.uninstallManagedPackage("io.example", true),
     ];
 
@@ -134,6 +140,7 @@ describe("WuxianPi Marketplace", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[4]?.[1] as RequestInit).body))).toEqual({
       enabledContributionIds: ["io.example/skill.main"],
       experienceSpaces: { "io.example/experience.main": "main.shared" },
+      functionalAssistants: { "io.example/assistant.reviewer": { sharingMode: "isolated" } },
     });
     expect(results.every((result) => result.status === "queued")).toBe(true);
     expect(results[0]).toMatchObject({ packageName: "Example", summary: "queued", events: operation.events });
@@ -207,11 +214,45 @@ describe("WuxianPi Marketplace", () => {
       assistantId: "coding",
       enabledContributionIds: ["io.other/skill.existing", "io.example/skill.main"],
       experienceSpaces: { "io.other/experience.main": "other.shared" },
+      functionalAssistants: {
+        "io.example/assistant.reviewer": { sharingMode: "shared" },
+        "invalid-mode": { sharingMode: "global" },
+      },
       updatedAt: "2026-07-31T00:00:00Z",
     } } })));
     const binding = await new WebApiClient().packageAssistantBinding("coding");
     expect(binding.enabledContributionIds).toContain("io.other/skill.existing");
+    expect(binding.functionalAssistants).toEqual({ "io.example/assistant.reviewer": { sharingMode: "shared" } });
     expect(fetch).toHaveBeenCalledWith("/api/web/v1/packages/bindings/coding", expect.any(Object));
+  });
+
+  it("preserves functional assistant sharing when an existing caller omits that field", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ ok: true, data: { binding: {
+        assistantId: "coding",
+        enabledContributionIds: ["io.example/skill.main"],
+        experienceSpaces: {},
+        functionalAssistants: { "io.example/assistant.reviewer": { sharingMode: "hybrid" } },
+      } } }))
+      .mockResolvedValueOnce(json({ ok: true, data: { operationId: "op_1", packageId: "io.example", type: "bind", status: "queued" } }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new WebApiClient().setPackageAssistantBinding(
+      "io.example",
+      "coding",
+      ["io.example/skill.main"],
+      { "io.example/experience.main": "main.shared" },
+    );
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/web/v1/packages/bindings/coding",
+      "/api/web/v1/packages/bindings/coding",
+    ]);
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+      enabledContributionIds: ["io.example/skill.main"],
+      experienceSpaces: { "io.example/experience.main": "main.shared" },
+      functionalAssistants: { "io.example/assistant.reviewer": { sharingMode: "hybrid" } },
+    });
   });
 
   it("matches the frozen publisher submission metadata contract", async () => {

@@ -2,110 +2,115 @@
 
 [中文文档](./README.zh-CN.md)
 
-WuxianPi is a mobile-first personal assistant workspace powered by [Pi](https://github.com/badlogic/pi-mono). It keeps Pi runtime and JSONL session compatibility while adding assistant directories, role definitions, a global capability center, TTS, MCP, permissions, and sandboxed HTML WebUI extensions.
+WuxianPi is a mobile-first personal assistant workspace powered by
+[Pi](https://github.com/badlogic/pi-mono). Pi remains an unmodified upstream
+runtime: WuxianPi adds assistant profiles, Workspace orchestration, capability
+selection, TTS, MCP, permissions, Packages, and sandboxed HTML WebUI extensions
+without changing Pi's SDK, source, or native JSONL session format.
 
-See [`docs/PRODUCT.md`](./docs/PRODUCT.md) for the product boundary and implementation direction. Pi remains an unmodified upstream runtime.
+See [`docs/PRODUCT.md`](./docs/PRODUCT.md) for the product boundary and
+[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the runtime model.
 
-![Pi Web shows the same pi session with structured Markdown, tool calls, and project navigation beside the CLI](./docs/screenshot2.png)
-
-The project is derived from `jiwuyou/pi-web`; Pi remains an unmodified upstream dependency.
+![Pi Web shows the same Pi session with structured Markdown, tool calls, and project navigation beside the CLI](./docs/screenshot2.png)
 
 ## Quick Start
-
-Run from source:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Then open [http://localhost:30141](http://localhost:30141). The CLI will try to open the browser automatically after the server is ready.
-
-**Options:**
+Open [http://localhost:30141](http://localhost:30141). The CLI attempts to open
+the browser after the server is ready.
 
 ```bash
-wuxianpi --port 8080              # custom port
-wuxianpi --hostname 127.0.0.1     # local access only
-wuxianpi -p 8080 -H 127.0.0.1     # combine options
-
-PORT=8080 wuxianpi                # environment variable is also supported
+wuxianpi --port 8080
+wuxianpi --hostname 127.0.0.1
+wuxianpi -p 8080 -H 127.0.0.1
+PORT=8080 wuxianpi
 ```
+
+The Runtime Profile store uses `node:sqlite`; production and development
+require Node.js `>=22.19.0`.
+
+## Core Model
+
+- **Main Assistant**: the user-facing equivalent of a Profile. It owns identity,
+  long-term memory, defaults, permissions, and capability bindings.
+- **Workspace**: a registered execution root with independent instructions and
+  memory. `assistantId` is independent from `workspaceId` and `cwd`.
+- **Session**: Pi owns the native JSONL conversation. WuxianPi stores only its
+  Assistant/Workspace ownership in `state.sqlite`.
+- **Functional assistant**: a stateful Skill bundle. A Package is installed once,
+  while its mutable state is stored separately using `isolated`, `shared`, or
+  `hybrid` access.
+
+The Web UI uses the terms Assistant and Workspace; it does not expose a second
+"Profile" product concept.
 
 ## Features
 
-- **One directory per assistant**: keep role, memory, workspace notes, knowledge, and assistant-local Pi resources together; create, copy, archive, import, and export them.
-- **Mobile-first chat**: assistant cards, bottom navigation, virtualized messages, batched streaming, lazy code highlighting, and collapsed tool results.
-- **Global capability center**: configure models, tools, Skills, MCP, TTS, WebUI extensions, permissions, and the optional Ubuntu worker once, then select or override them per assistant.
-- **Role/capability separation**: disabling every tool does not remove `AGENTS.md`, memory, or workspace context.
-- **Speech output**: browser speech, Termux Android TTS, and OpenAI-compatible/HTTP providers with preview, auto-speak, and cancellation.
-- **Extension compatibility**: Pi Extension UI mapping plus rich sandboxed iframe contributions protected by CSP, nonces, and granular bridge permissions.
-- **Pi compatibility**: existing JSONL sessions, forks, in-session branches, SSE reconnect, compaction, model configuration, Skills, and file preview remain available.
+- **Assistant-first chat** with mobile navigation, virtualized messages, batched
+  streaming, lazy code highlighting, and collapsed tool results.
+- **Explicit session ownership** so two Assistants can use the same Workspace
+  without sharing identity, memory, or capability bindings.
+- **Workspace registry** with a real `rootCwd`, `INSTRUCTIONS.md`, and
+  `MEMORY.md`; `WORKSPACES.md` inside an Assistant is not authoritative.
+- **Global capability center** for models, tools, Skills, MCP, TTS, WebUI
+  extensions, permissions, and the optional Ubuntu worker.
+- **Stateful functional assistants** installed once and bound to one or more Main
+  Assistants without copying Package code or dependencies.
+- **Pi compatibility** for existing JSONL sessions, forks, in-session branches,
+  SSE reconnect, compaction, model configuration, Skills, and file preview.
 
-## Notes
+## Data Layout
 
-- **Data directory**: WuxianPi reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
-- **Assistant directory**: assistants live at `~/.pi/agent/assistants/<assistant-id>` by default.
-- **Session files**: files are stored as `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
-- **Model config**: the Models panel reads and writes `models.json` in the pi agent directory. Model lists and defaults come from pi's config.
-- **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.
-- **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
+```text
+~/.pi/agent/
+├── assistants/<assistant-id>/
+│   ├── assistant.json
+│   ├── AGENTS.md
+│   ├── MEMORY.md
+│   └── knowledge/
+├── sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl
+└── wuxianpi/
+    ├── USER.md
+    ├── state.sqlite
+    ├── workspaces/<workspace-id>/
+    │   ├── INSTRUCTIONS.md
+    │   └── MEMORY.md
+    └── package-manager/functional-assistants/<function-id>/
+        ├── shared/
+        └── profiles/<assistant-id>/
+```
+
+Sessions created directly by Pi may have no WuxianPi binding. They remain
+visible as `ownershipState: "unbound"`; WuxianPi does not infer ownership from
+their `cwd`.
+
+Set `PI_CODING_AGENT_DIR` to use another Pi agent directory.
 
 ## Development
 
 ```bash
 npm install
-npm run dev
+npm run runtime:test
+npm run web:test
+npm run product:check
+npm run runtime:build
+npm run web:build
 ```
-
-The local dev server runs at [http://localhost:30141](http://localhost:30141).
-
-Common checks:
-
-```bash
-node_modules/.bin/tsc --noEmit
-npm run lint
-```
-
-Avoid running `next build` / `npm run build` during local development. It writes to `.next/` and can interfere with the dev server; leave builds for release work.
 
 ## Project Structure
 
 ```text
-app/
-  api/
-    agent/          # creates/drives AgentSession and exposes SSE events
-    auth/           # OAuth and API key management
-    cwd/validate/   # custom working directory validation
-    default-cwd/    # pi default working directory lookup
-    files/          # file listing, reading, preview, and watching
-    home/           # current user home directory
-    models/         # available models, default model, thinking levels
-    models-config/  # read/write models.json and test models
-    sessions/       # session reads, rename, delete, context, HTML export
-    skills/         # skill listing, search, install, enable/disable
-components/
-  AppShell.tsx        # main layout, URL state, top panels, file tabs
-  SessionSidebar.tsx  # project selector, session tree, Explorer
-  ChatWindow.tsx      # messages, SSE, image drag/drop, minimap
-  ChatInput.tsx       # input bar, model/tools/thinking/compact/slash controls
-  MessageView.tsx     # message, thinking, tool call/result rendering
-  ModelsConfig.tsx    # model and auth configuration panel
-  SkillsConfig.tsx    # skill management panel
-  FileExplorer.tsx    # file tree
-  FileViewer.tsx      # source, diff, image, audio, PDF, DOCX preview
-lib/
-  rpc-manager.ts      # AgentSessionWrapper lifecycle and global registry
-  session-reader.ts   # parses .jsonl session files and branch contexts
-  normalize.ts        # normalizes toolCall field names
-  file-access.ts      # file read safety boundary
-  file-paths.ts       # path encoding and relative path helpers
-  markdown.ts         # Markdown/Mermaid/KaTeX plugin configuration
-  pi-types.ts         # pi-related types
-hooks/
-  useAgentSession.ts  # session loading, command sending, SSE state machine
-  useAudio.ts         # completion sound
-  useDragDrop.ts      # image drag/drop
-  useTheme.ts         # theme switching
-bin/
-  wuxianpi.js         # npm CLI entrypoint
+apps/web/                     # production mobile Web UI
+runtime/wuxianpi-node/        # Runtime, Pi adapter, sessions, Profiles, Workspaces
+packages/contracts/           # stable HTTP, Package, Hub, and host contracts
+packages/sdk/                 # extension and integration SDKs
+apps/hub/                     # WuxianPi Hub catalog and governance service
+docs/                         # product, architecture, deployment, and Package docs
 ```
+
+The root-level legacy Next.js paths are not the production Profile/Workspace
+implementation.

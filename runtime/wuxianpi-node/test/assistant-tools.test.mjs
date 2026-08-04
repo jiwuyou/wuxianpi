@@ -28,7 +28,10 @@ test("selecting an MCP server activates the adapter tool", async (t) => {
   const services = new WebServices({
     agentDir,
     mcpConfigPath: join(agentDir, "mcp.json"),
-    registry: { list: async () => ({ sessions: [] }) },
+    registry: {
+      list: async () => ({ sessions: [] }),
+      assistantSessionSummary: () => ({ sessionCount: 0 }),
+    },
   });
   await services.createAssistant({
     id: "mcp-user",

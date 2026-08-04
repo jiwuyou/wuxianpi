@@ -1,3 +1,5 @@
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+
 export type PackageCategory =
   | "app"
   | "assistant"
@@ -190,7 +192,26 @@ export interface AssistantPackageBinding {
   assistantId: string;
   enabledContributionIds: string[];
   experienceSpaces: Record<string, string>;
+  functionalAssistants: Record<string, FunctionalAssistantBindingSettings>;
   updatedAt: string;
+}
+
+export type FunctionalAssistantSharingMode = "isolated" | "shared" | "hybrid";
+
+export interface FunctionalAssistantBindingSettings {
+  sharingMode: FunctionalAssistantSharingMode;
+}
+
+export interface ResolvedFunctionalAssistant {
+  functionId: string;
+  packageId: string;
+  name: string;
+  description?: string;
+  sharingMode: FunctionalAssistantSharingMode;
+  defaultBindingIds: string[];
+  resolvedContributionIds: string[];
+  sharedStatePath: string;
+  profileStatePath: string;
 }
 
 export interface PackageManagerState {
@@ -221,6 +242,9 @@ export interface ResolvedAssistantPackageResources {
   appendSystemPrompt: string[];
   mcpServerIds: string[];
   webExtensionIds: string[];
+  resolvedContributionIds: string[];
+  functionalAssistants: ResolvedFunctionalAssistant[];
+  customTools: ToolDefinition[];
   experiences: Array<{
     contributionId: string;
     experienceSpaceId: string;

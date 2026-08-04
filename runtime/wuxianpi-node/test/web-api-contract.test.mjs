@@ -8,7 +8,8 @@ import { createRuntimeServer } from "../dist/server.js";
 test("AI Web contract covers session controls and complete snapshots", { timeout: 30_000 }, async (t) => {
   const fixture = await startFixture(t, "session-contract");
   const created = await jsonFetch(`${fixture.base}/api/web/v1/sessions`, {
-    method: "POST", headers: jsonHeaders, body: JSON.stringify({ cwd: fixture.root, toolNames: ["read"], thinkingLevel: "low" }),
+    method: "POST", headers: jsonHeaders,
+    body: JSON.stringify({ assistantId: "wuxianpi", cwd: fixture.root, toolNames: ["read"], thinkingLevel: "low" }),
   });
   const sessionId = created.data.sessionId;
   const slot = await fixture.server.registry.getOrOpen(sessionId);
@@ -33,6 +34,8 @@ test("AI Web contract covers session controls and complete snapshots", { timeout
   assert.deepEqual(snapshot.data.state.activeToolNames, ["read"]);
   assert.equal(Array.isArray(snapshot.data.state.slashCommands.commands), true);
   assert.equal(typeof snapshot.data.state.sessionStats, "object");
+  assert.equal(snapshot.data.state.assistantId, "wuxianpi");
+  assert.equal(snapshot.data.state.ownershipState, "bound");
 
   const updatedTools = await jsonFetch(`${fixture.base}/api/web/v1/sessions/${sessionId}/tools`, {
     method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ toolNames: ["read", "pi:read", "bash"] }),
@@ -197,6 +200,39 @@ test("assistant lifecycle, capabilities, TTS, MCP adapter status, and extension 
   });
   assert.equal(bridge.data.ok, true);
   assert.equal(bridge.data.result.id, "copied");
+});
+
+test("Package functional assistant bindings and Workspace deletion match the fixed Web contract", { timeout: 30_000 }, async (t) => {
+  const fixture = await startFixture(t, "integration-contract");
+  await jsonFetch(`${fixture.base}/api/web/v1/workspaces`, {
+    method: "POST", headers: jsonHeaders,
+    body: JSON.stringify({ id: "temporary", name: "Temporary", rootCwd: fixture.root }),
+  });
+  const removed = await jsonFetch(`${fixture.base}/api/web/v1/workspaces/temporary`, {
+    method: "DELETE", headers: jsonHeaders,
+  });
+  assert.deepEqual(removed.data, { removed: true });
+  const removedAgain = await jsonFetch(`${fixture.base}/api/web/v1/workspaces/temporary`, {
+    method: "DELETE", headers: jsonHeaders,
+  });
+  assert.deepEqual(removedAgain.data, { removed: false });
+
+  const malformed = await fetch(`${fixture.base}/api/web/v1/packages/bindings/wuxianpi`, {
+    method: "PUT", headers: jsonHeaders,
+    body: JSON.stringify({ enabledContributionIds: [], functionalAssistants: [] }),
+  });
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json()).error.code, "invalid_payload");
+
+  const forwarded = await fetch(`${fixture.base}/api/web/v1/packages/bindings/wuxianpi`, {
+    method: "PUT", headers: jsonHeaders,
+    body: JSON.stringify({
+      enabledContributionIds: [],
+      functionalAssistants: { "io.test.missing/assistant.functional": { sharingMode: "isolated" } },
+    }),
+  });
+  assert.equal(forwarded.status, 400);
+  assert.equal((await forwarded.json()).error.code, "functional_assistant_unbound");
 });
 
 const jsonHeaders = { "content-type": "application/json" };

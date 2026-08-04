@@ -6,8 +6,10 @@ import { boundedInteger, RequestError, stringifyMessage } from "./protocol.js";
 import type { RegistrySessionEvent, SessionRegistry } from "./session-registry.js";
 import { contentType, errorMessage, WebServices } from "./web-services.js";
 import type { WuxianPiPackageManager } from "./package-manager.js";
+import type { FunctionalAssistantBindingSettings } from "./package-types.js";
 import type { BrowserHostRegistry } from "./browser-host-registry.js";
 import type { HubAuth } from "./hub-auth.js";
+import type { WorkspaceContext } from "./profile-types.js";
 
 const API_ROOT = "/api/web/v1";
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
@@ -100,10 +102,54 @@ export class WebApi {
         ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }),
       }) }); return;
     }
+    if (path === "/workspaces" && method === "GET") {
+      const workspaces = await this.options.registry.listWorkspaces(url.searchParams.get("includeArchived") === "true");
+      json(response, 200, { ok: true, data: { workspaces: workspaces.map(workspaceView) } }); return;
+    }
+    if (path === "/workspaces" && method === "POST") {
+      const body = await readJsonBody(request);
+      if (body.archived !== undefined && typeof body.archived !== "boolean") {
+        throw new RequestError("invalid_payload", "archived must be a boolean");
+      }
+      const workspace = await this.options.registry.createWorkspace({
+        ...(optionalString(body, "id") ? { id: optionalString(body, "id") } : {}),
+        name: requireString(body, "name"),
+        rootCwd: requireString(body, "rootCwd"),
+        ...(body.archived === undefined ? {} : { archived: body.archived as boolean }),
+        ...(body.instructions === undefined ? {} : { instructions: optionalText(body, "instructions") }),
+        ...(body.memory === undefined ? {} : { memory: optionalText(body, "memory") }),
+      });
+      json(response, 201, { ok: true, data: { workspace: workspaceView(workspace) } }); return;
+    }
+    const workspaceRoute = /^\/workspaces\/([^/]+)$/.exec(path);
+    if (workspaceRoute) {
+      const id = decodeURIComponent(workspaceRoute[1]!);
+      if (method === "GET") {
+        json(response, 200, { ok: true, data: { workspace: workspaceView(await this.options.registry.getWorkspace(id)) } });
+      } else if (method === "PATCH") {
+        const body = await readJsonBody(request);
+        if (body.archived !== undefined && typeof body.archived !== "boolean") {
+          throw new RequestError("invalid_payload", "archived must be a boolean");
+        }
+        const workspace = await this.options.registry.updateWorkspace(id, {
+          ...(body.name === undefined ? {} : { name: requireString(body, "name") }),
+          ...(body.rootCwd === undefined ? {} : { rootCwd: requireString(body, "rootCwd") }),
+          ...(body.archived === undefined ? {} : { archived: body.archived as boolean }),
+          ...(body.instructions === undefined ? {} : { instructions: optionalText(body, "instructions") }),
+          ...(body.memory === undefined ? {} : { memory: optionalText(body, "memory") }),
+        });
+        json(response, 200, { ok: true, data: { workspace: workspaceView(workspace) } });
+      } else if (method === "DELETE") {
+        json(response, 200, { ok: true, data: { removed: await this.options.registry.removeWorkspace(id) } });
+      } else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
+      return;
+    }
     if (path === "/sessions" && method === "GET") {
       const payload = queryObject(url);
       json(response, 200, { ok: true, data: await this.options.registry.list({
         cwd: url.searchParams.get("cwd") ?? undefined,
+        assistantId: url.searchParams.get("assistantId") ?? undefined,
+        workspaceId: url.searchParams.get("workspaceId") ?? undefined,
         all: url.searchParams.get("all") !== "false",
         offset: boundedInteger(payload, "offset", 0, Number.MAX_SAFE_INTEGER),
         limit: boundedInteger(payload, "limit", 100, 1000),
@@ -111,13 +157,14 @@ export class WebApi {
     }
     if (path === "/sessions" && method === "POST") {
       const body = await readJsonBody(request);
-      let cwd = optionalString(body, "cwd");
-      const assistantId = optionalString(body, "assistantId");
-      const assistant = assistantId ? await this.options.services.getAssistant(assistantId) : undefined;
-      if (assistant) cwd = assistant.path;
+      const assistantId = requireString(body, "assistantId");
+      const workspaceId = optionalString(body, "workspaceId");
+      const assistant = await this.options.services.getAssistant(assistantId);
+      const workspace = workspaceId ? await this.options.registry.getWorkspace(workspaceId) : undefined;
+      const cwd = optionalString(body, "cwd") ?? workspace?.workspace.rootCwd ?? assistant.path;
       const config = await this.options.services.readConfig();
-      const manifest = assistant?.manifest ?? {};
-      const assistantTools = assistantId && body.toolNames === undefined
+      const manifest = assistant.manifest ?? {};
+      const assistantTools = body.toolNames === undefined
         ? await this.options.services.resolveAssistantToolNames(assistantId)
         : undefined;
       const configuredTools = Array.isArray(body.toolNames) ? body.toolNames
@@ -132,7 +179,7 @@ export class WebApi {
       const configuredThinking = optionalString(body, "thinkingLevel")
         ?? (typeof manifest.thinkingLevel === "string" && manifest.thinkingLevel !== "inherit" ? manifest.thinkingLevel : undefined)
         ?? (typeof config.defaults?.thinkingLevel === "string" ? config.defaults.thinkingLevel : undefined);
-      const created = await this.options.registry.create(cwd);
+      const created = await this.options.registry.create({ assistantId, workspaceId, cwd });
       let toolWarnings: unknown[] = [];
       try {
         if (body.toolNames !== undefined && (!Array.isArray(body.toolNames) || !body.toolNames.every((name) => typeof name === "string"))) {
@@ -281,7 +328,10 @@ export class WebApi {
       await this.streamRawFile(request, response, requireQuery(url, "path")); return;
     }
     if (path === "/skills" && method === "GET") {
-      json(response, 200, { ok: true, data: await this.options.services.listSkills(url.searchParams.get("cwd") ?? this.options.services.defaultCwd) }); return;
+      json(response, 200, { ok: true, data: await this.options.services.listSkills(
+        url.searchParams.get("cwd") ?? this.options.services.defaultCwd,
+        url.searchParams.get("assistantId") ?? undefined,
+      ) }); return;
     }
     if (path === "/skills/search" && method === "GET") {
       json(response, 200, { ok: true, data: { packages: await this.options.services.searchPiPackages(requireQuery(url, "q")) } }); return;
@@ -316,7 +366,10 @@ export class WebApi {
     }
     if (path === "/capabilities" && method === "GET") {
       const [catalog, config] = await Promise.all([
-        this.options.services.capabilities(url.searchParams.get("cwd") ?? this.options.services.defaultCwd),
+        this.options.services.capabilities(
+          url.searchParams.get("cwd") ?? this.options.services.defaultCwd,
+          url.searchParams.get("assistantId") ?? undefined,
+        ),
         this.options.services.readConfig(),
       ]);
       json(response, 200, { ok: true, data: { catalog, config } }); return;
@@ -420,9 +473,11 @@ export class WebApi {
           throw new RequestError("invalid_payload", "enabledContributionIds must be an array of strings");
         }
         if (body.experienceSpaces !== undefined && !isRecord(body.experienceSpaces)) throw new RequestError("invalid_payload", "experienceSpaces must be an object");
+        const functionalAssistants = parseFunctionalAssistants(body.functionalAssistants);
         json(response, 200, { ok: true, data: { binding: await this.requirePackageManager().setAssistantBinding(assistantId, {
           enabledContributionIds: body.enabledContributionIds as string[],
           experienceSpaces: body.experienceSpaces as Record<string, string> | undefined,
+          functionalAssistants,
         }) } });
       } else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
       return;
@@ -761,3 +816,30 @@ function requireObject(value: unknown, name: string): Record<string, unknown> {
 function requireQuery(url: URL, name: string): string { const value = url.searchParams.get(name); if (!value) throw new RequestError("invalid_payload", `${name} is required`); return value; }
 function requireString(body: Record<string, unknown>, name: string): string { const value = body[name]; if (typeof value !== "string" || !value.trim()) throw new RequestError("invalid_payload", `${name} must be a non-empty string`); return value; }
 function optionalString(body: Record<string, unknown>, name: string): string | undefined { const value = body[name]; if (value === undefined || value === null || value === "") return undefined; if (typeof value !== "string") throw new RequestError("invalid_payload", `${name} must be a string`); return value; }
+function optionalText(body: Record<string, unknown>, name: string): string { const value = body[name]; if (typeof value !== "string") throw new RequestError("invalid_payload", `${name} must be a string`); return value; }
+function workspaceView(context: WorkspaceContext) {
+  return {
+    id: context.workspace.id,
+    name: context.workspace.name,
+    rootCwd: context.workspace.rootCwd,
+    archived: context.workspace.archived,
+    createdAt: context.workspace.createdAt,
+    updatedAt: context.workspace.updatedAt,
+    instructions: context.instructions,
+    memory: context.memory,
+  };
+}
+
+function parseFunctionalAssistants(value: unknown): Record<string, Partial<FunctionalAssistantBindingSettings>> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new RequestError("invalid_payload", "functionalAssistants must be an object");
+  return Object.fromEntries(Object.entries(value).map(([functionId, settings]) => {
+    if (!isRecord(settings)) {
+      throw new RequestError("invalid_payload", `functionalAssistants.${functionId} must be an object`);
+    }
+    if (settings.sharingMode !== undefined && typeof settings.sharingMode !== "string") {
+      throw new RequestError("invalid_payload", `functionalAssistants.${functionId}.sharingMode must be a string`);
+    }
+    return [functionId, settings as Partial<FunctionalAssistantBindingSettings>];
+  }));
+}

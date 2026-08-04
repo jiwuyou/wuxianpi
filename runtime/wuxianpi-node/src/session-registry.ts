@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   type AgentSession, type AgentSessionEvent, type AgentSessionRuntime, buildSessionContext,
   type CreateAgentSessionRuntimeFactory, createAgentSessionFromServices,
@@ -15,7 +15,11 @@ import { ExtensionUiBridge } from "./extension-ui.js";
 import type { PersistentDiagnostics } from "./diagnostics.js";
 import { ModelSetupService } from "./model-setup-service.js";
 import type { ResolvedAssistantPackageResources } from "./package-types.js";
+import { ProfileContextAssembler } from "./profile-context.js";
+import { ProfileStateStore } from "./profile-state-store.js";
+import type { SessionProfileBinding, WorkspaceContext } from "./profile-types.js";
 import { RequestError } from "./protocol.js";
+import { WorkspaceManager } from "./workspace-manager.js";
 
 export class SerialExecutor {
   private tail: Promise<void> = Promise.resolve();
@@ -46,6 +50,14 @@ function visibleToolNames(names: string[]): string[] {
 
 export interface RuntimeIdentity {
   sessionId: string; sessionPath?: string; cwd: string; isRunning: boolean; isIdle: boolean;
+  assistantId: string | null; workspaceId: string | null; workspaceName?: string;
+  ownershipState: "bound" | "unbound";
+}
+
+export interface CreateSessionInput {
+  assistantId?: string;
+  workspaceId?: string | null;
+  cwd?: string;
 }
 
 export type RuntimeSlot = {
@@ -53,6 +65,9 @@ export type RuntimeSlot = {
   agentStartCount: number; createdAt: Date; closeAfterSettled: boolean; unsubscribe?: () => void;
   ui?: ExtensionUiBridge; reclaimTimer?: NodeJS.Timeout;
   toolSource?: "assistant" | "override";
+  binding: SessionProfileBinding | null;
+  mandatoryPackageToolNames: string[];
+  pendingBindingSource?: SessionProfileBinding | null;
   modelStatus: {
     state: "ready" | "pending" | "invalid";
     provider?: string;
@@ -96,8 +111,12 @@ export class SessionRegistry {
   private readonly modelSettings: SettingsManager;
   private readonly modelSetupService: ModelSetupService;
   private readonly listeners = new Set<EventSink>();
-  private readonly assistantToolsResolver?: (cwd: string) => Promise<string[] | undefined>;
-  private readonly assistantResourcesResolver?: (cwd: string) => Promise<ResolvedAssistantPackageResources | undefined>;
+  private readonly assistantToolsResolver?: (assistantId: string) => Promise<string[] | undefined>;
+  private readonly assistantResourcesResolver?: (assistantId?: string) => Promise<ResolvedAssistantPackageResources | undefined>;
+  private readonly profileStateStore: ProfileStateStore;
+  private readonly workspaceManager: WorkspaceManager;
+  private readonly profileContextAssembler: ProfileContextAssembler;
+  private readonly ownsProfileStateStore: boolean;
   private readonly cardExecutor = new CardExecutor();
   private readonly cardExecutions = new Map<string, AbortController>();
 
@@ -107,8 +126,11 @@ export class SessionRegistry {
     modelRuntime?: ModelRuntime;
     settingsManager?: SettingsManager;
     diagnostics?: PersistentDiagnostics;
-    assistantToolsResolver?: (cwd: string) => Promise<string[] | undefined>;
-    assistantResourcesResolver?: (cwd: string) => Promise<ResolvedAssistantPackageResources | undefined>;
+    assistantToolsResolver?: (assistantId: string) => Promise<string[] | undefined>;
+    assistantResourcesResolver?: (assistantId?: string) => Promise<ResolvedAssistantPackageResources | undefined>;
+    profileStateStore?: ProfileStateStore;
+    workspaceManager?: WorkspaceManager;
+    profileContextAssembler?: ProfileContextAssembler;
   } = {}) {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 5 * 60_000;
     this.agentDir = options.agentDir ?? getAgentDir();
@@ -128,6 +150,19 @@ export class SessionRegistry {
     this.diagnostics = options.diagnostics;
     this.assistantToolsResolver = options.assistantToolsResolver;
     this.assistantResourcesResolver = options.assistantResourcesResolver;
+    this.ownsProfileStateStore = options.profileStateStore === undefined;
+    this.profileStateStore = options.profileStateStore ?? new ProfileStateStore({
+      path: join(this.agentDir, "wuxianpi", "state.sqlite"),
+    });
+    this.workspaceManager = options.workspaceManager ?? new WorkspaceManager({
+      stateStore: this.profileStateStore,
+      contextRoot: join(this.agentDir, "wuxianpi", "workspaces"),
+    });
+    this.profileContextAssembler = options.profileContextAssembler ?? new ProfileContextAssembler({
+      sharedUserPath: join(this.agentDir, "wuxianpi", "USER.md"),
+      assistantsRoot: join(this.agentDir, "assistants"),
+      workspaceManager: this.workspaceManager,
+    });
     if (emitEvent) this.listeners.add(emitEvent);
   }
 
@@ -147,6 +182,49 @@ export class SessionRegistry {
   models(): Promise<ModelRuntime> { return this.sharedModelRuntime; }
   settings(): SettingsManager { return this.modelSettings; }
   modelSetup(): ModelSetupService { return this.modelSetupService; }
+  profileState(): ProfileStateStore { return this.profileStateStore; }
+  workspaces(): WorkspaceManager { return this.workspaceManager; }
+
+  async listWorkspaces(includeArchived = false): Promise<WorkspaceContext[]> {
+    return Promise.all(this.workspaceManager.list({ includeArchived }).map((workspace) => this.workspaceManager.get(workspace.id)));
+  }
+
+  getWorkspace(id: string): Promise<WorkspaceContext> {
+    return this.workspaceManager.get(id);
+  }
+
+  createWorkspace(input: Parameters<WorkspaceManager["create"]>[0]): Promise<WorkspaceContext> {
+    return this.workspaceManager.create(input);
+  }
+
+  async updateWorkspace(id: string, input: Parameters<WorkspaceManager["update"]>[1]): Promise<WorkspaceContext> {
+    if (input.rootCwd !== undefined) {
+      const candidate = resolve(input.rootCwd);
+      const incompatible = this.profileStateStore.listBindings({ workspaceId: id, limit: 10_000 })
+        .find((binding) => !pathInsideOrEqual(candidate, binding.cwd));
+      if (incompatible) {
+        throw new RequestError("workspace_has_incompatible_sessions", `Workspace root would exclude session ${incompatible.sessionId}`);
+      }
+    }
+    return this.workspaceManager.update(id, input);
+  }
+
+  async removeWorkspace(id: string): Promise<boolean> {
+    if (this.profileStateStore.listBindings({ workspaceId: id, limit: 1 }).length > 0) {
+      throw new RequestError("workspace_has_sessions", `Workspace still owns sessions: ${id}`);
+    }
+    return this.workspaceManager.remove(id);
+  }
+
+  binding(sessionId: string): SessionProfileBinding | null {
+    return this.byId.get(sessionId)?.binding ?? this.profileStateStore.getBinding(sessionId) ?? null;
+  }
+
+  assistantSessionSummary(assistantId: string): { sessionCount: number; lastActiveAt?: string } {
+    const bindings = this.profileStateStore.listBindings({ assistantId, limit: 10_000 });
+    const lastActiveAt = bindings.map((binding) => binding.updatedAt).sort().at(-1);
+    return { sessionCount: bindings.length, ...(lastActiveAt ? { lastActiveAt } : {}) };
+  }
 
   async reloadModelConfiguration(): Promise<void> {
     const modelRuntime = await this.sharedModelRuntime;
@@ -174,14 +252,22 @@ export class SessionRegistry {
     });
   }
 
-  async list(options: { cwd?: string; all?: boolean; offset: number; limit: number }) {
+  async list(options: {
+    cwd?: string; assistantId?: string; workspaceId?: string | null;
+    all?: boolean; offset: number; limit: number;
+  }) {
     const sessions = options.all || !options.cwd ? await SessionManager.listAll() : await SessionManager.list(resolve(options.cwd));
-    const rows = sessions.map((session) => ({
-      sessionPath: session.path, sessionId: session.id, cwd: session.cwd, name: session.name,
-      parentSessionPath: session.parentSessionPath, createdAt: session.created.toISOString(),
-      modifiedAt: session.modified.toISOString(), messageCount: session.messageCount,
-      firstMessage: session.firstMessage, isRunning: this.byPath.get(this.canonicalPath(session.path))?.isRunning ?? false,
-    }));
+    const rows = sessions.map((session) => {
+      const active = this.byPath.get(this.canonicalPath(session.path));
+      const binding = active?.binding ?? this.profileStateStore.getBinding(session.id) ?? null;
+      return {
+        sessionPath: session.path, sessionId: session.id, cwd: session.cwd, name: session.name,
+        parentSessionPath: session.parentSessionPath, createdAt: session.created.toISOString(),
+        modifiedAt: session.modified.toISOString(), messageCount: session.messageCount,
+        firstMessage: session.firstMessage, isRunning: active?.isRunning ?? false,
+        ...this.bindingIdentity(binding),
+      };
+    });
     const knownIds = new Set(rows.map((row) => row.sessionId));
     for (const slot of this.slots) {
       const session = slot.runtime.session;
@@ -192,10 +278,14 @@ export class SessionRegistry {
         name: session.sessionName, parentSessionPath: undefined, createdAt: slot.createdAt.toISOString(),
         modifiedAt: slot.createdAt.toISOString(), messageCount: session.messages.length,
         firstMessage: this.firstUserMessage(session.messages), isRunning: slot.isRunning || session.isStreaming,
+        ...this.bindingIdentity(slot.binding),
       });
     }
-    rows.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
-    return { sessions: rows.slice(options.offset, options.offset + options.limit), total: rows.length,
+    const filtered = rows.filter((row) =>
+      (options.assistantId === undefined || row.assistantId === options.assistantId) &&
+      (options.workspaceId === undefined || row.workspaceId === options.workspaceId));
+    filtered.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
+    return { sessions: filtered.slice(options.offset, options.offset + options.limit), total: filtered.length,
       offset: options.offset, limit: options.limit };
   }
 
@@ -205,7 +295,8 @@ export class SessionRegistry {
       const manager = active.runtime.session.sessionManager;
       const allMessages = manager.buildSessionContext().messages;
       return { messages: allMessages.slice(offset, offset + limit), entries: manager.getEntries(), total: allMessages.length,
-        offset, limit, sessionPath: manager.getSessionFile(), sessionId: manager.getSessionId(), cwd: manager.getCwd() };
+        offset, limit, sessionPath: manager.getSessionFile(), sessionId: manager.getSessionId(), cwd: manager.getCwd(),
+        ...this.bindingIdentity(active.binding) };
     }
     const sessionPath = await this.resolveSessionPath(reference);
     const manager = SessionManager.open(sessionPath);
@@ -213,11 +304,36 @@ export class SessionRegistry {
     return {
       messages: allMessages.slice(offset, offset + limit), entries: manager.getEntries(), total: allMessages.length,
       offset, limit, sessionPath, sessionId: manager.getSessionId(), cwd: manager.getCwd(),
+      ...this.bindingIdentity(this.profileStateStore.getBinding(manager.getSessionId()) ?? null),
     };
   }
 
-  async create(cwd = process.cwd()): Promise<RuntimeIdentity> {
-    return this.identity(await this.createSlot(SessionManager.create(resolve(cwd))));
+  async create(input: string | CreateSessionInput = process.cwd()): Promise<RuntimeIdentity> {
+    const request = typeof input === "string" ? { cwd: input } : input;
+    if (!request.assistantId && request.workspaceId) {
+      throw new RequestError("assistant_required", "workspaceId requires an assistantId");
+    }
+    let cwd = request.cwd;
+    if (request.workspaceId) {
+      const workspace = await this.workspaceManager.get(request.workspaceId);
+      cwd ??= workspace.workspace.rootCwd;
+    }
+    if (request.assistantId) cwd ??= join(this.agentDir, "assistants", request.assistantId);
+    cwd = resolve(cwd ?? process.cwd());
+    const manager = SessionManager.create(cwd);
+    if (!request.assistantId) return this.identity(await this.createSlot(manager));
+    this.profileStateStore.createBinding({
+      sessionId: manager.getSessionId(),
+      assistantId: request.assistantId,
+      workspaceId: request.workspaceId ?? null,
+      cwd,
+    });
+    try {
+      return this.identity(await this.createSlot(manager));
+    } catch (error) {
+      this.profileStateStore.removeBinding(manager.getSessionId());
+      throw error;
+    }
   }
 
   async open(reference: string): Promise<RuntimeIdentity> {
@@ -327,7 +443,8 @@ export class SessionRegistry {
   async newSession(sessionId: string, parentSession?: string): Promise<unknown> {
     return this.run(sessionId, async (slot) => {
       requireIdle(slot, "session.new");
-      const result = await slot.runtime.newSession(parentSession ? { parentSession } : undefined);
+      const result = await this.withBindingTransition(slot, () =>
+        slot.runtime.newSession(parentSession ? { parentSession } : undefined));
       return { ...result, ...this.identity(slot) };
     });
   }
@@ -342,7 +459,7 @@ export class SessionRegistry {
   async fork(sessionId: string, entryId: string, position: "before" | "at" = "before"): Promise<unknown> {
     return this.run(sessionId, async (slot) => {
       requireIdle(slot, "session.fork");
-      const result = await slot.runtime.fork(entryId, { position });
+      const result = await this.withBindingTransition(slot, () => slot.runtime.fork(entryId, { position }));
       return { cancelled: result.cancelled, text: result.selectedText, ...this.identity(slot) };
     });
   }
@@ -350,7 +467,7 @@ export class SessionRegistry {
   async importSession(sessionId: string, inputPath: string, cwd?: string): Promise<unknown> {
     return this.run(sessionId, async (slot) => {
       requireIdle(slot, "session.import");
-      const result = await slot.runtime.importFromJsonl(inputPath, cwd);
+      const result = await this.withBindingTransition(slot, () => slot.runtime.importFromJsonl(inputPath, cwd));
       return { ...result, ...this.identity(slot) };
     });
   }
@@ -519,7 +636,11 @@ export class SessionRegistry {
   private setToolsOnSlot(slot: RuntimeSlot, toolNames: string[], source: "assistant" | "override") {
     requireIdle(slot, "session.setTools");
     const available = new Set(slot.runtime.session.getAllTools().map((tool) => tool.name));
-    const requested = [...new Set([...toolNames.map(normalizeConfiguredToolName).filter(Boolean), EXECUTABLE_CARD_TOOL])];
+    const requested = [...new Set([
+      ...toolNames.map(normalizeConfiguredToolName).filter(Boolean),
+      ...slot.mandatoryPackageToolNames,
+      EXECUTABLE_CARD_TOOL,
+    ])];
     const unknown = requested.filter((name) => !available.has(name));
     const availableToolNames = [...available].filter((name) => name !== EXECUTABLE_CARD_TOOL);
     const warnings = unknown.length > 0 ? [{
@@ -627,16 +748,21 @@ export class SessionRegistry {
   async switch(slot: RuntimeSlot, reference: string): Promise<RuntimeIdentity & { cancelled?: boolean; reused?: boolean }> {
     const activeReference = this.activeReference(reference);
     if (activeReference) {
+      this.assertCompatibleBindings(slot.binding, activeReference.binding, activeReference.runtime.cwd);
       this.cancelReclaim(activeReference);
       return { ...this.identity(activeReference), cancelled: false, reused: activeReference !== slot };
     }
     const targetPath = await this.resolveSessionPath(reference);
     const existing = this.byPath.get(this.canonicalPath(targetPath));
     if (existing && existing !== slot) {
+      this.assertCompatibleBindings(slot.binding, existing.binding, existing.runtime.cwd);
       this.cancelReclaim(existing);
       return { ...this.identity(existing), cancelled: false, reused: true };
     }
-    const result = await slot.runtime.switchSession(targetPath);
+    const targetManager = SessionManager.open(targetPath);
+    const targetBinding = this.profileStateStore.getBinding(targetManager.getSessionId()) ?? null;
+    this.assertCompatibleBindings(slot.binding, targetBinding, targetManager.getCwd());
+    const result = await this.withBindingTransition(slot, () => slot.runtime.switchSession(targetPath));
     return { ...this.identity(slot), cancelled: result.cancelled };
   }
 
@@ -673,6 +799,7 @@ export class SessionRegistry {
   async dispose(): Promise<void> {
     this.diagnostics?.record("registry.dispose.start", { activeSessions: this.slots.size });
     await Promise.all([...this.slots].map((slot) => this.disposeSlot(slot)));
+    if (this.ownsProfileStateStore) this.profileStateStore.close();
     this.diagnostics?.record("registry.dispose.end", { activeSessions: this.slots.size });
   }
 
@@ -779,36 +906,56 @@ export class SessionRegistry {
   }
 
   private async createSlot(manager: SessionManager): Promise<RuntimeSlot> {
+    let slot: RuntimeSlot | undefined;
+    let loadedPackageToolNames: string[] = [];
     const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-      const settingsManager = isolatedSessionSettings(cwd, this.agentDir);
-      const packageResources = await this.assistantResourcesResolver?.(cwd);
-      const services = await createAgentSessionServices({
-        cwd,
-        agentDir: this.agentDir,
-        modelRuntime: await this.sharedModelRuntime,
-        settingsManager,
-        ...(packageResources ? {
-          resourceLoaderOptions: {
-            additionalExtensionPaths: packageResources.extensionPaths,
-            additionalSkillPaths: packageResources.skillPaths,
-            additionalPromptTemplatePaths: packageResources.promptPaths,
-            additionalThemePaths: packageResources.themePaths,
-            appendSystemPrompt: packageResources.appendSystemPrompt,
-          },
-        } : {}),
-      });
-      return { ...(await createAgentSessionFromServices({
-        services,
-        sessionManager,
-        sessionStartEvent,
-        customTools: [createExecutableCardTool()],
-      })), services, diagnostics: services.diagnostics };
+      const resolvedBinding = this.ensureRuntimeBinding(sessionManager, cwd, slot?.pendingBindingSource);
+      try {
+        const settingsManager = isolatedSessionSettings(cwd, this.agentDir);
+        const packageResources = await this.assistantResourcesResolver?.(resolvedBinding.binding?.assistantId);
+        const profilePrompt = resolvedBinding.binding
+          ? await this.assembleProfilePrompt(resolvedBinding.binding, packageResources)
+          : undefined;
+        const appendSystemPrompt = profilePrompt
+          ? [profilePrompt]
+          : packageResources?.appendSystemPrompt;
+        const services = await createAgentSessionServices({
+          cwd,
+          agentDir: this.agentDir,
+          modelRuntime: await this.sharedModelRuntime,
+          settingsManager,
+          ...(packageResources || appendSystemPrompt ? {
+            resourceLoaderOptions: {
+              additionalExtensionPaths: packageResources?.extensionPaths,
+              additionalSkillPaths: packageResources?.skillPaths,
+              additionalPromptTemplatePaths: packageResources?.promptPaths,
+              additionalThemePaths: packageResources?.themePaths,
+              appendSystemPrompt,
+            },
+          } : {}),
+        });
+        loadedPackageToolNames = [...new Set((packageResources?.customTools ?? [])
+          .map((tool) => tool.name)
+          .filter((name) => name !== EXECUTABLE_CARD_TOOL))];
+        const customTools = [createExecutableCardTool(), ...(packageResources?.customTools ?? [])];
+        return { ...(await createAgentSessionFromServices({
+          services,
+          sessionManager,
+          sessionStartEvent,
+          customTools: [...new Map(customTools.map((tool) => [tool.name, tool])).values()],
+        })), services, diagnostics: services.diagnostics };
+      } catch (error) {
+        if (resolvedBinding.created) this.profileStateStore.removeBinding(sessionManager.getSessionId());
+        throw error;
+      }
     };
     const runtime = await createAgentSessionRuntime(createRuntime, {
       cwd: manager.getCwd(), agentDir: this.agentDir, sessionManager: manager,
     });
-    const slot: RuntimeSlot = { runtime, serial: new SerialExecutor(), isRunning: false,
+    slot = { runtime, serial: new SerialExecutor(), isRunning: false,
       agentStartCount: 0, createdAt: new Date(), closeAfterSettled: false,
+      binding: this.profileStateStore.getBinding(runtime.session.sessionId) ?? null,
+      mandatoryPackageToolNames: [...loadedPackageToolNames],
       modelStatus: runtime.session.model ? {
         state: "ready",
         provider: runtime.session.model.provider,
@@ -823,7 +970,11 @@ export class SessionRegistry {
       hasSessionPath: runtime.session.sessionFile !== undefined,
       cwd: runtime.cwd,
     });
-    runtime.setRebindSession(async (session) => this.bindSlot(slot, session));
+    runtime.setRebindSession(async (session) => {
+      slot!.mandatoryPackageToolNames = [...loadedPackageToolNames];
+      await this.bindSlot(slot!, session);
+      await this.applyAssistantTools(slot!);
+    });
     this.slots.add(slot);
     try {
       await this.bindSlot(slot, runtime.session);
@@ -844,8 +995,80 @@ export class SessionRegistry {
   }
 
   private async applyAssistantTools(slot: RuntimeSlot): Promise<void> {
-    const configured = await this.assistantToolsResolver?.(slot.runtime.cwd);
-    if (configured !== undefined) this.setToolsOnSlot(slot, configured, "assistant");
+    const configured = slot.binding ? await this.assistantToolsResolver?.(slot.binding.assistantId) : undefined;
+    if (configured !== undefined || slot.mandatoryPackageToolNames.length > 0) {
+      this.setToolsOnSlot(slot, configured ?? visibleToolNames(slot.runtime.session.getActiveToolNames()), "assistant");
+    }
+  }
+
+  private ensureRuntimeBinding(
+    manager: SessionManager,
+    cwd: string,
+    source: SessionProfileBinding | null | undefined,
+  ): { binding: SessionProfileBinding | null; created: boolean } {
+    const sessionId = manager.getSessionId();
+    const existing = this.profileStateStore.getBinding(sessionId) ?? null;
+    if (existing && resolve(existing.cwd) !== resolve(cwd)) {
+      throw new RequestError("session_binding_cwd_mismatch", `Session cwd no longer matches its immutable binding: ${sessionId}`);
+    }
+    if (source === undefined) return { binding: existing, created: false };
+    if (existing) {
+      this.assertCompatibleBindings(source, existing, cwd);
+      return { binding: existing, created: false };
+    }
+    if (!source) return { binding: null, created: false };
+    return {
+      binding: this.profileStateStore.inheritBinding({
+        sourceSessionId: source.sessionId,
+        targetSessionId: sessionId,
+        cwd,
+        workspaceId: source.workspaceId,
+      }),
+      created: true,
+    };
+  }
+
+  private async assembleProfilePrompt(
+    binding: SessionProfileBinding,
+    packageResources?: ResolvedAssistantPackageResources,
+  ): Promise<string> {
+    const packageContexts: Array<{ id: string; content: string }> = [];
+    const functionalAssistantContexts: Array<{ id: string; content: string }> = [];
+    for (const [index, content] of (packageResources?.appendSystemPrompt ?? []).entries()) {
+      const target = content.startsWith("Functional assistant ") ? functionalAssistantContexts : packageContexts;
+      target.push({ id: `${target === functionalAssistantContexts ? "functional" : "package"}-${index}`, content });
+    }
+    return (await this.profileContextAssembler.assemble({
+      assistantId: binding.assistantId,
+      workspaceId: binding.workspaceId,
+      packageContexts,
+      functionalAssistantContexts,
+    })).prompt;
+  }
+
+  private async withBindingTransition<T>(slot: RuntimeSlot, operation: () => Promise<T>): Promise<T> {
+    if (slot.pendingBindingSource !== undefined) {
+      throw new RequestError("session_transition_in_progress", "Another session replacement is already in progress");
+    }
+    slot.pendingBindingSource = slot.binding;
+    try {
+      return await operation();
+    } finally {
+      delete slot.pendingBindingSource;
+    }
+  }
+
+  private assertCompatibleBindings(
+    source: SessionProfileBinding | null,
+    target: SessionProfileBinding | null,
+    targetCwd: string,
+  ): void {
+    if (!source && !target) return;
+    if (!source || !target || source.assistantId !== target.assistantId ||
+      source.workspaceId !== target.workspaceId || resolve(source.cwd) !== resolve(target.cwd) ||
+      resolve(target.cwd) !== resolve(targetCwd)) {
+      throw new RequestError("session_binding_mismatch", "Cannot switch a RuntimeSlot to a session owned by another Profile or Workspace");
+    }
   }
 
   private async bindSlot(slot: RuntimeSlot, session: AgentSession): Promise<void> {
@@ -860,6 +1083,11 @@ export class SessionRegistry {
     if ((idCollision && idCollision !== slot) || (pathCollision && pathCollision !== slot)) {
       throw new RequestError("session_already_active", `Session is already active: ${session.sessionId}`);
     }
+    const binding = this.profileStateStore.getBinding(session.sessionId) ?? null;
+    if (binding && resolve(binding.cwd) !== resolve(session.sessionManager.getCwd())) {
+      throw new RequestError("session_binding_cwd_mismatch", `Session cwd no longer matches its immutable binding: ${session.sessionId}`);
+    }
+    slot.binding = binding;
     this.byId.set(session.sessionId, slot);
     if (path) this.byPath.set(path, slot);
     slot.unsubscribe?.();
@@ -868,10 +1096,13 @@ export class SessionRegistry {
     await session.bindExtensions({
       mode: "rpc", uiContext: slot.ui.context,
       commandContextActions: {
-        waitForIdle: () => session.waitForIdle(), newSession: (options) => slot.runtime.newSession(options),
-        fork: async (entryId, options) => ({ cancelled: (await slot.runtime.fork(entryId, options)).cancelled }),
+        waitForIdle: () => session.waitForIdle(),
+        newSession: (options) => this.withBindingTransition(slot, () => slot.runtime.newSession(options)),
+        fork: async (entryId, options) => ({
+          cancelled: (await this.withBindingTransition(slot, () => slot.runtime.fork(entryId, options))).cancelled,
+        }),
         navigateTree: async (targetId, options) => ({ cancelled: (await session.navigateTree(targetId, options)).cancelled }),
-        switchSession: (sessionPath, options) => slot.runtime.switchSession(sessionPath, options),
+        switchSession: async (sessionPath) => ({ cancelled: (await this.switch(slot, sessionPath)).cancelled ?? false }),
         reload: () => session.reload(),
       },
       shutdownHandler: () => { slot.closeAfterSettled = true; },
@@ -1015,7 +1246,20 @@ export class SessionRegistry {
   private identity(slot: RuntimeSlot): RuntimeIdentity {
     const session = slot.runtime.session;
     return { sessionId: session.sessionId, sessionPath: session.sessionFile, cwd: slot.runtime.cwd,
-      isRunning: slot.isRunning || session.isStreaming, isIdle: !slot.isRunning && session.isIdle };
+      isRunning: slot.isRunning || session.isStreaming, isIdle: !slot.isRunning && session.isIdle,
+      ...this.bindingIdentity(slot.binding) };
+  }
+
+  private bindingIdentity(binding: SessionProfileBinding | null): Pick<RuntimeIdentity,
+    "assistantId" | "workspaceId" | "workspaceName" | "ownershipState"> {
+    if (!binding) return { assistantId: null, workspaceId: null, ownershipState: "unbound" };
+    const workspaceName = binding.workspaceId ? this.profileStateStore.getWorkspace(binding.workspaceId)?.name : undefined;
+    return {
+      assistantId: binding.assistantId,
+      workspaceId: binding.workspaceId,
+      ...(workspaceName ? { workspaceName } : {}),
+      ownershipState: "bound",
+    };
   }
 
   private canonicalPath(path: string): string { return resolve(path); }
@@ -1103,6 +1347,11 @@ function isolatedSessionSettings(cwd: string, agentDir: string): SettingsManager
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+function pathInsideOrEqual(root: string, candidate: string): boolean {
+  const nested = relative(resolve(root), resolve(candidate));
+  return nested === "" || (!nested.startsWith(`..${sep}`) && nested !== ".." && !isAbsolute(nested));
 }
 
 function settingsErrors(context: string, errors: Array<{ scope: string; error: Error }>): RequestError {

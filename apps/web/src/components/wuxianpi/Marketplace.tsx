@@ -48,10 +48,12 @@ import {
   type MarketCategory,
   type MarketPackageDetailPayload,
   type PackageOperation,
+  type FunctionalAssistantBinding,
   type PublisherSubmissionDraft,
   type PublisherSubmissionInput,
 } from "@/lib/package-market";
 import { webApi, WebApiError, type MarketAuthState } from "@/lib/web-api-client";
+import { functionalAssistantCandidates } from "./FunctionalAssistantBindings";
 
 type MarketTab = "discover" | "installed" | "updates" | "logs";
 type BusyAction = { key: string; label: string } | null;
@@ -144,6 +146,7 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
   const [authError, setAuthError] = useState<string | null>(null);
   const [marketAuth, setMarketAuth] = useState<MarketAuthState>({ authenticated: false, user: null });
   const [bindingPackage, setBindingPackage] = useState<LocalPackage | null>(null);
+  const [functionalContributionIds, setFunctionalContributionIds] = useState<Set<string>>(new Set());
   const detailRequestRef = useRef(0);
 
   const loadMarketAuth = useCallback(async () => {
@@ -165,15 +168,17 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
   const selectedLocal = mergeLocalPackage(selectedSummary, selectedDetail);
 
   const loadLocal = useCallback(async () => {
-    const [installedResult, updatesResult, operationsResult] = await Promise.allSettled([
+    const [installedResult, updatesResult, operationsResult, rawPackagesResult] = await Promise.allSettled([
       webApi.installedPackages(),
       webApi.packageUpdates(),
       webApi.packageOperations({ limit: 100 }),
+      webApi.request<unknown>("/packages"),
     ]);
     if (installedResult.status === "fulfilled") setInstalled(installedResult.value.packages);
     if (updatesResult.status === "fulfilled") setUpdates(updatesResult.value.packages);
     if (operationsResult.status === "fulfilled") setOperations(operationsResult.value.operations);
-    const rejected = [installedResult, updatesResult, operationsResult].find((result) => result.status === "rejected");
+    if (rawPackagesResult.status === "fulfilled") setFunctionalContributionIds(new Set(functionalAssistantCandidates(rawPackagesResult.value).map((item) => item.id)));
+    const rejected = [installedResult, updatesResult, operationsResult, rawPackagesResult].find((result) => result.status === "rejected");
     if (rejected?.status === "rejected") throw rejected.reason;
   }, []);
 
@@ -421,6 +426,7 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
                   if (message?.trim()) void runAction(`commit:${packageId}`, "提交本地修改", () => webApi.commitPackageChanges(packageId, message.trim()));
                 }}
                 onBind={(item) => setBindingPackage(item)}
+                functionalContributionIds={functionalContributionIds}
               />
             )}
           </div>
@@ -442,15 +448,17 @@ export function Marketplace({ assistants }: { assistants: AssistantSummary[] }) 
       {bindingPackage && (
         <AssistantBindingDialog
           pkg={bindingPackage}
-          assistants={assistants.filter((assistant) => !assistant.manifest.archived && !assistant.id.startsWith("legacy-"))}
+          assistants={assistants.filter((assistant) => !assistant.manifest.archived)}
+          functionalContributionIds={functionalContributionIds}
           busy={busy}
           onClose={() => setBindingPackage(null)}
-          onSave={(assistantId, enabledContributionIds, experienceSpaces) => {
+          onSave={(assistantId, enabledContributionIds, experienceSpaces, functionalAssistants) => {
             void runAction(`bind:${bindingPackage.packageId}:${assistantId}`, "保存助手绑定", () => webApi.setPackageAssistantBinding(
               bindingPackage.packageId,
               assistantId,
               enabledContributionIds,
               experienceSpaces,
+              functionalAssistants,
             )).then((saved) => {
               if (saved) setBindingPackage(null);
             });
@@ -508,6 +516,7 @@ function PackageDetail({
   onContribution,
   onCommit,
   onBind,
+  functionalContributionIds,
 }: {
   detail: MarketPackageDetailPayload | null;
   local: LocalPackage | null;
@@ -519,6 +528,7 @@ function PackageDetail({
   onContribution: (packageId: string, contribution: LocalContribution, enabled: boolean) => void;
   onCommit: (packageId: string) => void;
   onBind: (pkg: LocalPackage) => void;
+  functionalContributionIds: Set<string>;
 }) {
   const market = detail?.package ?? null;
   const packageId = market?.id ?? local?.packageId;
@@ -632,8 +642,9 @@ function PackageDetail({
               <div key={contribution.id} className="market-contribution-row">
                 <span>
                   <strong>{contribution.name}</strong>
-                  <small>{CONTRIBUTION_LABELS[contribution.type] ?? contribution.type} · <code>{contribution.id}</code></small>
+                  <small>{functionalContributionIds.has(contribution.id) ? "功能助手" : CONTRIBUTION_LABELS[contribution.type] ?? contribution.type} · <code>{contribution.id}</code></small>
                 </span>
+                {functionalContributionIds.has(contribution.id) && <span className="market-functional-badge">独立存储 Skill</span>}
                 {contribution.selfRelated && <span className="market-self-badge">维修登记</span>}
                 <label className="switch" title={contribution.enabled ? "停用贡献" : "启用贡献"}>
                   <input
@@ -745,23 +756,29 @@ function OperationLog({ operations, loading }: { operations: PackageOperation[];
 function AssistantBindingDialog({
   pkg,
   assistants,
+  functionalContributionIds,
   busy,
   onClose,
   onSave,
 }: {
   pkg: LocalPackage;
   assistants: AssistantSummary[];
+  functionalContributionIds: Set<string>;
   busy: BusyAction;
   onClose: () => void;
-  onSave: (assistantId: string, enabledContributionIds: string[], experienceSpaces: Record<string, string>) => void;
+  onSave: (assistantId: string, enabledContributionIds: string[], experienceSpaces: Record<string, string>, functionalAssistants: Record<string, FunctionalAssistantBinding>) => void;
 }) {
   const [assistantId, setAssistantId] = useState(assistants[0]?.id ?? "");
   const initialBinding = pkg.assistantBindings.find((item) => item.assistantId === assistantId);
   const [enabledIds, setEnabledIds] = useState<string[]>(initialBinding?.enabledContributionIds ?? []);
   const [experienceSpaces, setExperienceSpaces] = useState<Record<string, string>>(initialBinding?.experienceSpaces ?? {});
+  const [functionalAssistants, setFunctionalAssistants] = useState<Record<string, FunctionalAssistantBinding>>(initialBinding?.functionalAssistants ?? {});
   const [bindingLoading, setBindingLoading] = useState(false);
   const [bindingError, setBindingError] = useState<string | null>(null);
-  const bindableContributions = useMemo(() => pkg.contributions.filter(isAssistantBindableContribution), [pkg.contributions]);
+  const bindableContributions = useMemo(
+    () => pkg.contributions.filter((contribution) => isAssistantBindableContribution(contribution) || functionalContributionIds.has(contribution.id)),
+    [functionalContributionIds, pkg.contributions],
+  );
   const packageContributionIds = useMemo(() => new Set(pkg.contributions.map((contribution) => contribution.id)), [pkg.contributions]);
   const bindableContributionIds = useMemo(() => new Set(bindableContributions.map((contribution) => contribution.id)), [bindableContributions]);
 
@@ -775,6 +792,7 @@ function AssistantBindingDialog({
       const nextEnabledIds = next.enabledContributionIds.filter((id) => !packageContributionIds.has(id) || bindableContributionIds.has(id));
       setEnabledIds(nextEnabledIds);
       setExperienceSpaces(pruneExperienceSpaces(nextEnabledIds, next.experienceSpaces));
+      setFunctionalAssistants(next.functionalAssistants);
     }).catch((reason) => {
       if (cancelled) return;
       setBindingError(errorText(reason));
@@ -792,7 +810,7 @@ function AssistantBindingDialog({
       <section className="market-dialog" role="dialog" aria-modal="true" aria-label="助手绑定">
         <header><div><span className="eyebrow">{pkg.name}</span><h2>助手绑定</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
         <div className="market-dialog-body">
-          {assistants.length === 0 ? <MarketEmpty title="没有可绑定的助手" detail="请先创建一个主 AI 或功能助手。" /> : (
+          {assistants.length === 0 ? <MarketEmpty title="没有可绑定的助手" detail="请先创建一个助手。" /> : (
             <>
               <label className="market-field"><span>助手</span><select value={assistantId} onChange={(event) => setAssistantId(event.target.value)}>{assistants.map((assistant) => <option key={assistant.id} value={assistant.id}>{assistant.manifest.name}</option>)}</select></label>
               {bindingError && <div className="market-banner error"><CircleX size={17} /><span>{bindingError}</span></div>}
@@ -800,23 +818,40 @@ function AssistantBindingDialog({
               <div className="market-binding-list">
                 {bindableContributions.map((contribution) => {
                   const checked = enabledIds.includes(contribution.id);
+                  const isFunctional = functionalContributionIds.has(contribution.id);
                   const baseSpace = contribution.defaultExperienceSpaceId ?? `${contribution.id}.shared`;
                   const currentSpace = experienceSpaces[contribution.id] ?? baseSpace;
                   const isolatedSpace = `${baseSpace}.${assistantId}`;
                   return (
                     <div key={contribution.id} className="market-binding-row">
                       <label>
-                        <input type="checkbox" checked={checked} onChange={(event) => {
+                        <input type="checkbox" checked={checked} disabled={!contribution.enabled && !checked} onChange={(event) => {
                           if (event.target.checked) {
                             setEnabledIds((current) => [...new Set([...current, contribution.id])]);
+                            if (isFunctional) setFunctionalAssistants((current) => ({ ...current, [contribution.id]: current[contribution.id] ?? { sharingMode: "hybrid" } }));
                             return;
                           }
                           const next = removeContributionBinding(enabledIds, experienceSpaces, contribution.id);
                           setEnabledIds(next.enabledContributionIds);
                           setExperienceSpaces(next.experienceSpaces);
+                          if (isFunctional) setFunctionalAssistants((current) => {
+                            const updated = { ...current };
+                            delete updated[contribution.id];
+                            return updated;
+                          });
                         }} />
-                        <span><strong>{contribution.name}</strong><small>{CONTRIBUTION_LABELS[contribution.type] ?? contribution.type}</small></span>
+                        <span><strong>{contribution.name}</strong><small>{isFunctional ? "功能助手 · 独立存储 Skill" : CONTRIBUTION_LABELS[contribution.type] ?? contribution.type}</small></span>
                       </label>
+                      {isFunctional && checked && (
+                        <label className="market-functional-mode">
+                          <span>存储模式</span>
+                          <select value={functionalAssistants[contribution.id]?.sharingMode ?? "hybrid"} onChange={(event) => setFunctionalAssistants((current) => ({ ...current, [contribution.id]: { sharingMode: event.target.value as "isolated" | "shared" | "hybrid" } }))}>
+                            <option value="hybrid">共享校正经验，私有进度</option>
+                            <option value="isolated">完全独立</option>
+                            <option value="shared">完全共享</option>
+                          </select>
+                        </label>
+                      )}
                       {contribution.type === "wuxianpi.experience" && checked && (
                         <div className="market-experience-choice">
                           <label><input type="radio" name={`experience:${contribution.id}`} checked={currentSpace === baseSpace} onChange={() => setExperienceSpaces((current) => ({ ...current, [contribution.id]: baseSpace }))} />共享经验</label>
@@ -831,7 +866,7 @@ function AssistantBindingDialog({
             </>
           )}
         </div>
-        <footer><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={!selectedAssistant || isBusy || bindingLoading || Boolean(bindingError)} onClick={() => onSave(assistantId, enabledIds, pruneExperienceSpaces(enabledIds, experienceSpaces))}>{isBusy ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}保存绑定</button></footer>
+        <footer><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={!selectedAssistant || isBusy || bindingLoading || Boolean(bindingError)} onClick={() => onSave(assistantId, enabledIds, pruneExperienceSpaces(enabledIds, experienceSpaces), functionalAssistants)}>{isBusy ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}保存绑定</button></footer>
       </section>
     </div>
   );

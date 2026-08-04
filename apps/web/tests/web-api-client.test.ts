@@ -140,22 +140,78 @@ describe("WebApiClient Runtime contract", () => {
 
   it("normalizes Runtime session rows and resolves parent path to UI id", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ ok: true, data: { sessions: [
-      { sessionId: "parent", sessionPath: "/sessions/parent.jsonl", cwd: "/tmp", createdAt: "2026-01-01", modifiedAt: "2026-01-02", messageCount: 2, firstMessage: "one" },
-      { sessionId: "child", sessionPath: "/sessions/child.jsonl", parentSessionPath: "/sessions/parent.jsonl", cwd: "/tmp", createdAt: "2026-01-03", modifiedAt: "2026-01-04", messageCount: 1 },
+      { sessionId: "parent", sessionPath: "/sessions/parent.jsonl", cwd: "/tmp", assistantId: "coding", workspaceId: "workspace-a", workspaceName: "Project A", ownershipState: "bound", createdAt: "2026-01-01", modifiedAt: "2026-01-02", messageCount: 2, firstMessage: "one" },
+      { sessionId: "child", sessionPath: "/sessions/child.jsonl", parentSessionPath: "/sessions/parent.jsonl", cwd: "/tmp", assistantId: null, workspaceId: null, ownershipState: "unbound", createdAt: "2026-01-03", modifiedAt: "2026-01-04", messageCount: 1 },
+      { sessionId: "malformed", sessionPath: "/sessions/malformed.jsonl", cwd: "/tmp", assistantId: 42, workspaceId: {}, ownershipState: "bound", createdAt: "2026-01-05", modifiedAt: "2026-01-05", messageCount: 0 },
     ] } })));
     const sessions = await new WebApiClient().listSessions();
-    expect(sessions[0]).toMatchObject({ id: "parent", path: "/sessions/parent.jsonl", created: "2026-01-01", modified: "2026-01-02" });
-    expect(sessions[1]).toMatchObject({ id: "child", parentSessionId: "parent", firstMessage: "新对话" });
+    expect(sessions[0]).toMatchObject({ id: "parent", path: "/sessions/parent.jsonl", assistantId: "coding", workspaceId: "workspace-a", workspaceName: "Project A", ownershipState: "bound", created: "2026-01-01", modified: "2026-01-02" });
+    expect(sessions[1]).toMatchObject({ id: "child", assistantId: null, workspaceId: null, ownershipState: "unbound", parentSessionId: "parent", firstMessage: "新对话" });
+    expect(sessions[2]).toMatchObject({ id: "malformed", assistantId: null, workspaceId: null, ownershipState: "unbound" });
   });
 
   it("forwards the complete create request and normalizes Runtime identity", async () => {
     const fetchMock = vi.fn().mockResolvedValue(json({ ok: true, data: {
-      sessionId: "s1", sessionPath: "/sessions/s1.jsonl", cwd: "/assistant", createdAt: "2026-01-01", modifiedAt: "2026-01-01",
+      sessionId: "s1", sessionPath: "/sessions/s1.jsonl", cwd: "/workspace", assistantId: "wuxianpi", workspaceId: "workspace-a", workspaceName: "Project A", ownershipState: "bound", createdAt: "2026-01-01", modifiedAt: "2026-01-01",
     } }, 201));
     vi.stubGlobal("fetch", fetchMock);
-    const created = await new WebApiClient().createSession({ assistantId: "wuxianpi", cwd: "/assistant", provider: "deepseek", modelId: "chat", thinkingLevel: "high", toolNames: ["read"] });
-    expect(created).toMatchObject({ sessionId: "s1", session: { id: "s1", path: "/sessions/s1.jsonl" } });
-    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toMatchObject({ assistantId: "wuxianpi", provider: "deepseek", modelId: "chat", thinkingLevel: "high", toolNames: ["read"] });
+    const created = await new WebApiClient().createSession({ assistantId: "wuxianpi", workspaceId: "workspace-a", cwd: "/workspace", provider: "deepseek", modelId: "chat", thinkingLevel: "high", toolNames: ["read"] });
+    expect(created).toMatchObject({ sessionId: "s1", session: { id: "s1", path: "/sessions/s1.jsonl", assistantId: "wuxianpi", workspaceId: "workspace-a", ownershipState: "bound" } });
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toMatchObject({ assistantId: "wuxianpi", workspaceId: "workspace-a", cwd: "/workspace", provider: "deepseek", modelId: "chat", thinkingLevel: "high", toolNames: ["read"] });
+  });
+
+  it("normalizes Workspace CRUD payloads and sends the fixed HTTP contract", async () => {
+    const workspace = {
+      id: "project-a",
+      name: "Project A",
+      rootCwd: "/projects/a",
+      archived: false,
+      createdAt: "2026-08-04T00:00:00Z",
+      updatedAt: "2026-08-04T00:00:00Z",
+      instructions: "Use pnpm.\n",
+      memory: "Node 22.\n",
+    };
+    const archivedWorkspace = { ...workspace, id: "project-archive", name: "Archived", archived: true };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ ok: true, data: { workspaces: [workspace, { id: 1 }] } }))
+      .mockResolvedValueOnce(json({ ok: true, data: { workspaces: [workspace, archivedWorkspace, { archived: true }] } }))
+      .mockResolvedValueOnce(json({ ok: true, data: { workspace } }, 201))
+      .mockResolvedValueOnce(json({ ok: true, data: { workspace } }))
+      .mockResolvedValueOnce(json({ ok: true, data: { workspace: { ...workspace, name: "Project A2", archived: true } } }))
+      .mockResolvedValueOnce(json({ ok: true, data: { removed: true } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new WebApiClient();
+
+    expect(await client.listWorkspaces()).toEqual([workspace]);
+    expect(await client.listWorkspaces({ includeArchived: true })).toEqual([workspace, archivedWorkspace]);
+    expect(await client.createWorkspace({ id: "project-a", name: "Project A", rootCwd: "/projects/a", instructions: "Use pnpm.\n" })).toEqual(workspace);
+    expect(await client.getWorkspace("project-a")).toEqual(workspace);
+    expect(await client.updateWorkspace("project-a", { name: "Project A2", archived: true })).toMatchObject({ name: "Project A2", archived: true });
+    expect(await client.deleteWorkspace("project-a")).toBe(true);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/web/v1/workspaces",
+      "/api/web/v1/workspaces?includeArchived=true",
+      "/api/web/v1/workspaces",
+      "/api/web/v1/workspaces/project-a",
+      "/api/web/v1/workspaces/project-a",
+      "/api/web/v1/workspaces/project-a",
+    ]);
+    expect(fetchMock.mock.calls.map(([, init]) => (init as RequestInit).method)).toEqual([undefined, undefined, "POST", undefined, "PATCH", "DELETE"]);
+    expect(JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body))).toEqual({ id: "project-a", name: "Project A", rootCwd: "/projects/a", instructions: "Use pnpm.\n" });
+    expect(JSON.parse(String((fetchMock.mock.calls[4]?.[1] as RequestInit).body))).toEqual({ name: "Project A2", archived: true });
+  });
+
+  it("rejects malformed single Workspace payloads instead of leaking partial state", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ ok: true, data: { workspace: {
+      id: "project-a",
+      name: "Project A",
+      rootCwd: "/projects/a",
+      archived: "no",
+      createdAt: "2026-08-04T00:00:00Z",
+      updatedAt: "2026-08-04T00:00:00Z",
+    } } })));
+    await expect(new WebApiClient().getWorkspace("project-a")).rejects.toThrow("invalid Workspace");
   });
 
   it("maps snapshot entry objects to message entry ids and preserves tree/state", async () => {

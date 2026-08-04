@@ -2,106 +2,101 @@
 
 [English](./README.md)
 
-WuxianPi 是基于 [Pi](https://github.com/badlogic/pi-mono) 的移动优先个人助手工作台。它在保持 Pi 运行时和 JSONL 会话兼容的同时，提供助手目录、角色定义、全局能力中心、TTS、MCP、权限控制和沙箱 HTML WebUI 扩展。
+WuxianPi 是基于 [Pi](https://github.com/badlogic/pi-mono) 的移动优先个人助手工作台。
+Pi 始终作为未修改的上游运行时：WuxianPi 在不修改 Pi SDK、Pi 源码和原生 JSONL
+会话格式的前提下，增加主助手、Workspace、能力选择、TTS、MCP、权限、Package
+以及沙箱 HTML WebUI 扩展。
 
-产品边界与演进方向见 [`docs/PRODUCT.md`](./docs/PRODUCT.md)。Pi 作为上游运行时保持不修改。
+产品边界见 [`docs/PRODUCT.md`](./docs/PRODUCT.md)，运行时结构见
+[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)。
 
 ## 快速开始
 
-当前从源码运行：
-
 ```bash
 npm install
 npm run dev
 ```
 
-启动后打开 [http://localhost:30141](http://localhost:30141)。命令行版本会在服务就绪后尝试自动打开浏览器。
-
-**可选参数：**
+启动后打开 [http://localhost:30141](http://localhost:30141)。
 
 ```bash
-wuxianpi --port 8080              # 自定义端口
-wuxianpi --hostname 127.0.0.1     # 仅本机访问
-wuxianpi -p 8080 -H 127.0.0.1     # 组合使用
-
-PORT=8080 wuxianpi                # 也支持环境变量
+wuxianpi --port 8080
+wuxianpi --hostname 127.0.0.1
+wuxianpi -p 8080 -H 127.0.0.1
+PORT=8080 wuxianpi
 ```
 
-## 功能介绍
+Runtime 的 Profile 状态库使用 `node:sqlite`，开发和生产环境需要 Node.js
+`>=22.19.0`。
 
-- **一个助手一个目录**：角色、记忆、外部工作区说明、知识和专属 Pi 资源一起保存，可创建、复制、归档和 ZIP 导入导出。
-- **手机优先聊天**：助手卡片首页、底部导航、虚拟消息列表、批量流式渲染、按需代码高亮和默认折叠工具结果。
-- **全局能力中心**：统一配置模型、工具、Skills、MCP、TTS、WebUI 扩展、权限和可选 Ubuntu Worker，再由助手选择或覆盖。
-- **角色与能力解耦**：即使关闭全部工具，Pi 仍加载助手目录中的 `AGENTS.md`、记忆和工作区说明。
-- **语音输出**：支持浏览器语音、Termux Android TTS 和 OpenAI-compatible/HTTP TTS，支持试听、自动朗读和取消。
-- **扩展兼容**：映射 Pi Extension UI，并允许富界面扩展通过 sandbox iframe、CSP、nonce 和细粒度 Bridge 权限运行。
-- **保留 Pi 能力**：历史 JSONL 会话、Fork、会话内分支、SSE 重连、压缩、模型配置、Skills 和文件预览继续可用。
+## 核心模型
 
-## 注意事项
+- **主助手**：面向用户的 Profile 等价物，拥有身份、长期记忆、默认配置、权限和能力绑定。
+- **Workspace**：独立登记的执行根目录，拥有自己的指令和记忆。`assistantId` 与
+  `workspaceId`、`cwd` 相互独立。
+- **Session**：对话正文继续由 Pi 按原生 JSONL 保存；WuxianPi 只在
+  `state.sqlite` 中保存它属于哪个助手和 Workspace。
+- **功能助手**：具有独立存储的 Skill 组合。Package 只安装一份，运行数据按
+  `isolated`、`shared` 或 `hybrid` 模式访问。
 
-- **数据目录**：默认读取 `~/.pi/agent/sessions` 下的会话文件。可通过环境变量 `PI_CODING_AGENT_DIR` 指定其他 pi agent 目录。
-- **助手目录**：默认位于 `~/.pi/agent/assistants/<assistant-id>`。
-- **会话文件**：路径形如 `~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`。
-- **模型配置**：Models 面板读写 pi agent 目录下的 `models.json`，模型列表和默认模型由 pi 的配置解析得到。
-- **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。
-- **Fork 与会话内分支不同**：Fork 会创建新的 `.jsonl` 文件；“Edit from here” 是同一会话文件里的分支。
+界面继续使用“助手”和“Workspace”，不会再向用户增加一个平行的 Profile 概念。
 
-## 开发
+## 主要能力
+
+- **助手优先的移动聊天**：助手切换、虚拟消息列表、批量流式渲染、按需代码高亮和折叠工具结果。
+- **显式会话归属**：两个助手可以进入同一个 Workspace，同时保持身份、记忆和能力绑定隔离。
+- **Workspace 注册表**：保存真实 `rootCwd`、`INSTRUCTIONS.md` 和 `MEMORY.md`；
+  助手目录内的 `WORKSPACES.md` 不再是权威数据源。
+- **全局能力中心**：统一管理模型、工具、Skills、MCP、TTS、WebUI 扩展、权限和可选 Ubuntu Worker。
+- **有状态功能助手**：同一 Package 和依赖不复制，可绑定给一个或多个主助手。
+- **保持 Pi 兼容**：原生 JSONL、Fork、会话内分支、SSE 重连、压缩、模型配置和 Skills 继续可用。
+
+## 数据布局
+
+```text
+~/.pi/agent/
+├── assistants/<assistant-id>/
+│   ├── assistant.json
+│   ├── AGENTS.md
+│   ├── MEMORY.md
+│   └── knowledge/
+├── sessions/<编码后的-cwd>/<时间戳>_<uuid>.jsonl
+└── wuxianpi/
+    ├── USER.md
+    ├── state.sqlite
+    ├── workspaces/<workspace-id>/
+    │   ├── INSTRUCTIONS.md
+    │   └── MEMORY.md
+    └── package-manager/functional-assistants/<function-id>/
+        ├── shared/
+        └── profiles/<assistant-id>/
+```
+
+由 Pi 直接创建的会话可能没有 WuxianPi 归属。它们仍会显示为
+`ownershipState: "unbound"`；WuxianPi 不会再根据 `cwd` 猜测所属助手。
+
+可通过 `PI_CODING_AGENT_DIR` 指定其他 Pi agent 数据目录。
+
+## 开发验证
 
 ```bash
 npm install
-npm run dev
+npm run runtime:test
+npm run web:test
+npm run product:check
+npm run runtime:build
+npm run web:build
 ```
-
-本地开发端口为 [http://localhost:30141](http://localhost:30141)。
-
-常用检查：
-
-```bash
-node_modules/.bin/tsc --noEmit
-npm run lint
-```
-
-开发时不要运行 `next build` / `npm run build`，它会写入 `.next/`，容易影响正在运行的 dev server。发布流程再执行构建。
 
 ## 项目结构
 
+```text
+apps/web/                     # 生产使用的移动 Web UI
+runtime/wuxianpi-node/        # Runtime、Pi 适配、会话、Profile、Workspace
+packages/contracts/           # HTTP、Package、Hub 和 Host 稳定合同
+packages/sdk/                 # 扩展与集成 SDK
+apps/hub/                     # WuxianPi Hub 市场与治理服务
+docs/                         # 产品、架构、部署和 Package 文档
 ```
-app/
-  api/
-    agent/          # 创建/驱动 AgentSession，提供 SSE 事件流
-    auth/           # OAuth 和 API key 管理
-    cwd/validate/   # 自定义工作目录校验
-    default-cwd/    # 获取 pi 默认工作目录
-    files/          # 文件列表、读取、预览、watch
-    home/           # 当前用户 home 目录
-    models/         # 可用模型、默认模型、thinking levels
-    models-config/  # 读写 models.json、测试模型
-    sessions/       # 会话读取、重命名、删除、上下文、HTML 导出
-    skills/         # skills 列表、搜索、安装、启停
-components/
-  AppShell.tsx        # 主布局、URL 状态、顶部面板、文件标签
-  SessionSidebar.tsx  # 项目选择、会话树、Explorer
-  ChatWindow.tsx      # 消息区、SSE、拖拽图片、minimap
-  ChatInput.tsx       # 输入栏、模型/工具/thinking/compact/slash controls
-  MessageView.tsx     # 消息、thinking、tool call/result 渲染
-  ModelsConfig.tsx    # 模型和认证配置面板
-  SkillsConfig.tsx    # 技能管理面板
-  FileExplorer.tsx    # 文件树
-  FileViewer.tsx      # 源码、diff、图片、音频、PDF、DOCX 预览
-lib/
-  rpc-manager.ts      # AgentSessionWrapper 生命周期和全局 registry
-  session-reader.ts   # 解析 .jsonl 会话文件和分支上下文
-  normalize.ts        # 规范化 toolCall 字段名
-  file-access.ts      # 文件读取安全边界
-  file-paths.ts       # 文件路径编码/相对路径工具
-  markdown.ts         # Markdown/Mermaid/KaTeX 插件配置
-  pi-types.ts         # pi 相关类型
-hooks/
-  useAgentSession.ts  # 会话加载、发送命令、SSE 状态机
-  useAudio.ts         # 完成提示音
-  useDragDrop.ts      # 图片拖拽
-  useTheme.ts         # 主题切换
-bin/
-  wuxianpi.js         # npm CLI 入口
-```
+
+根目录旧 Next.js 路径不是生产 Profile/Workspace 实现。

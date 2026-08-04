@@ -163,6 +163,65 @@ export interface SessionRuntimeOverrides {
   tts?: AssistantTtsConfig;
 }
 
+export interface CreateSessionRequest {
+  assistantId: string;
+  workspaceId?: string;
+  cwd?: string;
+  overrides?: SessionRuntimeOverrides;
+  type?: "ensure_session" | "prompt";
+  message?: string;
+  images?: unknown[];
+  streamingBehavior?: "steer" | "followUp";
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+  toolNames?: string[];
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  rootCwd: string;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  instructions: string;
+  memory: string;
+}
+
+export interface WorkspaceCreateRequest {
+  id?: string;
+  name: string;
+  rootCwd: string;
+  archived?: boolean;
+  instructions?: string;
+  memory?: string;
+}
+
+export interface WorkspaceUpdateRequest {
+  name?: string;
+  rootCwd?: string;
+  archived?: boolean;
+  instructions?: string;
+  memory?: string;
+}
+
+export interface WorkspaceListOptions {
+  includeArchived?: boolean;
+}
+
+export interface WorkspaceListData {
+  workspaces: Workspace[];
+}
+
+export interface WorkspaceMutationData {
+  workspace: Workspace;
+}
+
+export interface WorkspaceDeleteData {
+  removed: boolean;
+}
+
 export interface ResolvedAssistantRuntime {
   assistantId: string;
   cwd: string;
@@ -253,7 +312,8 @@ export interface AssistantUpdateRequest {
 }
 
 export interface NewAgentSessionRequest {
-  assistantId?: string;
+  assistantId: string;
+  workspaceId?: string;
   cwd?: string;
   overrides?: SessionRuntimeOverrides;
   type: "ensure_session" | "prompt";

@@ -280,6 +280,141 @@ test("assistant bindings resolve one installed Package without copying dependenc
   }
 });
 
+test("functional assistant templates expand deduplicated bindings and preserve state across Package updates", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-functional-package-"));
+  const packageId = "io.test.functional";
+  const skillId = `${packageId}/skill.ops`;
+  const contextId = `${packageId}/context.ops`;
+  const functionId = `${packageId}/assistant.ops`;
+  const secondFunctionId = `${packageId}/assistant.audit`;
+  const thirdFunctionId = `${packageId}/assistant.report`;
+  const manifest = {
+    ...basicManifest(packageId),
+    categories: ["assistant", "skill"],
+    contributions: [
+      { id: skillId, type: "pi.skill", name: "Ops", path: "skills/ops", assistantSelectable: true },
+      { id: contextId, type: "wuxianpi.context", name: "Ops context", path: "context.md", format: "markdown", assistantSelectable: true },
+      {
+        id: functionId,
+        type: "wuxianpi.assistantTemplate",
+        name: "Ops helper",
+        description: "Stateful operations helper",
+        manifest: "assistant.json",
+        kind: "functional",
+        defaultBindings: [skillId, contextId, skillId],
+      },
+      {
+        id: secondFunctionId,
+        type: "wuxianpi.assistantTemplate",
+        name: "Audit helper",
+        manifest: "assistant.json",
+        kind: "functional",
+        defaultBindings: [skillId],
+      },
+      {
+        id: thirdFunctionId,
+        type: "wuxianpi.assistantTemplate",
+        name: "Report helper",
+        manifest: "assistant.json",
+        kind: "functional",
+        defaultBindings: [contextId],
+      },
+    ],
+  };
+  const repo = await createRepository(join(root, "upstream"), manifest, {
+    "skills/ops/SKILL.md": skill("ops"),
+    "context.md": "Operations context v1\n",
+    "assistant.json": JSON.stringify({
+      schemaVersion: 1,
+      name: "Ops helper",
+      description: "Stateful operations helper",
+      greeting: "What should we operate?",
+      model: "inherit",
+      thinkingLevel: "inherit",
+    }),
+  });
+  const market = new FakeMarket({ [packageId]: installPlan(repo) });
+  const manager = createManager(root, market);
+  await manager.install(packageId);
+  const binding = await manager.setAssistantBinding("main", {
+    enabledContributionIds: [functionId, secondFunctionId, skillId],
+    functionalAssistants: {
+      [functionId]: { sharingMode: "isolated" },
+      [secondFunctionId]: { sharingMode: "shared" },
+    },
+  });
+  assert.deepEqual(binding.functionalAssistants, {
+    [functionId]: { sharingMode: "isolated" },
+    [secondFunctionId]: { sharingMode: "shared" },
+  });
+  const ordinaryUpdate = await manager.setAssistantBinding("main", {
+    enabledContributionIds: [functionId, secondFunctionId, skillId, contextId],
+  });
+  assert.deepEqual(ordinaryUpdate.functionalAssistants, {
+    [functionId]: { sharingMode: "isolated" },
+    [secondFunctionId]: { sharingMode: "shared" },
+  });
+  const addedFunctionalAssistant = await manager.setAssistantBinding("main", {
+    enabledContributionIds: [functionId, secondFunctionId, thirdFunctionId, skillId, contextId],
+  });
+  assert.deepEqual(addedFunctionalAssistant.functionalAssistants, {
+    [functionId]: { sharingMode: "isolated" },
+    [secondFunctionId]: { sharingMode: "shared" },
+    [thirdFunctionId]: { sharingMode: "hybrid" },
+  });
+
+  const resources = await manager.resolveAssistantResources("main");
+  assert.equal(resources.skillPaths.length, 1);
+  assert.equal(resources.appendSystemPrompt.filter((value) => value.includes("Operations context v1")).length, 1);
+  assert.deepEqual(resources.resolvedContributionIds.sort(), [contextId, functionId, secondFunctionId, thirdFunctionId, skillId].sort());
+  assert.equal(resources.functionalAssistants.length, 3);
+  assert.equal(resources.functionalAssistants.find((item) => item.functionId === functionId).sharingMode, "isolated");
+  assert.equal(resources.functionalAssistants.find((item) => item.functionId === secondFunctionId).sharingMode, "shared");
+  assert.equal(resources.functionalAssistants.find((item) => item.functionId === thirdFunctionId).sharingMode, "hybrid");
+  assert.deepEqual(resources.functionalAssistants.find((item) => item.functionId === functionId).resolvedContributionIds.sort(), [contextId, skillId].sort());
+  assert.deepEqual(resources.customTools.map((tool) => tool.name), ["functional_assistant_state"]);
+
+  await manager.functionalAssistantStorage.write({
+    functionId,
+    assistantId: "main",
+    sharingMode: "isolated",
+    path: "memory/progress.md",
+    content: "local progress\n",
+  });
+  const nextManifest = { ...manifest, version: "2.0.0" };
+  await writeFile(join(repo.path, "wuxianpi-package.json"), `${JSON.stringify(nextManifest, null, 2)}\n`);
+  await writeFile(join(repo.path, "context.md"), "Operations context v2\n");
+  const v2 = await commitRepository(repo.path, "Functional assistant v2");
+  market.plans[packageId] = installPlan({ ...repo, ...v2 });
+  await manager.update(packageId);
+
+  const persisted = await manager.functionalAssistantStorage.read({
+    functionId,
+    assistantId: "main",
+    sharingMode: "isolated",
+    path: "memory/progress.md",
+  });
+  assert.equal(persisted.content, "local progress\n");
+  assert.match((await manager.resolveAssistantResources("main")).appendSystemPrompt.join("\n"), /Operations context v2/);
+  const droppedSharedAndNew = await manager.setAssistantBinding("main", {
+    enabledContributionIds: [functionId, skillId],
+  });
+  assert.deepEqual(droppedSharedAndNew.functionalAssistants, {
+    [functionId]: { sharingMode: "isolated" },
+  });
+  const droppedIsolated = await manager.setAssistantBinding("main", {
+    enabledContributionIds: [skillId],
+  });
+  assert.deepEqual(droppedIsolated.functionalAssistants, {});
+  await manager.uninstall(packageId);
+  assert.equal((await manager.functionalAssistantStorage.read({
+    functionId,
+    assistantId: "main",
+    sharingMode: "isolated",
+    path: "memory/progress.md",
+  })).content, "local progress\n");
+});
+
 test("Package-owned MCP and service contributions preserve unrelated config and follow contribution lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "wuxianpi-package-owned-"));
   const packageId = "io.test.owned";

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Camera, Trash2 } from "lucide-react";
+import { Camera, FolderOpen, Store, Trash2 } from "lucide-react";
 import type {
   AssistantAvatarAssetMutation,
   AssistantFiles,
@@ -14,6 +14,7 @@ import type {
 import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
 import { createAssistant, getAssistant, updateAssistant } from "./api";
 import { assistantAvatarBackground, assistantAvatarUrl, prepareAssistantAvatar } from "@/lib/assistant-avatar";
+import { FunctionalAssistantBindings } from "./FunctionalAssistantBindings";
 
 interface Props {
   assistant?: AssistantSummary | null;
@@ -21,9 +22,11 @@ interface Props {
   config?: GlobalWuxianPiConfigV1 | null;
   onClose: () => void;
   onSaved: (assistant: AssistantSummary) => void;
+  onManageWorkspaces?: () => void;
+  onOpenMarketplace?: () => void;
 }
 
-type EditorTab = "identity" | "role" | "capabilities" | "voice";
+type EditorTab = "identity" | "role" | "capabilities" | "functional" | "voice";
 
 const EMPTY_FILES: AssistantFiles = { agents: "", memory: "", workspaces: "" };
 
@@ -88,7 +91,7 @@ function humanSource(source: CapabilityDescriptor["source"]): string {
   })[source];
 }
 
-export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }: Props) {
+export function AssistantEditor({ assistant, catalog, config, onClose, onSaved, onManageWorkspaces, onOpenMarketplace }: Props) {
   const [tab, setTab] = useState<EditorTab>("identity");
   const [id, setId] = useState(assistant?.id ?? "");
   const [manifest, setManifest] = useState<AssistantManifestV1>(assistant?.manifest ?? defaultManifest());
@@ -229,9 +232,9 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">×</button>
         </header>
         <nav className="wuxianpi-segmented" aria-label="助手设置分组">
-          {(["identity", "role", "capabilities", "voice"] as EditorTab[]).map((item) => (
+          {(["identity", "role", "capabilities", "functional", "voice"] as EditorTab[]).map((item) => (
             <button key={item} type="button" className={tab === item ? "active" : ""} onClick={() => setTab(item)}>
-              {item === "identity" ? "资料" : item === "role" ? "角色与记忆" : item === "capabilities" ? "能力" : "声音"}
+              {item === "identity" ? "资料" : item === "role" ? "角色与记忆" : item === "capabilities" ? "能力" : item === "functional" ? "功能助手" : "声音"}
             </button>
           ))}
         </nav>
@@ -267,7 +270,7 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
             <div className="role-file-stack">
               <label><span>AGENTS.md <small>身份、行为和边界</small></span><textarea value={files.agents} onChange={(event) => setFiles((current) => ({ ...current, agents: event.target.value }))} rows={11} placeholder="# 身份\n\n你是…" /></label>
               <label><span>MEMORY.md <small>跨会话长期记忆</small></span><textarea value={files.memory} onChange={(event) => setFiles((current) => ({ ...current, memory: event.target.value }))} rows={7} /></label>
-              <label><span>WORKSPACES.md <small>用文字说明外部工作区路径与规则</small></span><textarea value={files.workspaces} onChange={(event) => setFiles((current) => ({ ...current, workspaces: event.target.value }))} rows={7} placeholder="## 小说项目\n路径：/data/data/…" /></label>
+              {onManageWorkspaces && <button type="button" className="workspace-manager-link" onClick={onManageWorkspaces}><FolderOpen size={17} /><span><strong>管理工作区</strong><small>路径、项目指令与项目记忆</small></span><em>›</em></button>}
             </div>
           )}
           {!loading && tab === "capabilities" && (
@@ -297,6 +300,11 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved }
                 </section>
               ))}
             </div>
+          )}
+          {!loading && tab === "functional" && (
+            assistant
+              ? <FunctionalAssistantBindings assistantId={assistant.id} onOpenMarketplace={onOpenMarketplace} />
+              : <div className="functional-assistant-empty"><Store size={22} /><strong>先保存助手，再绑定功能助手</strong></div>
           )}
           {!loading && tab === "voice" && (
             <div className="form-grid">

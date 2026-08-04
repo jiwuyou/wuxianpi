@@ -49,12 +49,15 @@ test("web API serves static UI and core resource endpoints", { timeout: 20_000 }
   assert.equal(ui.webApiUrl, `${base}/api/web/v1`);
 
   const created = await jsonFetch(`${base}/api/web/v1/sessions`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: root }),
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assistantId: "wuxianpi", cwd: root }),
   });
   assert.equal(typeof created.data.sessionId, "string");
+  assert.equal(created.data.assistantId, "wuxianpi");
+  assert.equal(created.data.ownershipState, "bound");
   const snapshot = await jsonFetch(`${base}/api/web/v1/sessions/${created.data.sessionId}/snapshot`);
   assert.equal(snapshot.data.type, "snapshot");
   assert.deepEqual(snapshot.data.history, []);
+  assert.equal(snapshot.data.state.assistantId, "wuxianpi");
 
   const assistants = await jsonFetch(`${base}/api/web/v1/assistants`);
   assert.equal(assistants.data.assistants.some((assistant) => assistant.id === "wuxianpi"), true);

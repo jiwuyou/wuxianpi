@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { cp, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { FunctionalAssistantStorage } from "./functional-assistant-storage.js";
+import { createFunctionalAssistantStateTool } from "./functional-assistant-tool.js";
 import { StandardMcpConfigStore, type McpServerConfig } from "./mcp-config.js";
 import { MarketClient } from "./market-client.js";
 import { PackageArtifactManager } from "./package-artifacts.js";
@@ -12,7 +14,8 @@ import { PackageGitRepository } from "./package-git.js";
 import { AtomicPackageStateStore, PackageOperationLog, removeIfExists, writeAtomicJson } from "./package-storage.js";
 import type {
   ActiveContributionRecord, AssistantPackageBinding, InstallPlan, InstalledPackageState,
-  PackageContribution, PackageExecutionContext, PackageManagerState, PackageOperationEvent, ResolvedAssistantPackageResources,
+  FunctionalAssistantBindingSettings, FunctionalAssistantSharingMode, PackageContribution, PackageExecutionContext,
+  PackageManagerState, PackageOperationEvent, ResolvedAssistantPackageResources, ResolvedFunctionalAssistant,
   WuxianPiPackageManifest,
 } from "./package-types.js";
 import {
@@ -25,6 +28,7 @@ import { ServiceManagerClient, type PackageServiceBridge } from "./service-manag
 
 export interface WuxianPiPackageManagerOptions {
   rootDir?: string;
+  functionalAssistantRoot?: string;
   agentDir: string;
   mcpConfigPath?: string;
   marketClient?: MarketClient;
@@ -45,6 +49,7 @@ export class WuxianPiPackageManager {
   readonly operationLog: PackageOperationLog;
   readonly selfJournal: SelfOperationJournal;
   readonly mcpConfig: StandardMcpConfigStore;
+  readonly functionalAssistantStorage: FunctionalAssistantStorage;
   private readonly agentDir: string;
   private readonly git: PackageGitRepository;
   private readonly artifacts: PackageArtifactManager;
@@ -69,6 +74,7 @@ export class WuxianPiPackageManager {
     this.operationLog = new PackageOperationLog(join(this.rootDir, "logs", "operations.jsonl"));
     this.selfJournal = new SelfOperationJournal(options.maintenanceRoot ?? join(homedir(), ".smallphoneai", "maintenance"));
     this.mcpConfig = new StandardMcpConfigStore(options.mcpConfigPath);
+    this.functionalAssistantStorage = new FunctionalAssistantStorage(options.functionalAssistantRoot ?? join(this.rootDir, "functional-assistants"));
     this.hostCapabilities = options.hostCapabilities ?? defaultHostCapabilities();
     this.executionContextPath = join(this.rootDir, "execution-context.json");
     this.initialExecutionContext = normalizeExecutionContext(options.initialExecutionContext ?? {});
@@ -108,7 +114,7 @@ export class WuxianPiPackageManager {
   async listExperiences(assistantId?: string): Promise<Array<Record<string, unknown>>> {
     const state = await this.store.read();
     const binding = assistantId ? state.assistantBindings[assistantId] : undefined;
-    const selected = new Set(binding?.enabledContributionIds ?? []);
+    const selected = resolveAssistantSelection(state, binding).resolvedContributionIds;
     const rows: Array<Record<string, unknown>> = [];
     for (const record of Object.values(state.contributions)) {
       const contribution = record.contribution;
@@ -206,12 +212,16 @@ export class WuxianPiPackageManager {
     return this.mutate(() => this.runOperation("uninstall", packageId, async (operationId) => {
       const current = await this.store.read();
       const installed = requireInstalled(current, packageId);
+      const functionalAssistantIds = Object.values(current.contributions)
+        .filter((record) => record.packageId === packageId && isFunctionalAssistant(record.contribution))
+        .map((record) => record.id);
       const next = structuredClone(current);
       delete next.packages[packageId];
       for (const [id, contribution] of Object.entries(next.contributions)) if (contribution.packageId === packageId) delete next.contributions[id];
       for (const binding of Object.values(next.assistantBindings)) {
         binding.enabledContributionIds = binding.enabledContributionIds.filter((id) => next.contributions[id] !== undefined);
         for (const id of Object.keys(binding.experienceSpaces)) if (!next.contributions[id]) delete binding.experienceSpaces[id];
+        for (const id of Object.keys(binding.functionalAssistants ?? {})) if (!next.contributions[id]) delete binding.functionalAssistants[id];
       }
       await this.withSelfOperation(installed, Object.keys(current.contributions).filter((id) => current.contributions[id]?.packageId === packageId), operationId,
         "Uninstall Package and deactivate its contributions", async () => this.commitActivation(current, next));
@@ -219,6 +229,7 @@ export class WuxianPiPackageManager {
       await Promise.all([
         removeIfExists(paths.source), removeIfExists(paths.revisions), removeIfExists(paths.candidates), removeIfExists(paths.artifacts),
         ...(purgeData ? [removeIfExists(paths.data)] : []),
+        ...(purgeData ? functionalAssistantIds.map((functionId) => this.functionalAssistantStorage.purgeFunction(functionId)) : []),
       ]);
       return { packageId, uninstalled: true, dataPreserved: !purgeData };
     }));
@@ -241,6 +252,7 @@ export class WuxianPiPackageManager {
         for (const binding of Object.values(next.assistantBindings)) {
           binding.enabledContributionIds = binding.enabledContributionIds.filter((id) => id !== contributionId);
           delete binding.experienceSpaces[contributionId];
+          if (binding.functionalAssistants) delete binding.functionalAssistants[contributionId];
         }
       }
       await this.withSelfOperation(installed, [contributionId], operationId,
@@ -251,14 +263,14 @@ export class WuxianPiPackageManager {
 
   async assistantBinding(assistantId: string): Promise<AssistantPackageBinding> {
     assertAssistantId(assistantId);
-    return (await this.store.read()).assistantBindings[assistantId] ?? {
-      assistantId, enabledContributionIds: [], experienceSpaces: {}, updatedAt: new Date(0).toISOString(),
-    };
+    const state = await this.store.read();
+    return normalizeAssistantBinding(state, assistantId, state.assistantBindings[assistantId]);
   }
 
   setAssistantBinding(assistantId: string, input: {
     enabledContributionIds: string[];
     experienceSpaces?: Record<string, string>;
+    functionalAssistants?: Record<string, Partial<FunctionalAssistantBindingSettings>>;
   }): Promise<AssistantPackageBinding> {
     return this.mutate(async () => {
       assertAssistantId(assistantId);
@@ -268,16 +280,32 @@ export class WuxianPiPackageManager {
         for (const id of ids) {
           const record = state.contributions[id];
           if (!record || !record.enabled) throw new RequestError("contribution_unavailable", `Contribution is not enabled: ${id}`);
-          if (record.contribution.assistantSelectable !== true && !["wuxianpi.experience", "wuxianpi.context"].includes(record.contribution.type)) {
+          if (record.contribution.assistantSelectable !== true && !["wuxianpi.experience", "wuxianpi.context"].includes(record.contribution.type) &&
+              !isFunctionalAssistant(record.contribution)) {
             throw new RequestError("contribution_not_selectable", `Contribution cannot be bound to an assistant: ${id}`);
           }
         }
+        const preliminary = resolveAssistantSelection(state, {
+          assistantId, enabledContributionIds: ids, experienceSpaces: spaces,
+          functionalAssistants: {},
+          updatedAt: new Date().toISOString(),
+        });
         for (const [id, space] of Object.entries(spaces)) {
-          if (!ids.includes(id) || state.contributions[id]?.contribution.type !== "wuxianpi.experience" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(space)) {
+          if (!preliminary.resolvedContributionIds.has(id) || state.contributions[id]?.contribution.type !== "wuxianpi.experience" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(space)) {
             throw new RequestError("invalid_experience_binding", `Invalid experience space binding for ${id}`);
           }
         }
-        const binding = { assistantId, enabledContributionIds: ids, experienceSpaces: spaces, updatedAt: new Date().toISOString() };
+        const requestedFunctionalAssistants = input.functionalAssistants === undefined
+          ? state.assistantBindings[assistantId]?.functionalAssistants
+          : input.functionalAssistants;
+        const functionalAssistants = normalizeFunctionalAssistantSettings(
+          preliminary.functionalAssistants,
+          requestedFunctionalAssistants,
+          input.functionalAssistants !== undefined,
+        );
+        const binding: AssistantPackageBinding = {
+          assistantId, enabledContributionIds: ids, experienceSpaces: spaces, functionalAssistants, updatedAt: new Date().toISOString(),
+        };
         state.assistantBindings[assistantId] = binding;
         return binding;
       });
@@ -289,11 +317,44 @@ export class WuxianPiPackageManager {
   async resolveAssistantResources(assistantId?: string): Promise<ResolvedAssistantPackageResources> {
     const state = await this.store.read();
     const binding = assistantId ? state.assistantBindings[assistantId] : undefined;
-    const selected = new Set(binding?.enabledContributionIds ?? []);
+    const selection = resolveAssistantSelection(state, binding);
+    const selected = selection.resolvedContributionIds;
+    const functionalAssistants: ResolvedFunctionalAssistant[] = assistantId
+      ? selection.functionalAssistants.map((record) => {
+        const contributionIds = expandContributionIds(state, record.contribution.defaultBindings ?? []);
+        const sharingMode = functionalAssistantMode(binding, record.id);
+        const paths = this.functionalAssistantStorage.statePaths(record.id, assistantId);
+        return {
+          functionId: record.id,
+          packageId: record.packageId,
+          name: record.contribution.name,
+          ...(record.contribution.description ? { description: record.contribution.description } : {}),
+          sharingMode,
+          defaultBindingIds: [...new Set(record.contribution.defaultBindings ?? [])],
+          resolvedContributionIds: [...contributionIds],
+          sharedStatePath: paths.shared,
+          profileStatePath: paths.profile,
+        };
+      })
+      : [];
     const result: ResolvedAssistantPackageResources = {
       extensionPaths: [], skillPaths: [], promptPaths: [], themePaths: [], appendSystemPrompt: [],
-      mcpServerIds: [], webExtensionIds: [], experiences: [],
+      mcpServerIds: [], webExtensionIds: [], experiences: [], customTools: [],
+      resolvedContributionIds: [...selected], functionalAssistants,
     };
+    for (const functional of functionalAssistants) {
+      result.appendSystemPrompt.push(
+        `Functional assistant ${functional.name} (${functional.functionId}) is bound as a stateful Skill bundle with ${functional.sharingMode} storage. ` +
+        `Use ${functional.functionId} state only for this functional assistant's domain knowledge, progress, and task experience.`,
+      );
+    }
+    if (assistantId && functionalAssistants.length > 0) {
+      result.customTools.push(createFunctionalAssistantStateTool({
+        assistantId,
+        storage: this.functionalAssistantStorage,
+        bindings: functionalAssistants.map(({ functionId, sharingMode }) => ({ functionId, sharingMode })),
+      }));
+    }
     for (const record of Object.values(state.contributions)) {
       if (!record.enabled) continue;
       const contribution = record.contribution;
@@ -895,6 +956,100 @@ function requireInstalled(state: PackageManagerState, packageId: string): Instal
   return installed;
 }
 
+interface AssistantContributionSelection {
+  resolvedContributionIds: Set<string>;
+  functionalAssistants: ActiveContributionRecord[];
+}
+
+function resolveAssistantSelection(
+  state: PackageManagerState,
+  binding: AssistantPackageBinding | undefined,
+): AssistantContributionSelection {
+  const resolvedContributionIds = new Set<string>();
+  const functionalAssistants = new Map<string, ActiveContributionRecord>();
+  const visit = (id: string): void => {
+    if (resolvedContributionIds.has(id)) return;
+    const record = state.contributions[id];
+    if (!record?.enabled) return;
+    resolvedContributionIds.add(id);
+    if (!isFunctionalAssistant(record.contribution)) return;
+    functionalAssistants.set(id, record);
+    for (const defaultId of record.contribution.defaultBindings ?? []) visit(defaultId);
+  };
+  for (const id of binding?.enabledContributionIds ?? []) visit(id);
+  return { resolvedContributionIds, functionalAssistants: [...functionalAssistants.values()] };
+}
+
+function expandContributionIds(state: PackageManagerState, ids: string[]): Set<string> {
+  const selection = resolveAssistantSelection(state, {
+    assistantId: "resolver",
+    enabledContributionIds: ids,
+    experienceSpaces: {},
+    functionalAssistants: {},
+    updatedAt: new Date(0).toISOString(),
+  });
+  return selection.resolvedContributionIds;
+}
+
+function normalizeAssistantBinding(
+  state: PackageManagerState,
+  assistantId: string,
+  binding: AssistantPackageBinding | undefined,
+): AssistantPackageBinding {
+  const base: AssistantPackageBinding = binding ?? {
+    assistantId,
+    enabledContributionIds: [],
+    experienceSpaces: {},
+    functionalAssistants: {},
+    updatedAt: new Date(0).toISOString(),
+  };
+  const selection = resolveAssistantSelection(state, base);
+  return {
+    ...base,
+    assistantId,
+    enabledContributionIds: [...new Set(base.enabledContributionIds ?? [])],
+    experienceSpaces: { ...(base.experienceSpaces ?? {}) },
+    functionalAssistants: normalizeFunctionalAssistantSettings(selection.functionalAssistants, base.functionalAssistants, false),
+  };
+}
+
+function normalizeFunctionalAssistantSettings(
+  records: ActiveContributionRecord[],
+  requested: Record<string, Partial<FunctionalAssistantBindingSettings>> | undefined,
+  rejectUnknown = true,
+): Record<string, FunctionalAssistantBindingSettings> {
+  const ids = new Set(records.map((record) => record.id));
+  if (rejectUnknown) {
+    for (const id of Object.keys(requested ?? {})) {
+      if (!ids.has(id)) throw new RequestError("functional_assistant_unbound", `Functional assistant is not selected: ${id}`);
+    }
+  }
+  return Object.fromEntries(records.map((record) => {
+    const mode = requested?.[record.id]?.sharingMode ?? "hybrid";
+    assertFunctionalAssistantSharingMode(mode, record.id);
+    return [record.id, { sharingMode: mode }];
+  }));
+}
+
+function functionalAssistantMode(binding: AssistantPackageBinding | undefined, functionId: string): FunctionalAssistantSharingMode {
+  const mode = binding?.functionalAssistants?.[functionId]?.sharingMode ?? "hybrid";
+  return isFunctionalAssistantSharingMode(mode) ? mode : "hybrid";
+}
+
+function isFunctionalAssistant(contribution: PackageContribution): boolean {
+  return contribution.type === "wuxianpi.assistantTemplate" && contribution.kind === "functional";
+}
+
+function assertFunctionalAssistantSharingMode(value: unknown, functionId: string): asserts value is FunctionalAssistantSharingMode {
+  if (!isFunctionalAssistantSharingMode(value)) {
+    throw new RequestError("invalid_functional_assistant_sharing_mode", `Invalid sharing mode for ${functionId}: ${String(value)}`);
+  }
+}
+
+function isFunctionalAssistantSharingMode(value: unknown): value is FunctionalAssistantSharingMode {
+  return value === "isolated" || value === "shared" || value === "hybrid";
+}
+
 function dedupeResources(resources: ResolvedAssistantPackageResources): ResolvedAssistantPackageResources {
   resources.extensionPaths = [...new Set(resources.extensionPaths)];
   resources.skillPaths = [...new Set(resources.skillPaths)];
@@ -902,6 +1057,11 @@ function dedupeResources(resources: ResolvedAssistantPackageResources): Resolved
   resources.themePaths = [...new Set(resources.themePaths)];
   resources.mcpServerIds = [...new Set(resources.mcpServerIds)];
   resources.webExtensionIds = [...new Set(resources.webExtensionIds)];
+  resources.appendSystemPrompt = [...new Set(resources.appendSystemPrompt)];
+  resources.resolvedContributionIds = [...new Set(resources.resolvedContributionIds)];
+  resources.functionalAssistants = [...new Map(resources.functionalAssistants.map((item) => [item.functionId, item])).values()];
+  resources.customTools = [...new Map(resources.customTools.map((tool) => [tool.name, tool])).values()];
+  resources.experiences = [...new Map(resources.experiences.map((item) => [`${item.contributionId}\0${item.experienceSpaceId}`, item])).values()];
   return resources;
 }
 

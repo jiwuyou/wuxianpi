@@ -3,7 +3,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { AgentMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
-import type { AssistantSummary, AssistantTtsConfig, PermissionDecision, PermissionRequest, WebExtensionSummary } from "@/lib/wuxianpi/contracts";
+import type { AssistantSummary, AssistantTtsConfig, PermissionDecision, PermissionRequest, WebExtensionSummary, Workspace } from "@/lib/wuxianpi/contracts";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
@@ -21,6 +21,11 @@ interface Props {
   defaultTts?: AssistantTtsConfig;
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  newSessionWorkspaceId?: string | null;
+  workspaceName?: string;
+  workspaces?: Workspace[];
+  selectedWorkspaceId?: string | null;
+  onWorkspaceChange?: (workspaceId: string | null) => void;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -35,6 +40,10 @@ interface Props {
   initialPrompt?: string | null;
   initialPromptKey?: string | null;
   onInitialPromptQueued?: () => void;
+}
+
+export function selectableWorkspaces(workspaces: Workspace[]): Workspace[] {
+  return workspaces.filter((workspace) => !workspace.archived);
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -97,7 +106,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ assistantId, assistant, webExtensions = [], defaultTts, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenModelsConfig, onContextUsageChange, initialPrompt, initialPromptKey, onInitialPromptQueued }: Props) {
+export function ChatWindow({ assistantId, assistant, webExtensions = [], defaultTts, session, newSessionCwd, newSessionWorkspaceId, workspaceName = "日常对话", workspaces = [], selectedWorkspaceId, onWorkspaceChange, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenModelsConfig, onContextUsageChange, initialPrompt, initialPromptKey, onInitialPromptQueued }: Props) {
   const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
   const assistantTts = assistant?.manifest.tts;
   const ttsConfig = !assistantTts || assistantTts === "inherit" ? defaultTts : assistantTts;
@@ -131,7 +140,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
     handleBuiltinSlashCommand,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, submitCard, cancelCard,
   } = useAgentSession({
-    assistantId, session, newSessionCwd, onAgentEnd: handleAgentCompleted, onSessionCreated, onSessionForked,
+    assistantId, session, newSessionCwd, newSessionWorkspaceId, onAgentEnd: handleAgentCompleted, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
 
@@ -372,6 +381,22 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
       {permissionRequest && (
         <PermissionDialog request={permissionRequest} onRespond={respondToPermission} />
       )}
+
+      <div className="chat-scope-bar">
+        <span>{assistant?.manifest.name ?? (session?.assistantId ? "助手不可用" : "未归属 Pi 会话")}</span>
+        <i>·</i>
+        {isEmptyNew && onWorkspaceChange ? (
+          <label>
+            <span className="sr-only">工作区</span>
+            <select value={selectedWorkspaceId ?? ""} onChange={(event) => onWorkspaceChange(event.target.value || null)}>
+              <option value="">日常对话</option>
+              {selectableWorkspaces(workspaces).map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>{workspace.name}</option>
+              ))}
+            </select>
+          </label>
+        ) : <span>{workspaceName}</span>}
+      </div>
 
       {isEmptyNew ? (
         <div className="flex flex-1 flex-col overflow-hidden">

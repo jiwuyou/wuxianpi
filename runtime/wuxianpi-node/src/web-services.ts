@@ -116,12 +116,23 @@ export class WebServices {
   async getAssistant(id: string, knownSessions?: Awaited<ReturnType<SessionRegistry["list"]>>["sessions"]) {
     assertSafeId(id, "assistant id");
     const directory = join(this.assistantsRoot, id);
-    const info = await lstat(directory);
+    let info;
+    try { info = await lstat(directory); }
+    catch (error) {
+      if (id !== "wuxianpi" || !isMissing(error)) throw new RequestError("assistant_not_found", `Assistant not found: ${id}`);
+      await this.ensureDefaultAssistant();
+      info = await lstat(directory);
+    }
     if (!info.isDirectory() || info.isSymbolicLink()) throw new RequestError("assistant_not_found", `Assistant not found: ${id}`);
     const manifest = JSON.parse(await readFile(join(directory, "assistant.json"), "utf8")) as Record<string, unknown>;
     validateAssistantManifest(manifest);
-    const sessions = knownSessions ?? (await this.options.registry.list({ cwd: directory, all: false, offset: 0, limit: 1000 })).sessions;
-    const owned = sessions.filter((session) => resolve(session.cwd) === resolve(directory));
+    const owned = knownSessions?.filter((session) => session.assistantId === id);
+    const summary = owned ? {
+      sessionCount: owned.length,
+      lastActiveAt: owned.map((session) => session.modifiedAt).sort().at(-1),
+    } : typeof this.options.registry.assistantSessionSummary === "function"
+      ? this.options.registry.assistantSessionSummary(id)
+      : { sessionCount: 0 };
     return {
       id,
       path: directory,
@@ -131,8 +142,8 @@ export class WebServices {
         memory: await readOptional(join(directory, "MEMORY.md"), ""),
         workspaces: await readOptional(join(directory, "WORKSPACES.md"), ""),
       },
-      sessionCount: owned.length,
-      lastActiveAt: owned.map((session) => session.modifiedAt).sort().at(-1),
+      sessionCount: summary.sessionCount,
+      lastActiveAt: summary.lastActiveAt,
       diagnostics: [],
     };
   }
@@ -344,8 +355,8 @@ export class WebServices {
     return this.fileInfo(target);
   }
 
-  async listSkills(cwd: string) {
-    const packageResources = await this.options.packageManager?.resolveAssistantResourcesForCwd(cwd, this.assistantsRoot);
+  async listSkills(cwd: string, assistantId?: string) {
+    const packageResources = await this.options.packageManager?.resolveAssistantResources(assistantId);
     const loader = new DefaultResourceLoader({
       cwd: resolve(cwd), agentDir: this.options.agentDir,
       additionalSkillPaths: packageResources?.skillPaths,
@@ -371,9 +382,9 @@ export class WebServices {
     }));
   }
 
-  async listExtensions(cwd = this.defaultCwd) {
+  async listExtensions(cwd = this.defaultCwd, assistantId?: string) {
     const output = new Map<string, Record<string, unknown>>();
-    const packageResources = await this.options.packageManager?.resolveAssistantResourcesForCwd(cwd, this.assistantsRoot);
+    const packageResources = await this.options.packageManager?.resolveAssistantResources(assistantId);
     const loader = new DefaultResourceLoader({
       cwd: resolve(cwd), agentDir: this.options.agentDir,
       additionalExtensionPaths: packageResources?.extensionPaths,
@@ -430,10 +441,10 @@ export class WebServices {
     return { path: targetReal, size: info.size, contentType: contentType(targetReal) };
   }
 
-  async capabilities(cwd = this.defaultCwd) {
+  async capabilities(cwd = this.defaultCwd, assistantId?: string) {
     const [skills, extensions, config] = await Promise.all([
-      this.listSkills(cwd).catch((error) => ({ skills: [], diagnostics: [{ message: errorMessage(error) }] })),
-      this.listExtensions(cwd),
+      this.listSkills(cwd, assistantId).catch((error) => ({ skills: [], diagnostics: [{ message: errorMessage(error) }] })),
+      this.listExtensions(cwd, assistantId),
       this.readConfig(),
     ]);
     const capabilities: Array<Record<string, unknown>> = [
@@ -479,7 +490,7 @@ export class WebServices {
 
   async resolveAssistantToolNames(id: string): Promise<{ toolNames: string[]; configured: string[] }> {
     const assistant = await this.getAssistant(id);
-    const [config, extensions] = await Promise.all([this.readConfig(), this.listExtensions(assistant.path)]);
+    const [config, extensions] = await Promise.all([this.readConfig(), this.listExtensions(assistant.path, id)]);
     const configured = Array.isArray(assistant.manifest.tools)
       ? assistant.manifest.tools.filter((name: unknown): name is string => typeof name === "string")
       : Array.isArray(config.defaults?.tools)
@@ -500,13 +511,11 @@ export class WebServices {
     return { toolNames: resolved, configured };
   }
 
-  async resolveAssistantToolNamesForCwd(cwd: string): Promise<string[] | undefined> {
-    const relativePath = relative(this.assistantsRoot, resolve(cwd));
-    if (!relativePath || relativePath.startsWith("..") || relativePath.includes(sep)) return undefined;
-    return (await this.resolveAssistantToolNames(relativePath)).toolNames;
-  }
-
   async applyAssistantTools(sessionId: string, assistantId: string) {
+    const binding = this.options.registry.binding(sessionId);
+    if (!binding || binding.assistantId !== assistantId) {
+      throw new RequestError("session_binding_mismatch", "Assistant tools must match the session's immutable Profile binding");
+    }
     const resolved = await this.resolveAssistantToolNames(assistantId);
     const applied = await this.options.registry.setAssistantTools(sessionId, resolved.toolNames);
     return { source: "assistant", ...(isRecord(applied) ? applied : { result: applied }) };
@@ -811,6 +820,9 @@ function requireRecordString(value: Record<string, unknown>, name: string): stri
 
 function stringOr(value: unknown, fallback: string): string { return typeof value === "string" ? value : fallback; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function isMissing(error: unknown): boolean {
+  return !!error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT";
+}
 async function readOptional(path: string, fallback: string): Promise<string> { try { return await readFile(path, "utf8"); } catch { return fallback; } }
 
 type McpDiagnostic = { level: "info" | "warning" | "error"; code: string; message: string };

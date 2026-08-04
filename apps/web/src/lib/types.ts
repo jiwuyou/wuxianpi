@@ -265,6 +265,10 @@ export interface SessionInfo {
   path: string;
   id: string;
   cwd: string;
+  assistantId: string | null;
+  workspaceId: string | null;
+  workspaceName?: string;
+  ownershipState: "bound" | "unbound";
   name?: string;
   created: string;
   modified: string;

@@ -1,6 +1,15 @@
 import type { AgentMessage, SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ExecutableCardState, JsonValue } from "@/lib/executable-card";
 import type {
+  CreateSessionRequest,
+  Workspace,
+  WorkspaceCreateRequest,
+  WorkspaceListOptions,
+  WorkspaceUpdateRequest,
+} from "@/lib/wuxianpi/contracts";
+import type {
+  FunctionalAssistantBinding,
+  FunctionalAssistantSharingMode,
   InstalledPackageListResponse,
   LocalContribution,
   LocalPackage,
@@ -99,10 +108,18 @@ export function normalizeSessionList(body: unknown): SessionInfo[] {
     const path = text(row.sessionPath ?? row.path);
     const id = text(row.sessionId ?? row.id);
     const parentPath = text(row.parentSessionPath);
+    const rawAssistantId = optionalText(row.assistantId) ?? null;
+    const ownershipState: SessionInfo["ownershipState"] = row.ownershipState === "bound" && rawAssistantId ? "bound" : "unbound";
+    const assistantId = ownershipState === "bound" ? rawAssistantId : null;
+    const workspaceId = ownershipState === "bound" ? optionalText(row.workspaceId) ?? null : null;
     return {
       id,
       path,
       cwd: text(row.cwd),
+      assistantId,
+      workspaceId,
+      ...(ownershipState === "bound" && optionalText(row.workspaceName) ? { workspaceName: optionalText(row.workspaceName) } : {}),
+      ownershipState,
       name: typeof row.name === "string" ? row.name : undefined,
       created: text(row.createdAt ?? row.created),
       modified: text(row.modifiedAt ?? row.modified ?? row.createdAt ?? row.created),
@@ -111,6 +128,32 @@ export function normalizeSessionList(body: unknown): SessionInfo[] {
       parentSessionId: text(row.parentSessionId) || idByPath.get(parentPath) || undefined,
     };
   }).filter((session) => session.id.length > 0);
+}
+
+export function normalizeWorkspace(value: unknown): Workspace | null {
+  const row = record(value);
+  const id = optionalText(row.id);
+  const name = optionalText(row.name);
+  const rootCwd = optionalText(row.rootCwd);
+  const createdAt = optionalText(row.createdAt);
+  const updatedAt = optionalText(row.updatedAt);
+  if (!id || !name || !rootCwd || !createdAt || !updatedAt || typeof row.archived !== "boolean") return null;
+  return {
+    id,
+    name,
+    rootCwd,
+    archived: row.archived,
+    createdAt,
+    updatedAt,
+    instructions: typeof row.instructions === "string" ? row.instructions : "",
+    memory: typeof row.memory === "string" ? row.memory : "",
+  };
+}
+
+function requireWorkspace(value: unknown, operation: string): Workspace {
+  const workspace = normalizeWorkspace(value);
+  if (!workspace) throw new Error(`Runtime returned an invalid Workspace for ${operation}`);
+  return workspace;
 }
 
 function recordArray(value: unknown): JsonRecord[] {
@@ -180,6 +223,32 @@ function normalizeLocalContribution(value: unknown): LocalContribution | null {
   };
 }
 
+function functionalAssistantSharingMode(value: unknown): FunctionalAssistantSharingMode | null {
+  return value === "isolated" || value === "shared" || value === "hybrid" ? value : null;
+}
+
+export function normalizeFunctionalAssistantBindings(value: unknown): Record<string, FunctionalAssistantBinding> {
+  return Object.fromEntries(Object.entries(record(value)).flatMap(([functionId, rawBinding]) => {
+    const id = optionalText(functionId);
+    const sharingMode = functionalAssistantSharingMode(record(rawBinding).sharingMode);
+    return id && sharingMode ? [[id, { sharingMode }]] : [];
+  }));
+}
+
+export function normalizePackageAssistantBinding(value: unknown, fallbackAssistantId?: string): PackageAssistantBinding {
+  const binding = record(value);
+  return {
+    assistantId: optionalText(binding.assistantId) ?? optionalText(fallbackAssistantId) ?? "",
+    enabledContributionIds: stringArray(binding.enabledContributionIds),
+    experienceSpaces: Object.fromEntries(Object.entries(record(binding.experienceSpaces)).flatMap(([rawId, space]) => {
+      const id = optionalText(rawId);
+      const normalizedSpace = optionalText(space);
+      return id && normalizedSpace ? [[id, normalizedSpace]] : [];
+    })),
+    functionalAssistants: normalizeFunctionalAssistantBindings(binding.functionalAssistants),
+  };
+}
+
 export function normalizeLocalPackage(value: unknown, update?: unknown): LocalPackage {
   const row = record(value);
   const updateRow = record(update);
@@ -202,11 +271,7 @@ export function normalizeLocalPackage(value: unknown, update?: unknown): LocalPa
   const bindings = recordArray(row.bindings).flatMap((binding) => {
     const assistantId = optionalText(binding.assistantId);
     if (!assistantId) return [];
-    return [{
-      assistantId,
-      enabledContributionIds: stringArray(binding.enabledContributionIds),
-      experienceSpaces: Object.fromEntries(Object.entries(record(binding.experienceSpaces)).flatMap(([id, space]) => optionalText(space) ? [[id, optionalText(space)!]] : [])),
-    }];
+    return [normalizePackageAssistantBinding(binding, assistantId)];
   });
   const conflicts = stringArray(git.conflicts ?? record(lastError.details).conflicts);
   const status = updateRow.available === true ? "update_available" : packageStatus(sourceStatus);
@@ -777,11 +842,48 @@ export class WebApiClient {
 
   status() { return this.request<Record<string, unknown>>("/status"); }
 
+  async listWorkspaces(options: WorkspaceListOptions = {}): Promise<Workspace[]> {
+    const payload = await this.request<unknown>(
+      "/workspaces",
+      {},
+      options.includeArchived === true ? { includeArchived: true } : undefined,
+    );
+    const rows = recordArray(record(payload).workspaces);
+    return rows.flatMap((row) => {
+      const workspace = normalizeWorkspace(row);
+      return workspace ? [workspace] : [];
+    });
+  }
+
+  async createWorkspace(input: WorkspaceCreateRequest): Promise<Workspace> {
+    const payload = await this.request<unknown>("/workspaces", { method: "POST", body: JSON.stringify(input) });
+    return requireWorkspace(record(payload).workspace, "create");
+  }
+
+  async getWorkspace(workspaceId: string): Promise<Workspace> {
+    const payload = await this.request<unknown>(`/workspaces/${encodeURIComponent(workspaceId)}`);
+    return requireWorkspace(record(payload).workspace, "get");
+  }
+
+  async updateWorkspace(workspaceId: string, input: WorkspaceUpdateRequest): Promise<Workspace> {
+    const payload = await this.request<unknown>(`/workspaces/${encodeURIComponent(workspaceId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+    return requireWorkspace(record(payload).workspace, "update");
+  }
+
+  async deleteWorkspace(workspaceId: string): Promise<boolean> {
+    const payload = record(await this.request<unknown>(`/workspaces/${encodeURIComponent(workspaceId)}`, { method: "DELETE" }));
+    if (typeof payload.removed !== "boolean") throw new Error("Runtime returned an invalid Workspace delete result");
+    return payload.removed;
+  }
+
   async listSessions(): Promise<SessionInfo[]> {
     return normalizeSessionList(await this.request<unknown>("/sessions"));
   }
 
-  async createSession(input: Record<string, unknown>): Promise<{ sessionId: string; session?: SessionInfo; warnings?: JsonRecord[] }> {
+  async createSession(input: CreateSessionRequest): Promise<{ sessionId: string; session?: SessionInfo; warnings?: JsonRecord[] }> {
     const body = await this.request<JsonRecord>("/sessions", { method: "POST", body: JSON.stringify(input) });
     const normalized = normalizeSessionList([body.session ?? body]);
     const session = normalized[0];
@@ -1011,8 +1113,8 @@ export class WebApiClient {
   }
 
   async packageAssistantBinding(assistantId: string): Promise<PackageAssistantBinding> {
-    const payload = await this.request<{ binding: PackageAssistantBinding }>(`/packages/bindings/${encodeURIComponent(assistantId)}`);
-    return payload.binding;
+    const payload = await this.request<unknown>(`/packages/bindings/${encodeURIComponent(assistantId)}`);
+    return normalizePackageAssistantBinding(record(payload).binding, assistantId);
   }
 
   async installMarketPackage(packageId: string, releaseId?: string) {
@@ -1049,10 +1151,18 @@ export class WebApiClient {
     return successfulPackageOperation("commit", packageId, result);
   }
 
-  async setPackageAssistantBinding(packageId: string, assistantId: string, enabledContributionIds: string[], experienceSpaces: Record<string, string>) {
+  async setPackageAssistantBinding(
+    packageId: string,
+    assistantId: string,
+    enabledContributionIds: string[],
+    experienceSpaces: Record<string, string>,
+    functionalAssistants?: Record<string, FunctionalAssistantBinding>,
+  ) {
+    const resolvedFunctionalAssistants = functionalAssistants
+      ?? (await this.packageAssistantBinding(assistantId)).functionalAssistants;
     const result = await this.request<unknown>(`/packages/bindings/${encodeURIComponent(assistantId)}`, {
       method: "PUT",
-      body: JSON.stringify({ enabledContributionIds, experienceSpaces }),
+      body: JSON.stringify({ enabledContributionIds, experienceSpaces, functionalAssistants: resolvedFunctionalAssistants }),
     });
     return successfulPackageOperation("bind", packageId, result);
   }

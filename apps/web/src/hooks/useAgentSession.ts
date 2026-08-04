@@ -14,6 +14,7 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import type { SelectableToolPreset, ToolEntry, ToolPreset } from "@/components/ToolPanel";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { PermissionDecision, PermissionRequest } from "@/lib/wuxianpi/contracts";
+import type { CreateSessionRequest } from "@/lib/wuxianpi/contracts";
 import { getPermissionState, mutatePermission } from "@/components/wuxianpi/api";
 import { runtimeErrorText, webApi, type ModelListEntry } from "@/lib/web-api-client";
 import { includesModel, resolveSelectableDefault, selectableModels } from "@/lib/model-selection";
@@ -135,6 +136,7 @@ export interface UseAgentSessionOptions {
   assistantId?: string;
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  newSessionWorkspaceId?: string | null;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -263,13 +265,27 @@ type SlashCommandsResponse = {
   commands?: SlashCommandInfo[];
 };
 
+export function buildNewSessionRequest(input: {
+  assistantId: string;
+  workspaceId?: string | null;
+  cwd?: string | null;
+  toolNames?: string[];
+}): CreateSessionRequest {
+  return {
+    assistantId: input.assistantId,
+    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    ...(input.cwd ? { cwd: input.cwd } : {}),
+    ...(input.toolNames ? { toolNames: input.toolNames } : {}),
+  };
+}
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    assistantId, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+    assistantId, session, newSessionCwd, newSessionWorkspaceId, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
-  const isNew = session === null && newSessionCwd !== null;
+  const isNew = session === null && Boolean(assistantId);
 
   const [data, setData] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(!isNew);
@@ -323,6 +339,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
+  const createdSessionRef = useRef<SessionInfo | null>(null);
   const promptRunIdRef = useRef(0);
   const pendingStreamMessageRef = useRef<Partial<AgentMessage> | null>(null);
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -480,40 +497,48 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)") => {
     const sid = sessionIdRef.current;
-    if (!isNew || !newSessionCwd || !sid || newSessionPromotedRef.current) return;
+    if (!isNew || !assistantId || !sid || newSessionPromotedRef.current) return;
     newSessionPromotedRef.current = true;
-    onSessionCreated?.({
+    const now = new Date().toISOString();
+    const created = createdSessionRef.current;
+    onSessionCreated?.(created ? {
+      ...created,
+      modified: now,
+      messageCount,
+      firstMessage,
+    } : {
       id: sid,
       path: "",
-      cwd: newSessionCwd,
+      cwd: newSessionCwd ?? "",
+      assistantId,
+      workspaceId: newSessionWorkspaceId ?? null,
+      ownershipState: "bound",
       name: undefined,
-      created: new Date().toISOString(),
-      modified: new Date().toISOString(),
+      created: now,
+      modified: now,
       messageCount,
       firstMessage,
     });
-  }, [isNew, newSessionCwd, onSessionCreated]);
+  }, [assistantId, isNew, newSessionCwd, newSessionWorkspaceId, onSessionCreated]);
 
   const ensureNewSession = useCallback(async () => {
     if (sessionIdRef.current) return sessionIdRef.current;
-    if (!isNew || !newSessionCwd) return sessionIdRef.current;
+    if (!isNew || !assistantId) return sessionIdRef.current;
     if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
 
     const promise = (async () => {
-      const selectedModel = newSessionModel ?? newSessionDefaultModel;
-      if (selectedModel) setPendingModel(selectedModel);
       const { toolNamesForPreset } = await import("@/components/ToolPanel");
       const toolNames = toolNamesForPreset(toolPreset);
-      const result = await webApi.createSession({
-        ...(assistantId ? { assistantId } : {}),
+      const result = await webApi.createSession(buildNewSessionRequest({
+        assistantId,
+        workspaceId: newSessionWorkspaceId,
         cwd: newSessionCwd,
-        ...(toolNames ? { toolNames } : {}),
-        ...(selectedModel && !assistantId ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-        ...(thinkingLevel !== "auto" && !assistantId ? { thinkingLevel } : {}),
-      });
+        toolNames,
+      }));
       const realId = result.sessionId;
       showToolWarnings(result.warnings);
       sessionIdRef.current = realId;
+      createdSessionRef.current = result.session ?? null;
       return realId;
     })();
 
@@ -523,7 +548,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, showToolWarnings]);
+  }, [assistantId, isNew, newSessionCwd, newSessionWorkspaceId, toolPreset, showToolWarnings]);
 
   const respondToPermission = useCallback(async (decision: PermissionDecision) => {
     const request = permissionRequest;
@@ -881,10 +906,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return;
     if (agentRunning) return;
-    if (isNew && !assistantId && modelsLoaded && !(newSessionModel ?? newSessionDefaultModel)) {
-      dispatchNotice({ type: "add", notice: { id: createNoticeId(), type: "warning", message: "请先配置一个可用模型。" } });
-      return;
-    }
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
     const promptRunId = promptRunIdRef.current + 1;
 
@@ -909,46 +930,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     try {
       let sentSessionId: string | null = null;
-      if (isNew && newSessionCwd) {
+      if (isNew) {
         const selectedModel = newSessionModel ?? newSessionDefaultModel;
-        const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-
-        if (existingSid) {
-          sentSessionId = existingSid;
-          if (selectedModel) {
-            setPendingModel(selectedModel);
-            await sendAgentCommand(existingSid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
-          }
-          await connectEvents(existingSid);
-          await sendAgentCommand(existingSid, {
-            type: "prompt",
-            message,
-            ...(piImages?.length ? { images: piImages } : {}),
-          });
-          promoteNewSession(1, message);
-        } else {
-          if (selectedModel) setPendingModel(selectedModel);
-          const { toolNamesForPreset } = await import("@/components/ToolPanel");
-          const toolNames = toolNamesForPreset(toolPreset);
-          const result = await webApi.createSession({
-            ...(assistantId ? { assistantId } : {}),
-            cwd: newSessionCwd,
-            ...(toolNames ? { toolNames } : {}),
-            ...(selectedModel && !assistantId ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-            ...(thinkingLevel !== "auto" && !assistantId ? { thinkingLevel } : {}),
-          });
-          const realId = result.sessionId;
-          showToolWarnings(result.warnings);
-          sessionIdRef.current = realId;
-          sentSessionId = realId;
-          await connectEvents(realId);
-          await sendAgentCommand(realId, {
-            type: "prompt",
-            message,
-            ...(piImages?.length ? { images: piImages } : {}),
-          });
-          promoteNewSession(1, message);
+        const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current ?? await ensureNewSession();
+        if (!existingSid) throw new Error("无法创建助手会话");
+        sentSessionId = existingSid;
+        if (selectedModel) {
+          setPendingModel(selectedModel);
+          await sendAgentCommand(existingSid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
         }
+        await connectEvents(existingSid);
+        await sendAgentCommand(existingSid, {
+          type: "prompt",
+          message,
+          ...(piImages?.length ? { images: piImages } : {}),
+        });
+        promoteNewSession(1, message);
       } else if (session) {
         sentSessionId = session.id;
         await connectEvents(session.id);
@@ -977,7 +974,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [assistantId, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, modelsLoaded, toolPreset, thinkingLevel, session, agentRunning, connectEvents, promoteNewSession, waitForPromptSettlement, showToolWarnings]);
+  }, [isNew, newSessionModel, newSessionDefaultModel, session, agentRunning, connectEvents, ensureNewSession, promoteNewSession, waitForPromptSettlement]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
