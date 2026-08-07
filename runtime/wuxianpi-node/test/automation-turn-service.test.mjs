@@ -80,6 +80,81 @@ test("AutomationTurnService persists scoped bindings, enforces idempotency, and 
   );
 });
 
+test("AutomationTurnService appends idempotent messages once and preserves uncertain outcomes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-automation-message-"));
+  const taskRoot = join(root, "task");
+  await mkdir(taskRoot, { recursive: true });
+  let appendCalls = 0;
+  let releaseAppend;
+  const registry = {
+    async assertAutomationConversation() {},
+    async appendAutomationMessage(input) {
+      appendCalls += 1;
+      if (input.message === "wait") {
+        await new Promise((resolve) => { releaseAppend = resolve; });
+      }
+      if (input.message === "fail") throw new Error("append failed");
+      return { entryId: `entry-${appendCalls}` };
+    },
+    async runAutomationTurn() { throw new Error("not expected"); },
+  };
+  const store = new AutomationTurnStore({ path: join(root, "automation.sqlite") });
+  const service = new AutomationTurnService(store, registry);
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const binding = await service.createBinding({ taskId: "notifier", conversationId: "session-1", taskRoot });
+  const request = {
+    taskToken: binding.taskToken,
+    taskId: "notifier",
+    runId: "run-1",
+    message: "wait",
+    idempotencyKey: "notice-1",
+  };
+
+  const firstPromise = service.appendMessage(request);
+  await waitUntil(() => appendCalls === 1 && typeof releaseAppend === "function");
+  let duplicateSettled = false;
+  const duplicatePromise = service.appendMessage(request).finally(() => { duplicateSettled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(duplicateSettled, false);
+  releaseAppend();
+  const [first, duplicate] = await Promise.all([firstPromise, duplicatePromise]);
+  assert.equal(first.created, true);
+  assert.equal(duplicate.created, false);
+  assert.equal(first.message.status, "succeeded");
+  assert.equal(duplicate.message.messageId, first.message.messageId);
+  assert.equal(appendCalls, 1);
+
+  const replay = await service.appendMessage(request);
+  assert.equal(replay.created, false);
+  assert.equal(replay.message.messageId, first.message.messageId);
+  assert.equal(appendCalls, 1);
+
+  const failedRequest = { ...request, runId: "run-2", message: "fail", idempotencyKey: "notice-2" };
+  await assert.rejects(service.appendMessage(failedRequest), /append failed/);
+  assert.equal(appendCalls, 2);
+  await assert.rejects(
+    service.appendMessage(failedRequest),
+    (error) => error.code === "automation_message_failed" && error.details.originalError.message === "append failed",
+  );
+  assert.equal(appendCalls, 2);
+
+  store.createOrGetMessage({
+    messageId: "00000000-0000-4000-8000-000000000002",
+    taskId: "notifier",
+    runId: "run-3",
+    conversationId: "session-1",
+    idempotencyKey: "notice-3",
+  });
+  await assert.rejects(
+    service.appendMessage({ ...request, runId: "run-3", message: "unknown", idempotencyKey: "notice-3" }),
+    (error) => error.code === "automation_message_outcome_unknown",
+  );
+  assert.equal(appendCalls, 2);
+});
+
 test("AutomationTurnService cancels only its active turn and startup interrupts orphaned work", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "wuxianpi-automation-cancel-"));
   const taskRoot = join(root, "task");
@@ -146,6 +221,55 @@ test("AutomationTurnService cancels only its active turn and startup interrupts 
   });
   assert.equal(reopened.interruptedAtStartup, 1);
   assert.equal(reopenedStore.getTurn(orphanId).status, "interrupted");
+  await reopened.close();
+});
+
+test("AutomationTurnService owns a shared database before startup recovery", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-automation-owner-"));
+  const taskRoot = join(root, "task");
+  await mkdir(taskRoot, { recursive: true });
+  let observedAbort = false;
+  const registry = {
+    async assertAutomationConversation() {},
+    async appendAutomationMessage() { return { entryId: "entry" }; },
+    async runAutomationTurn(input) {
+      input.onStarted();
+      await new Promise((resolve, reject) => input.signal.addEventListener("abort", () => {
+        observedAbort = true;
+        reject(new Error("aborted"));
+      }, { once: true }));
+    },
+  };
+  const databasePath = join(root, "automation.sqlite");
+  const firstStore = new AutomationTurnStore({ path: databasePath });
+  const first = new AutomationTurnService(firstStore, registry);
+  t.after(async () => {
+    await first.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const binding = await first.createBinding({ taskId: "watch", conversationId: "session-1", taskRoot });
+  const turn = await first.triggerTurn({
+    taskToken: binding.taskToken,
+    taskId: "watch",
+    runId: "run-1",
+    message: "watch",
+    idempotencyKey: "watch-1",
+  });
+  await waitUntil(() => firstStore.getTurn(turn.turnId)?.status === "running");
+
+  const secondStore = new AutomationTurnStore({ path: databasePath });
+  assert.throws(
+    () => new AutomationTurnService(secondStore, registry),
+    (error) => error.code === "automation_runtime_owned",
+  );
+  assert.equal(firstStore.getTurn(turn.turnId).status, "running");
+
+  await first.close();
+  assert.equal(observedAbort, true);
+  const reopenedStore = new AutomationTurnStore({ path: databasePath });
+  const reopened = new AutomationTurnService(reopenedStore, registry);
+  assert.equal(reopened.interruptedAtStartup, 0);
+  assert.equal(reopenedStore.getTurn(turn.turnId).status, "interrupted");
   await reopened.close();
 });
 

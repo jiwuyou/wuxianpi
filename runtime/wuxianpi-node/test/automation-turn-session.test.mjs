@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { AutomationTurnService } from "../dist/automation-turn-service.js";
+import { AutomationTurnStore } from "../dist/automation-turn-store.js";
 import { SessionRegistry } from "../dist/session-registry.js";
 
 test("SessionRegistry persists automation input as custom messages and serializes turns", async (t) => {
@@ -79,7 +81,7 @@ test("SessionRegistry persists automation input as custom messages and serialize
   assert.equal(automationMessages[0].details.kind, "turn");
 
   const appended = await registry.appendAutomationMessage({
-    ...common, runId: "notice", message: "任务已完成",
+    ...common, runId: "notice", message: "任务已完成", idempotencyKey: "notice",
   });
   assert.equal(typeof appended.entryId, "string");
   const entries = session.sessionManager.getEntries();
@@ -140,6 +142,51 @@ test("cancelling a queued automation turn does not abort the active turn in the 
   assert.equal((await first).assistantText, "first-complete");
   await queuedResult;
   assert.equal(abortCalls, 0);
+});
+
+test("AutomationTurnService shutdown removes a queued session turn", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-automation-shutdown-"));
+  const agentDir = join(root, "agent");
+  const taskRoot = join(root, "task");
+  const databasePath = join(root, "automation.sqlite");
+  await mkdir(taskRoot, { recursive: true });
+  const registry = new SessionRegistry(undefined, { agentDir, idleTimeoutMs: 0 });
+  const store = new AutomationTurnStore({ path: databasePath });
+  const service = new AutomationTurnService(store, registry);
+  t.after(async () => {
+    await service.close().catch(() => undefined);
+    await registry.dispose().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const identity = await registry.create(root);
+  const slot = await registry.getOrOpen(identity.sessionId);
+  slot.modelStatus = { state: "ready", provider: "test", modelId: "test" };
+  let releaseBlocker;
+  const blocker = registry.run(identity.sessionId, () => new Promise((resolve) => { releaseBlocker = resolve; }));
+  await waitUntil(() => typeof releaseBlocker === "function");
+  const binding = await service.createBinding({ taskId: "queued", conversationId: identity.sessionId, taskRoot });
+  const turn = await service.triggerTurn({
+    taskToken: binding.taskToken,
+    taskId: "queued",
+    runId: "run-1",
+    message: "queued turn",
+    idempotencyKey: "queued-1",
+  });
+  await waitUntil(() => store.getTurn(turn.turnId)?.status === "queued");
+
+  await Promise.race([
+    service.close(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("service shutdown timed out")), 1_000)),
+  ]);
+  releaseBlocker();
+  await blocker;
+  const reopenedStore = new AutomationTurnStore({ path: databasePath });
+  assert.equal(reopenedStore.getTurn(turn.turnId).status, "interrupted");
+  reopenedStore.close();
+  assert.equal(
+    (await registry.messages(identity.sessionId)).messages.some((message) => message.details?.runId === "run-1"),
+    false,
+  );
 });
 
 function assistantMessage(text) {

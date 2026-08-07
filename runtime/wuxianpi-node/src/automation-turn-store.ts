@@ -4,11 +4,13 @@ import { DatabaseSync } from "node:sqlite";
 import { RequestError } from "./protocol.js";
 import type {
   AutomationBindingRecord,
+  AutomationMessage,
+  AutomationMessageStatus,
   AutomationTurn,
   AutomationTurnStatus,
 } from "./automation-turn-types.js";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const ACTIVE_TURN_STATUSES: AutomationTurnStatus[] = ["queued", "running"];
 
 export interface AutomationTurnStoreOptions {
@@ -85,6 +87,58 @@ export class AutomationTurnStore {
       UPDATE automation_bindings SET revoked_at = ?, updated_at = ? WHERE task_id = ?
     `).run(now, now, taskId);
     return this.requireBinding(taskId);
+  }
+
+  createOrGetMessage(input: {
+    messageId: string;
+    taskId: string;
+    runId: string;
+    conversationId: string;
+    idempotencyKey: string;
+  }): { message: AutomationMessage; created: boolean } {
+    this.assertOpen();
+    const existing = this.getMessageByIdempotencyKey(input.taskId, input.runId, input.idempotencyKey);
+    if (existing) return { message: existing, created: false };
+    const now = this.timestamp();
+    try {
+      this.database.prepare(`
+        INSERT INTO automation_messages (
+          message_id, task_id, run_id, conversation_id, idempotency_key, status,
+          entry_id, error_code, error_message, created_at, completed_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, NULL, ?)
+      `).run(input.messageId, input.taskId, input.runId, input.conversationId, input.idempotencyKey, now, now);
+      return { message: this.requireMessage(input.messageId), created: true };
+    } catch (error) {
+      if (!isUniqueConstraint(error)) throw error;
+      const concurrent = this.getMessageByIdempotencyKey(input.taskId, input.runId, input.idempotencyKey);
+      if (!concurrent) throw error;
+      return { message: concurrent, created: false };
+    }
+  }
+
+  getMessage(messageId: string): AutomationMessage | undefined {
+    this.assertOpen();
+    const row = this.database.prepare(`${MESSAGE_SELECT} WHERE message_id = ?`).get(messageId);
+    return row ? messageFromRow(row) : undefined;
+  }
+
+  getMessageByIdempotencyKey(taskId: string, runId: string, idempotencyKey: string): AutomationMessage | undefined {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      ${MESSAGE_SELECT} WHERE task_id = ? AND run_id = ? AND idempotency_key = ?
+    `).get(taskId, runId, idempotencyKey);
+    return row ? messageFromRow(row) : undefined;
+  }
+
+  markMessageSucceeded(messageId: string, entryId: string): AutomationMessage {
+    return this.transitionMessage(messageId, "succeeded", { entryId });
+  }
+
+  markMessageFailed(messageId: string, error: { code: string; message: string }): AutomationMessage {
+    return this.transitionMessage(messageId, "failed", {
+      errorCode: error.code,
+      errorMessage: error.message,
+    });
   }
 
   createOrGetTurn(input: {
@@ -219,6 +273,35 @@ export class AutomationTurnStore {
     return this.requireTurn(turnId);
   }
 
+  private transitionMessage(
+    messageId: string,
+    status: Exclude<AutomationMessageStatus, "pending">,
+    values: { entryId?: string; errorCode?: string; errorMessage?: string },
+  ): AutomationMessage {
+    this.assertOpen();
+    const now = this.timestamp();
+    const result = this.database.prepare(`
+      UPDATE automation_messages SET status = ?, entry_id = COALESCE(?, entry_id),
+        error_code = COALESCE(?, error_code), error_message = COALESCE(?, error_message),
+        completed_at = ?, updated_at = ?
+      WHERE message_id = ? AND status = 'pending'
+    `).run(
+      status,
+      values.entryId ?? null,
+      values.errorCode ?? null,
+      values.errorMessage ?? null,
+      now,
+      now,
+      messageId,
+    );
+    if (result.changes === 0) {
+      const current = this.getMessage(messageId);
+      if (!current) throw new RequestError("automation_message_not_found", `Automation message not found: ${messageId}`);
+      throw new RequestError("automation_message_state_conflict", `Automation message is already ${current.status}`);
+    }
+    return this.requireMessage(messageId);
+  }
+
   private requireBinding(taskId: string): AutomationBindingRecord {
     const binding = this.getBinding(taskId);
     if (!binding) throw new RequestError("automation_binding_not_found", `Automation binding not found: ${taskId}`);
@@ -231,6 +314,12 @@ export class AutomationTurnStore {
     return turn;
   }
 
+  private requireMessage(messageId: string): AutomationMessage {
+    const message = this.getMessage(messageId);
+    if (!message) throw new RequestError("automation_message_not_found", `Automation message not found: ${messageId}`);
+    return message;
+  }
+
   private initializeSchema(): void {
     const versionRow = this.database.prepare("PRAGMA user_version").get();
     const version = Number(versionRow?.user_version ?? 0);
@@ -238,10 +327,10 @@ export class AutomationTurnStore {
       this.close();
       throw new RequestError("automation_schema_too_new", `Unsupported automation schema: ${version}`);
     }
-    if (version !== 0) return;
-    this.database.exec(`
-      BEGIN IMMEDIATE;
-      CREATE TABLE automation_bindings (
+    if (version === 0) {
+      this.database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE automation_bindings (
         task_id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL,
         task_root TEXT NOT NULL,
@@ -267,10 +356,21 @@ export class AutomationTurnStore {
         updated_at TEXT NOT NULL,
         UNIQUE (task_id, idempotency_key)
       );
-      CREATE INDEX automation_turns_task_created ON automation_turns(task_id, created_at DESC);
-      PRAGMA user_version = 1;
-      COMMIT;
-    `);
+        CREATE INDEX automation_turns_task_created ON automation_turns(task_id, created_at DESC);
+        ${CREATE_MESSAGES_SQL}
+        PRAGMA user_version = 2;
+        COMMIT;
+      `);
+      return;
+    }
+    if (version === 1) {
+      this.database.exec(`
+        BEGIN IMMEDIATE;
+        ${CREATE_MESSAGES_SQL}
+        PRAGMA user_version = 2;
+        COMMIT;
+      `);
+    }
   }
 
   private timestamp(): string { return this.now().toISOString(); }
@@ -284,6 +384,31 @@ const TURN_SELECT = `
          final_leaf_id, assistant_text, error_code, error_message,
          created_at, started_at, completed_at, updated_at
   FROM automation_turns
+`;
+
+const MESSAGE_SELECT = `
+  SELECT message_id, task_id, run_id, conversation_id, idempotency_key, status,
+         entry_id, error_code, error_message, created_at, completed_at, updated_at
+  FROM automation_messages
+`;
+
+const CREATE_MESSAGES_SQL = `
+  CREATE TABLE automation_messages (
+    message_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES automation_bindings(task_id),
+    run_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'failed')),
+    entry_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE (task_id, run_id, idempotency_key)
+  );
+  CREATE INDEX automation_messages_task_created ON automation_messages(task_id, created_at DESC);
 `;
 
 function bindingFromRow(row: Record<string, unknown>): AutomationBindingRecord {
@@ -312,6 +437,23 @@ function turnFromRow(row: Record<string, unknown>): AutomationTurn {
     errorMessage: nullableString(row.error_message),
     createdAt: String(row.created_at),
     startedAt: nullableString(row.started_at),
+    completedAt: nullableString(row.completed_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function messageFromRow(row: Record<string, unknown>): AutomationMessage {
+  return {
+    messageId: String(row.message_id),
+    taskId: String(row.task_id),
+    runId: String(row.run_id),
+    conversationId: String(row.conversation_id),
+    idempotencyKey: String(row.idempotency_key),
+    status: String(row.status) as AutomationMessageStatus,
+    entryId: nullableString(row.entry_id),
+    errorCode: nullableString(row.error_code),
+    errorMessage: nullableString(row.error_message),
+    createdAt: String(row.created_at),
     completedAt: nullableString(row.completed_at),
     updatedAt: String(row.updated_at),
   };

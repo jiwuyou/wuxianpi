@@ -9,6 +9,7 @@ import {
 import { CardExecutor } from "./card-executor.js";
 import {
   AUTOMATION_CUSTOM_MESSAGE_TYPE,
+  type AutomationIdempotentMessageContext,
   type AutomationMessageContext,
   type AutomationSessionTurnResult,
   type AutomationTurnContext,
@@ -33,6 +34,23 @@ export class SerialExecutor {
     const result = this.tail.then(operation, operation);
     this.tail = result.then(() => undefined, () => undefined);
     return result;
+  }
+  runCancellable<T>(operation: () => Promise<T>, signal: AbortSignal, cancellation: () => Error): Promise<T> {
+    if (signal.aborted) return Promise.reject(cancellation());
+    let aborted = false;
+    let rejectCancellation: ((error: Error) => void) | undefined;
+    const cancellationPromise = new Promise<never>((_resolve, reject) => { rejectCancellation = reject; });
+    const onAbort = () => {
+      aborted = true;
+      rejectCancellation?.(cancellation());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    const queued = this.tail.then(
+      () => aborted ? Promise.reject(cancellation()) : operation(),
+      () => aborted ? Promise.reject(cancellation()) : operation(),
+    );
+    this.tail = queued.then(() => undefined, () => undefined);
+    return Promise.race([queued, cancellationPromise]).finally(() => signal.removeEventListener("abort", onAbort));
   }
 }
 
@@ -381,7 +399,7 @@ export class SessionRegistry {
     await this.getOrOpen(conversationId);
   }
 
-  async appendAutomationMessage(input: AutomationMessageContext): Promise<{ entryId: string }> {
+  async appendAutomationMessage(input: AutomationIdempotentMessageContext): Promise<{ entryId: string }> {
     return this.run(input.conversationId, async (slot) => {
       const session = slot.runtime.session;
       await session.sendCustomMessage({
@@ -400,7 +418,9 @@ export class SessionRegistry {
     signal: AbortSignal;
     onStarted: () => void;
   }): Promise<AutomationSessionTurnResult> {
-    return this.run(input.conversationId, async (slot) => {
+    const slot = await this.getOrOpen(input.conversationId);
+    this.cancelReclaim(slot);
+    return slot.serial.runCancellable(async () => {
       if (input.signal.aborted) throw new RequestError("automation_turn_cancelled", "Automation turn was cancelled");
       this.requireSessionModelReady(slot, "automation.turn");
       const session = slot.runtime.session;
@@ -444,7 +464,7 @@ export class SessionRegistry {
       } finally {
         input.signal.removeEventListener("abort", abort);
       }
-    });
+    }, input.signal, () => new RequestError("automation_turn_cancelled", "Automation turn was cancelled"));
   }
 
   async prompt(sessionId: string, input: PromptInput): Promise<RuntimeIdentity & { accepted: true; userEntryId: string }> {

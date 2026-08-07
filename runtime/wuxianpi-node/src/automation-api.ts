@@ -66,8 +66,9 @@ export class AutomationApi {
         conversationId: optionalString(body, "conversationId"),
         message: requiredString(body, "message"),
         artifactRefs: body.artifactRefs,
+        idempotencyKey: requiredString(body, "idempotencyKey"),
       });
-      json(response, 201, { ok: true, data: result });
+      json(response, result.created ? 201 : 200, { ok: true, data: result });
       return;
     }
     if (parts.length === 1 && parts[0] === "turns" && method === "POST") {

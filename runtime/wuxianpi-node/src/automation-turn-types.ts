@@ -39,12 +39,33 @@ export interface AutomationTurn {
   updatedAt: string;
 }
 
+export type AutomationMessageStatus = "pending" | "succeeded" | "failed";
+
+export interface AutomationMessage {
+  messageId: string;
+  taskId: string;
+  runId: string;
+  conversationId: string;
+  idempotencyKey: string;
+  status: AutomationMessageStatus;
+  entryId: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  updatedAt: string;
+}
+
 export interface AutomationMessageContext {
   taskId: string;
   runId: string;
   conversationId: string;
   message: string;
   artifactRefs: string[];
+}
+
+export interface AutomationIdempotentMessageContext extends AutomationMessageContext {
+  idempotencyKey: string;
 }
 
 export interface AutomationTurnContext extends AutomationMessageContext {
@@ -58,7 +79,7 @@ export interface AutomationSessionTurnResult {
 
 export interface AutomationSessionRegistry {
   assertAutomationConversation(conversationId: string): Promise<void>;
-  appendAutomationMessage(input: AutomationMessageContext): Promise<{ entryId: string }>;
+  appendAutomationMessage(input: AutomationIdempotentMessageContext): Promise<{ entryId: string }>;
   runAutomationTurn(input: AutomationTurnContext & {
     signal: AbortSignal;
     onStarted: () => void;

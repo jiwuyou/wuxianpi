@@ -28,6 +28,8 @@ test("automation-turn.v1 exposes a bearer-only Runtime bridge without CORS", { t
   const slot = await server.registry.getOrOpen(identity.sessionId);
   slot.modelStatus = { state: "ready", provider: "test", modelId: "test" };
   const session = slot.runtime.session;
+  let messageAppendCalls = 0;
+  let releaseMessageAppend;
   session.sendCustomMessage = async (message, options) => {
     const custom = {
       role: "custom",
@@ -44,7 +46,13 @@ test("automation-turn.v1 exposes a bearer-only Runtime bridge without CORS", { t
       message.display,
       message.details,
     );
-    if (!options?.triggerTurn) return;
+    if (!options?.triggerTurn) {
+      if (message.content === "任务运行完成") {
+        messageAppendCalls += 1;
+        await new Promise((resolve) => { releaseMessageAppend = resolve; });
+      }
+      return;
+    }
     const assistant = assistantMessage("今日摘要");
     session.agent.state.messages.push(assistant);
     session.sessionManager.appendMessage(assistant);
@@ -101,6 +109,39 @@ test("automation-turn.v1 exposes a bearer-only Runtime bridge without CORS", { t
   assert.equal(messages.some((message) => message.role === "user"), false);
   assert.equal(messages.find((message) => message.role === "custom").details.source, "automation");
 
+  const messageRequest = {
+    taskId: "daily-news",
+    runId: "run-1",
+    conversationId: identity.sessionId,
+    message: "任务运行完成",
+    artifactRefs: [],
+    idempotencyKey: "daily-news:2026-08-07:completed",
+  };
+  const firstMessagePromise = jsonFetch(`${base}/api/automation/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${taskToken}` },
+    body: JSON.stringify(messageRequest),
+  });
+  await waitUntil(() => messageAppendCalls === 1 && typeof releaseMessageAppend === "function");
+  let duplicateSettled = false;
+  const duplicateMessagePromise = jsonFetch(`${base}/api/automation/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${taskToken}` },
+    body: JSON.stringify(messageRequest),
+  }).finally(() => { duplicateSettled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(duplicateSettled, false);
+  releaseMessageAppend();
+  const [firstMessage, duplicateMessage] = await Promise.all([firstMessagePromise, duplicateMessagePromise]);
+  assert.equal(firstMessage.response.status, 201);
+  assert.equal(duplicateMessage.response.status, 200);
+  assert.equal(firstMessage.body.data.message.status, "succeeded");
+  assert.equal(duplicateMessage.body.data.message.messageId, firstMessage.body.data.message.messageId);
+  assert.equal(messageAppendCalls, 1);
+  const appendedMessages = (await server.registry.messages(identity.sessionId)).messages
+    .filter((message) => message.role === "custom" && message.details?.kind === "message");
+  assert.equal(appendedMessages.length, 1);
+
   const revoked = await jsonFetch(`${base}/api/automation/v1/bindings/daily-news`, {
     method: "DELETE",
     headers: { authorization: `Bearer ${ownerToken}` },
@@ -135,4 +176,12 @@ function assistantMessage(text) {
     stopReason: "stop",
     timestamp: Date.now(),
   };
+}
+
+async function waitUntil(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition timed out");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }

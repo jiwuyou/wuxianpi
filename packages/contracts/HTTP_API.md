@@ -46,6 +46,46 @@ Errors use an HTTP error status and:
 use the advertised fallback. UI IDs and ports are metadata, not fixed Host
 constants.
 
+## Automation Turn Bridge
+
+The local `automation-turn.v1` API is rooted at `/api/automation/v1`. It is a
+thin bridge for trusted local programs to append a visible automation message
+or trigger one Agent Turn in an existing WuxianPi conversation. It does not
+define scheduling, workflows, task execution, or program distribution.
+
+The Runtime advertises support as `capabilities.automationTurn = 1`. The API
+does not enable CORS. Owner operations use the bearer token stored with mode
+`0600` at `~/.pi/agent/wuxianpi/automation-owner.token`; task operations use the
+scoped token returned when the binding is created. Only token hashes are stored
+in `automation-turn.sqlite`.
+
+| Method | Path | Authentication | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/api/automation/v1/bindings` | owner token | Bind `taskId`, `conversationId`, and canonical `taskRoot`; return a task token once |
+| `DELETE` | `/api/automation/v1/bindings/:taskId` | owner token | Revoke a binding and cancel its active Turns |
+| `POST` | `/api/automation/v1/messages` | task token | Append a visible `role: custom` automation message without starting the Agent |
+| `POST` | `/api/automation/v1/turns` | task token | Append the automation input and start one serialized Agent Turn |
+| `GET` | `/api/automation/v1/turns/:turnId?waitMs=30000` | task token | Read or bounded-wait for a Turn, up to 30 seconds per request |
+| `POST` | `/api/automation/v1/turns/:turnId/cancel` | task token | Cancel a queued or running Turn |
+
+Message and Turn requests contain `taskId`, `runId`, optional matching
+`conversationId`, `message`, optional `artifactRefs`, and a required
+`idempotencyKey`. Artifact references must resolve to existing files inside the
+bound canonical task root, including after symlink resolution.
+
+Turn idempotency is scoped by `(taskId, idempotencyKey)`. Message idempotency is
+scoped by `(taskId, runId, idempotencyKey)`. A concurrent duplicate message
+waits for the original append and returns the same message record. A completed
+duplicate returns HTTP 200 with `created: false`; the original returns HTTP 201
+with `created: true`. A failed append or a `pending` record left by an uncertain
+process interruption is never appended again and returns HTTP 409 on retry.
+
+Automation inputs are persisted as custom messages with
+`customType: "wuxianpi.automation-turn"` and details containing `source`,
+`kind`, `taskId`, `runId`, `conversationId`, `artifactRefs`, and
+`idempotencyKey`. They do not impersonate ordinary user messages. Turns in one
+conversation share the existing session serialization lane.
+
 ## Assistant, Workspace, and session ownership
 
 The user-facing Main Assistant is the WuxianPi Profile equivalent. The HTTP

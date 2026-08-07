@@ -1,11 +1,14 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import lockfile from "proper-lockfile";
 import { RequestError } from "./protocol.js";
 import { AutomationTurnStore } from "./automation-turn-store.js";
 import type {
   AutomationBinding,
   AutomationBindingRecord,
+  AutomationIdempotentMessageContext,
+  AutomationMessage,
   AutomationMessageContext,
   AutomationSessionRegistry,
   AutomationTurn,
@@ -17,6 +20,7 @@ const SAFE_TASK_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const MAX_CONTEXT_ID_LENGTH = 512;
 const MAX_MESSAGE_LENGTH = 1_000_000;
 const MAX_ARTIFACT_REFS = 256;
+const SHUTDOWN_TIMEOUT_MS = 5_000;
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 
 interface ActiveExecution {
@@ -27,13 +31,37 @@ interface ActiveExecution {
 export class AutomationTurnService {
   readonly interruptedAtStartup: number;
   private readonly active = new Map<string, ActiveExecution>();
+  private readonly activeMessages = new Map<string, Promise<AutomationMessage>>();
+  private readonly releaseOwnership: (() => void) | undefined;
   private closing = false;
+  private storeClosed = false;
+  private closePromise: Promise<void> | undefined;
 
   constructor(
     private readonly store: AutomationTurnStore,
     private readonly registry: AutomationSessionRegistry,
   ) {
-    this.interruptedAtStartup = this.store.interruptActiveTurns();
+    if (store.path !== ":memory:") {
+      try {
+        this.releaseOwnership = lockfile.lockSync(store.path, {
+          lockfilePath: `${store.path}.runtime.lock`,
+          realpath: false,
+          stale: 300_000,
+          update: 30_000,
+          retries: 0,
+        });
+      } catch {
+        store.close();
+        throw new RequestError("automation_runtime_owned", "Another WuxianPi Runtime owns the automation database", { httpStatus: 409 });
+      }
+    }
+    try {
+      this.interruptedAtStartup = this.store.interruptActiveTurns();
+    } catch (error) {
+      this.releaseOwnership?.();
+      this.store.close();
+      throw error;
+    }
   }
 
   async createBinding(input: {
@@ -46,6 +74,7 @@ export class AutomationTurnService {
     const conversationId = validateContextId(input.conversationId, "conversationId");
     const taskRoot = await canonicalDirectory(input.taskRoot, "taskRoot");
     await this.registry.assertAutomationConversation(conversationId);
+    this.assertAvailable();
     const taskToken = randomBytes(32).toString("base64url");
     const binding = this.store.createBinding({
       taskId,
@@ -73,12 +102,42 @@ export class AutomationTurnService {
     conversationId?: string;
     message: string;
     artifactRefs?: unknown;
-  }): Promise<{ entryId: string; artifactRefs: string[] }> {
+    idempotencyKey: string;
+  }): Promise<{ message: AutomationMessage; artifactRefs: string[]; created: boolean }> {
     this.assertAvailable();
     const binding = this.authorizeTask(input.taskId, input.taskToken, input.conversationId);
-    const context = await this.messageContext(binding, input);
-    const result = await this.registry.appendAutomationMessage(context);
-    return { ...result, artifactRefs: context.artifactRefs };
+    const context: AutomationIdempotentMessageContext = {
+      ...(await this.messageContext(binding, input)),
+      idempotencyKey: validateContextId(input.idempotencyKey, "idempotencyKey"),
+    };
+    this.assertAvailable();
+    const result = this.store.createOrGetMessage({
+      messageId: randomUUID(),
+      taskId: context.taskId,
+      runId: context.runId,
+      conversationId: context.conversationId,
+      idempotencyKey: context.idempotencyKey,
+    });
+    if (!result.created) {
+      const active = this.activeMessages.get(result.message.messageId);
+      if (active) return { message: await active, artifactRefs: context.artifactRefs, created: false };
+      if (result.message.status === "failed") throw failedMessageRetry(result.message);
+      if (result.message.status === "pending") throw pendingMessageRetry(result.message);
+      return { message: result.message, artifactRefs: context.artifactRefs, created: false };
+    }
+    const operation = this.appendMessageOnce(result.message.messageId, context);
+    this.activeMessages.set(result.message.messageId, operation);
+    try {
+      return {
+        message: await operation,
+        artifactRefs: context.artifactRefs,
+        created: true,
+      };
+    } finally {
+      if (this.activeMessages.get(result.message.messageId) === operation) {
+        this.activeMessages.delete(result.message.messageId);
+      }
+    }
   }
 
   async triggerTurn(input: {
@@ -96,6 +155,7 @@ export class AutomationTurnService {
       ...(await this.messageContext(binding, input)),
       idempotencyKey: validateContextId(input.idempotencyKey, "idempotencyKey"),
     };
+    this.assertAvailable();
     const result = this.store.createOrGetTurn({
       turnId: randomUUID(),
       taskId: context.taskId,
@@ -116,6 +176,7 @@ export class AutomationTurnService {
     let current = initial;
     while (Date.now() < deadline && !TERMINAL_STATUSES.has(current.status)) {
       await delay(Math.min(50, Math.max(1, deadline - Date.now())));
+      this.assertAvailable();
       current = this.authorizedTurn(turnId, taskToken);
     }
     return current;
@@ -133,12 +194,25 @@ export class AutomationTurnService {
   }
 
   async close(): Promise<void> {
-    if (this.closing) return;
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = this.closeInternal();
+    return this.closePromise;
+  }
+
+  private async closeInternal(): Promise<void> {
     this.closing = true;
     for (const execution of this.active.values()) execution.controller.abort();
-    await Promise.allSettled([...this.active.values()].map((execution) => execution.promise));
-    this.store.interruptActiveTurns();
-    this.store.close();
+    const executions = Promise.allSettled([
+      ...[...this.active.values()].map((execution) => execution.promise),
+      ...this.activeMessages.values(),
+    ]);
+    await Promise.race([executions, delay(SHUTDOWN_TIMEOUT_MS)]);
+    try {
+      this.store.interruptActiveTurns();
+    } finally {
+      this.storeClosed = true;
+      try { this.store.close(); } finally { this.releaseOwnership?.(); }
+    }
   }
 
   private startExecution(turnId: string, context: AutomationTurnContext): void {
@@ -154,19 +228,39 @@ export class AutomationTurnService {
         ...context,
         signal: controller.signal,
         onStarted: () => {
-          if (this.closing || controller.signal.aborted) throw automationCancelled();
+          if (this.closing || this.storeClosed || controller.signal.aborted) throw automationCancelled();
           this.store.markRunning(turnId);
         },
       });
+      if (this.storeClosed) return;
       if (this.closing) this.tryMarkInterrupted(turnId);
       else if (controller.signal.aborted) this.tryMarkCancelled(turnId);
       else this.store.markSucceeded(turnId, result);
     } catch (error) {
+      if (this.storeClosed) return;
       const current = this.store.getTurn(turnId);
       if (!current || TERMINAL_STATUSES.has(current.status)) return;
       if (this.closing) this.tryMarkInterrupted(turnId);
       else if (controller.signal.aborted) this.tryMarkCancelled(turnId);
       else this.store.markFailed(turnId, errorView(error));
+    }
+  }
+
+  private async appendMessageOnce(
+    messageId: string,
+    context: AutomationIdempotentMessageContext,
+  ): Promise<AutomationMessage> {
+    try {
+      const appended = await this.registry.appendAutomationMessage(context);
+      this.assertAvailable();
+      return this.store.markMessageSucceeded(messageId, appended.entryId);
+    } catch (error) {
+      if (!this.storeClosed) {
+        try { this.store.markMessageFailed(messageId, errorView(error)); } catch (transitionError) {
+          if (!isMessageStateConflict(transitionError)) throw transitionError;
+        }
+      }
+      throw error;
     }
   }
 
@@ -218,7 +312,7 @@ export class AutomationTurnService {
   }
 
   private assertAvailable(): void {
-    if (this.closing) throw new RequestError("automation_service_stopping", "Automation Turn Bridge is stopping", { httpStatus: 503 });
+    if (this.closing || this.storeClosed) throw new RequestError("automation_service_stopping", "Automation Turn Bridge is stopping", { httpStatus: 503 });
   }
 }
 
@@ -309,6 +403,33 @@ function automationCancelled(): RequestError {
 
 function isStateConflict(error: unknown): boolean {
   return error instanceof RequestError && error.code === "automation_turn_state_conflict";
+}
+
+function isMessageStateConflict(error: unknown): boolean {
+  return error instanceof RequestError && error.code === "automation_message_state_conflict";
+}
+
+function failedMessageRetry(message: AutomationMessage): RequestError {
+  return new RequestError(
+    "automation_message_failed",
+    `Automation message ${message.messageId} already failed and will not be appended again`,
+    {
+      httpStatus: 409,
+      messageId: message.messageId,
+      originalError: {
+        code: message.errorCode,
+        message: message.errorMessage,
+      },
+    },
+  );
+}
+
+function pendingMessageRetry(message: AutomationMessage): RequestError {
+  return new RequestError(
+    "automation_message_outcome_unknown",
+    `Automation message ${message.messageId} has an unknown outcome and will not be appended again`,
+    { httpStatus: 409, messageId: message.messageId },
+  );
 }
 
 function delay(milliseconds: number): Promise<void> {
