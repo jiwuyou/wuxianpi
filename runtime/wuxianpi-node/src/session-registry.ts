@@ -8,6 +8,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { CardExecutor } from "./card-executor.js";
 import {
+  AUTOMATION_CUSTOM_MESSAGE_TYPE,
+  type AutomationMessageContext,
+  type AutomationSessionTurnResult,
+  type AutomationTurnContext,
+} from "./automation-turn-types.js";
+import {
   CARD_RESULT_ENTRY, CARD_SUBMISSION_ENTRY, EXECUTABLE_CARD_TOOL, cardsFromEntries,
   createExecutableCardTool, validateCardValues,
 } from "./executable-card.js";
@@ -369,6 +375,76 @@ export class SessionRegistry {
     const slot = await this.getOrOpen(sessionId);
     this.cancelReclaim(slot);
     return operation(slot);
+  }
+
+  async assertAutomationConversation(conversationId: string): Promise<void> {
+    await this.getOrOpen(conversationId);
+  }
+
+  async appendAutomationMessage(input: AutomationMessageContext): Promise<{ entryId: string }> {
+    return this.run(input.conversationId, async (slot) => {
+      const session = slot.runtime.session;
+      await session.sendCustomMessage({
+        customType: AUTOMATION_CUSTOM_MESSAGE_TYPE,
+        content: input.message,
+        display: true,
+        details: automationMessageDetails(input, "message"),
+      });
+      const entryId = session.sessionManager.getLeafId();
+      if (!entryId) throw new RequestError("automation_message_not_persisted", "Automation message was not persisted");
+      return { entryId };
+    });
+  }
+
+  async runAutomationTurn(input: AutomationTurnContext & {
+    signal: AbortSignal;
+    onStarted: () => void;
+  }): Promise<AutomationSessionTurnResult> {
+    return this.run(input.conversationId, async (slot) => {
+      if (input.signal.aborted) throw new RequestError("automation_turn_cancelled", "Automation turn was cancelled");
+      this.requireSessionModelReady(slot, "automation.turn");
+      const session = slot.runtime.session;
+      const messageOffset = session.messages.length;
+      let started = false;
+      const abort = () => {
+        if (!started) return;
+        void session.abort().catch((error) => this.emitRuntimeError(slot, "automation.abort", error));
+      };
+      input.signal.addEventListener("abort", abort, { once: true });
+      try {
+        input.onStarted();
+        started = true;
+        if (input.signal.aborted) {
+          abort();
+          throw new RequestError("automation_turn_cancelled", "Automation turn was cancelled");
+        }
+        await session.sendCustomMessage({
+          customType: AUTOMATION_CUSTOM_MESSAGE_TYPE,
+          content: input.message,
+          display: true,
+          details: automationMessageDetails(input, "turn"),
+        }, { triggerTurn: true });
+        if (input.signal.aborted) throw new RequestError("automation_turn_cancelled", "Automation turn was cancelled");
+        const assistant = [...session.messages.slice(messageOffset)]
+          .reverse()
+          .find((message) => message.role === "assistant");
+        if (!assistant) throw new RequestError("automation_assistant_response_missing", "Automation turn completed without an assistant response");
+        if (assistant.errorMessage) {
+          throw new RequestError("automation_assistant_error", assistant.errorMessage);
+        }
+        const finalLeafId = session.sessionManager.getLeafId();
+        if (!finalLeafId) throw new RequestError("automation_turn_not_persisted", "Automation turn did not produce a persisted leaf entry");
+        return {
+          finalLeafId,
+          assistantText: assistant.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join(""),
+        };
+      } finally {
+        input.signal.removeEventListener("abort", abort);
+      }
+    });
   }
 
   async prompt(sessionId: string, input: PromptInput): Promise<RuntimeIdentity & { accepted: true; userEntryId: string }> {
@@ -1319,6 +1395,22 @@ export class SessionRegistry {
       throw error;
     }
   }
+}
+
+function automationMessageDetails(
+  input: AutomationMessageContext & Partial<Pick<AutomationTurnContext, "idempotencyKey">>,
+  kind: "message" | "turn",
+): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    source: "automation",
+    kind,
+    taskId: input.taskId,
+    runId: input.runId,
+    conversationId: input.conversationId,
+    artifactRefs: input.artifactRefs,
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+  };
 }
 
 function isolatedSessionSettings(cwd: string, agentDir: string): SettingsManager {

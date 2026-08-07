@@ -36,6 +36,9 @@ import {
   parseBrowserHostClientMessage,
 } from "./browser-host-protocol.js";
 import { BrowserHostRegistry, type BrowserHostConnection } from "./browser-host-registry.js";
+import { AutomationApi, loadOrCreateAutomationOwnerToken } from "./automation-api.js";
+import { AutomationTurnService } from "./automation-turn-service.js";
+import { AutomationTurnStore } from "./automation-turn-store.js";
 
 export interface RuntimeServerOptions {
   host: string;
@@ -55,6 +58,8 @@ export interface RuntimeServerOptions {
   hubAuthStatePath?: string;
   hubAuthRunGhToken?: () => Promise<string>;
   trustedOrigins?: string[];
+  automationDatabasePath?: string;
+  automationOwnerTokenPath?: string;
 }
 
 interface ConnectionContext {
@@ -142,6 +147,14 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     assistantToolsResolver: async (assistantId) => (await webServices?.resolveAssistantToolNames(assistantId))?.toolNames,
     assistantResourcesResolver: async (assistantId) => packageManager.resolveAssistantResources(assistantId),
   });
+  const automationDatabasePath = options.automationDatabasePath ?? join(agentDir, "wuxianpi", "automation-turn.sqlite");
+  const automationOwnerTokenPath = options.automationOwnerTokenPath ?? join(agentDir, "wuxianpi", "automation-owner.token");
+  const automationStore = new AutomationTurnStore({ path: automationDatabasePath });
+  const automationService = new AutomationTurnService(automationStore, registry);
+  const automationApi = new AutomationApi({
+    service: automationService,
+    ownerToken: loadOrCreateAutomationOwnerToken(automationOwnerTokenPath),
+  });
   const nativeEvents = new NativeEventProjector(registry);
   registry.subscribe((event) => routeEvent(nativeEvents.project(event)));
   const adapter = new PiSdkAdapter(registry);
@@ -157,6 +170,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     snapshotSse: 1,
     staticWebUi: staticFiles.enabled ? 1 : 0,
     browserHost: 1,
+    automationTurn: 1,
   } as const;
   const preferredWebUiUrl = options.preferredWebUiUrl ?? "http://127.0.0.1:25808/";
   const webApi = new WebApi({
@@ -313,6 +327,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   async function handleHttp(request: IncomingMessage, response: HttpResponse): Promise<void> {
     const path = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`).pathname;
     const runtimeOrigin = `http://${request.headers.host ?? "127.0.0.1:20765"}`;
+    if (await automationApi.handle(request, response)) return;
     if (await webApi.handle(request, response)) return;
     if (request.method === "GET" && (path === "/health" || path === "/admin/v1/health")) {
       json(response, 200, {
@@ -751,6 +766,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       for (const client of browserHostClients) client.close(1001, "runtime stopping");
       browserHosts.close();
       webApi.close();
+      await automationService.close();
       await registry.dispose();
       await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
       websocketServer.close();
