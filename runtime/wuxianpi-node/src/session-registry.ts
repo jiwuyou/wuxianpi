@@ -399,6 +399,15 @@ export class SessionRegistry {
     await this.getOrOpen(conversationId);
   }
 
+  async createAutomationConversation(input: {
+    assistantId: string;
+    workspaceId?: string;
+    cwd?: string;
+  }): Promise<{ conversationId: string }> {
+    const created = await this.create(input);
+    return { conversationId: created.sessionId };
+  }
+
   async appendAutomationMessage(input: AutomationIdempotentMessageContext): Promise<{ entryId: string }> {
     return this.run(input.conversationId, async (slot) => {
       const session = slot.runtime.session;
@@ -1422,10 +1431,11 @@ function automationMessageDetails(
   kind: "message" | "turn",
 ): Record<string, unknown> {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: "automation",
     kind,
-    taskId: input.taskId,
+    registrationId: input.registrationId,
+    title: input.registrationTitle,
     runId: input.runId,
     conversationId: input.conversationId,
     artifactRefs: input.artifactRefs,

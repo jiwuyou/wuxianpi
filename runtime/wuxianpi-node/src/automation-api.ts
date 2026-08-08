@@ -40,28 +40,46 @@ export class AutomationApi {
     const suffix = url.pathname.slice(AUTOMATION_API_ROOT.length);
     const parts = suffix.split("/").filter(Boolean).map(decodePathPart);
 
-    if (parts.length === 1 && parts[0] === "bindings" && method === "POST") {
+    if (parts.length === 1 && parts[0] === "registrations" && method === "GET") {
       this.requireOwner(request);
-      const body = await readJsonBody(request);
-      const result = await this.options.service.createBinding({
-        taskId: requiredString(body, "taskId"),
-        conversationId: requiredString(body, "conversationId"),
-        taskRoot: requiredString(body, "taskRoot"),
-      });
-      json(response, 201, { ok: true, data: result });
+      json(response, 200, { ok: true, data: { automations: this.options.service.listRegistrations() } });
       return;
     }
-    if (parts.length === 2 && parts[0] === "bindings" && method === "DELETE") {
+    if (parts.length === 1 && parts[0] === "registrations" && method === "POST") {
       this.requireOwner(request);
-      json(response, 200, { ok: true, data: { binding: this.options.service.revokeBinding(parts[1] ?? "") } });
+      const body = await readJsonBody(request);
+      const result = await this.options.service.requestRegistration({
+        id: requiredString(body, "id"),
+        title: requiredString(body, "title"),
+        applicantConversationId: requiredString(body, "applicantConversationId"),
+        target: automationTarget(body.target, body.applicantConversationId),
+        reason: requiredString(body, "reason"),
+        projectRoot: requiredString(body, "projectRoot"),
+        rateLimit: rateLimit(body.rateLimit),
+        expiresAt: requiredString(body, "expiresAt"),
+      });
+      json(response, 201, { ok: true, data: { automation: result } });
+      return;
+    }
+    if (parts.length === 3 && parts[0] === "registrations" && method === "POST") {
+      this.requireOwner(request);
+      const id = parts[1] ?? "";
+      const action = parts[2];
+      const automation = action === "approve" ? await this.options.service.approveRegistration(id)
+        : action === "pause" ? this.options.service.pauseRegistration(id)
+          : action === "resume" ? this.options.service.resumeRegistration(id)
+            : action === "revoke" ? await this.options.service.revokeRegistration(id)
+              : undefined;
+      if (!automation) throw new RequestError("not_found", `Automation action not found: ${action}`);
+      json(response, 200, { ok: true, data: { automation } });
       return;
     }
     if (parts.length === 1 && parts[0] === "messages" && method === "POST") {
-      const taskToken = bearerToken(request);
+      const registrationToken = bearerToken(request);
       const body = await readJsonBody(request);
       const result = await this.options.service.appendMessage({
-        taskToken,
-        taskId: requiredString(body, "taskId"),
+        registrationToken,
+        registrationId: requiredString(body, "registrationId"),
         runId: requiredString(body, "runId"),
         conversationId: optionalString(body, "conversationId"),
         message: requiredString(body, "message"),
@@ -72,11 +90,11 @@ export class AutomationApi {
       return;
     }
     if (parts.length === 1 && parts[0] === "turns" && method === "POST") {
-      const taskToken = bearerToken(request);
+      const registrationToken = bearerToken(request);
       const body = await readJsonBody(request);
       const result = await this.options.service.triggerTurn({
-        taskToken,
-        taskId: requiredString(body, "taskId"),
+        registrationToken,
+        registrationId: requiredString(body, "registrationId"),
         runId: requiredString(body, "runId"),
         conversationId: optionalString(body, "conversationId"),
         message: requiredString(body, "message"),
@@ -181,6 +199,35 @@ function optionalString(body: Record<string, unknown>, name: string): string | u
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new RequestError("invalid_payload", `${name} must be a string`);
   return value;
+}
+
+function rateLimit(value: unknown): { maxCalls: number; windowSeconds: number } {
+  if (!isRecord(value)) throw new RequestError("invalid_payload", "rateLimit must be an object");
+  if (!Number.isInteger(value.maxCalls) || !Number.isInteger(value.windowSeconds)) {
+    throw new RequestError("invalid_payload", "rateLimit.maxCalls and rateLimit.windowSeconds must be integers");
+  }
+  return { maxCalls: value.maxCalls as number, windowSeconds: value.windowSeconds as number };
+}
+
+function automationTarget(value: unknown, fallbackConversationId: unknown):
+  | { kind: "existing"; conversationId: string }
+  | { kind: "new"; mode: "dedicated" | "per-run"; assistantId: string; workspaceId: string | null; cwd: string | null } {
+  if (value === undefined) {
+    if (typeof fallbackConversationId !== "string") throw new RequestError("invalid_payload", "applicantConversationId is required");
+    return { kind: "existing", conversationId: fallbackConversationId };
+  }
+  if (!isRecord(value)) throw new RequestError("invalid_payload", "target must be an object");
+  if (value.kind === "existing") return { kind: "existing", conversationId: requiredString(value, "conversationId") };
+  if (value.kind !== "new" || (value.mode !== "dedicated" && value.mode !== "per-run")) {
+    throw new RequestError("invalid_payload", "target kind or mode is invalid");
+  }
+  return {
+    kind: "new",
+    mode: value.mode,
+    assistantId: requiredString(value, "assistantId"),
+    workspaceId: optionalString(value, "workspaceId") ?? null,
+    cwd: optionalString(value, "cwd") ?? null,
+  };
 }
 
 function optionalIntegerQuery(url: URL, name: string, fallback: number): number {

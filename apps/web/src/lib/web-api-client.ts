@@ -2,6 +2,10 @@ import type { AgentMessage, SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ExecutableCardState, JsonValue } from "@/lib/executable-card";
 import type {
   CreateSessionRequest,
+  AutomationCreateRequest,
+  AutomationListData,
+  AutomationRegistration,
+  AutomationUpdateRequest,
   Workspace,
   WorkspaceCreateRequest,
   WorkspaceListOptions,
@@ -877,6 +881,32 @@ export class WebApiClient {
     const payload = record(await this.request<unknown>(`/workspaces/${encodeURIComponent(workspaceId)}`, { method: "DELETE" }));
     if (typeof payload.removed !== "boolean") throw new Error("Runtime returned an invalid Workspace delete result");
     return payload.removed;
+  }
+
+  async listAutomations(): Promise<AutomationRegistration[]> {
+    const payload = await this.request<AutomationListData>("/automations");
+    return Array.isArray(payload.automations) ? payload.automations : [];
+  }
+
+  async createAutomation(input: AutomationCreateRequest): Promise<AutomationRegistration> {
+    const payload = await this.request<{ automation: AutomationRegistration }>("/automations", {
+      method: "POST", body: JSON.stringify(input),
+    });
+    return payload.automation;
+  }
+
+  async updateAutomation(id: string, input: AutomationUpdateRequest): Promise<AutomationRegistration> {
+    const payload = await this.request<{ automation: AutomationRegistration }>(`/automations/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify(input),
+    });
+    return payload.automation;
+  }
+
+  async automationAction(id: string, action: "approve" | "pause" | "resume" | "stop"): Promise<AutomationRegistration> {
+    const payload = await this.request<{ automation: AutomationRegistration }>(`/automations/${encodeURIComponent(id)}/${action}`, {
+      method: "POST",
+    });
+    return payload.automation;
   }
 
   async listSessions(): Promise<SessionInfo[]> {

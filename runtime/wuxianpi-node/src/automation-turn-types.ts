@@ -1,6 +1,55 @@
 export const AUTOMATION_API_ROOT = "/api/automation/v1";
 export const AUTOMATION_CUSTOM_MESSAGE_TYPE = "wuxianpi.automation-turn";
 
+export type AutomationRegistrationStatus = "pending" | "active" | "paused" | "expired" | "revoked";
+
+export interface AutomationRateLimit {
+  maxCalls: number;
+  windowSeconds: number;
+}
+
+export interface AutomationRateUsage {
+  used: number;
+  limit: number;
+  windowSeconds: number;
+  nextAllowedAt: string | null;
+}
+
+export type AutomationConversationTarget =
+  | { kind: "existing"; conversationId: string }
+  | {
+      kind: "new";
+      mode: "dedicated" | "per-run";
+      assistantId: string;
+      workspaceId: string | null;
+      cwd: string | null;
+    };
+
+export interface AutomationRegistration {
+  id: string;
+  title: string;
+  status: AutomationRegistrationStatus;
+  applicantConversationId: string;
+  targetConversationId: string | null;
+  target: AutomationConversationTarget;
+  reason: string;
+  projectRoot: string;
+  rateLimit: AutomationRateLimit;
+  rateUsage: AutomationRateUsage;
+  expiresAt: string;
+  credentialPath: string | null;
+  createdAt: string;
+  approvedAt: string | null;
+  lastTriggeredAt: string | null;
+  pausedAt: string | null;
+  revokedAt: string | null;
+  updatedAt: string;
+}
+
+export interface AutomationRegistrationRecord extends Omit<AutomationRegistration, "rateUsage" | "credentialPath"> {
+  tokenHash: string | null;
+}
+
 export type AutomationTurnStatus =
   | "queued"
   | "running"
@@ -9,22 +58,9 @@ export type AutomationTurnStatus =
   | "cancelled"
   | "interrupted";
 
-export interface AutomationBinding {
-  taskId: string;
-  conversationId: string;
-  taskRoot: string;
-  revokedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AutomationBindingRecord extends AutomationBinding {
-  tokenHash: string;
-}
-
 export interface AutomationTurn {
   turnId: string;
-  taskId: string;
+  registrationId: string;
   runId: string;
   conversationId: string;
   idempotencyKey: string;
@@ -43,7 +79,7 @@ export type AutomationMessageStatus = "pending" | "succeeded" | "failed";
 
 export interface AutomationMessage {
   messageId: string;
-  taskId: string;
+  registrationId: string;
   runId: string;
   conversationId: string;
   idempotencyKey: string;
@@ -57,7 +93,8 @@ export interface AutomationMessage {
 }
 
 export interface AutomationMessageContext {
-  taskId: string;
+  registrationId: string;
+  registrationTitle: string;
   runId: string;
   conversationId: string;
   message: string;
@@ -79,6 +116,11 @@ export interface AutomationSessionTurnResult {
 
 export interface AutomationSessionRegistry {
   assertAutomationConversation(conversationId: string): Promise<void>;
+  createAutomationConversation(input: {
+    assistantId: string;
+    workspaceId?: string;
+    cwd?: string;
+  }): Promise<{ conversationId: string }>;
   appendAutomationMessage(input: AutomationIdempotentMessageContext): Promise<{ entryId: string }>;
   runAutomationTurn(input: AutomationTurnContext & {
     signal: AbortSignal;
@@ -86,7 +128,11 @@ export interface AutomationSessionRegistry {
   }): Promise<AutomationSessionTurnResult>;
 }
 
-export function publicBinding(binding: AutomationBindingRecord): AutomationBinding {
-  const { tokenHash: _tokenHash, ...view } = binding;
-  return view;
+export function publicRegistration(
+  registration: AutomationRegistrationRecord,
+  rateUsage: AutomationRateUsage,
+  credentialPath: string | null,
+): AutomationRegistration {
+  const { tokenHash: _tokenHash, ...view } = registration;
+  return { ...view, rateUsage, credentialPath };
 }

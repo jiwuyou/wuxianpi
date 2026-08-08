@@ -150,7 +150,9 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const automationDatabasePath = options.automationDatabasePath ?? join(agentDir, "wuxianpi", "automation-turn.sqlite");
   const automationOwnerTokenPath = options.automationOwnerTokenPath ?? join(agentDir, "wuxianpi", "automation-owner.token");
   const automationStore = new AutomationTurnStore({ path: automationDatabasePath });
-  const automationService = new AutomationTurnService(automationStore, registry);
+  const automationService = new AutomationTurnService(automationStore, registry, {
+    credentialDirectory: join(agentDir, "wuxianpi", "automation-credentials"),
+  });
   const automationApi = new AutomationApi({
     service: automationService,
     ownerToken: loadOrCreateAutomationOwnerToken(automationOwnerTokenPath),
@@ -176,6 +178,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const webApi = new WebApi({
     registry,
     services: webServices,
+    automationService,
     packageManager,
     hubAuth,
     trustedOrigins: [

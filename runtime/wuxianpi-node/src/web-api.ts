@@ -10,6 +10,8 @@ import type { FunctionalAssistantBindingSettings } from "./package-types.js";
 import type { BrowserHostRegistry } from "./browser-host-registry.js";
 import type { HubAuth } from "./hub-auth.js";
 import type { WorkspaceContext } from "./profile-types.js";
+import type { AutomationConversationTarget, AutomationRateLimit } from "./automation-turn-types.js";
+import { AutomationTurnService } from "./automation-turn-service.js";
 
 const API_ROOT = "/api/web/v1";
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
@@ -18,6 +20,7 @@ const SSE_HEARTBEAT_MS = 15_000;
 export interface WebApiOptions {
   registry: SessionRegistry;
   services: WebServices;
+  automationService: AutomationTurnService;
   packageManager?: WuxianPiPackageManager;
   hubAuth?: HubAuth;
   trustedOrigins?: string[];
@@ -101,6 +104,51 @@ export class WebApi {
         ...(params ? { params } : {}),
         ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }),
       }) }); return;
+    }
+    if (path === "/automations" && method === "GET") {
+      json(response, 200, { ok: true, data: { automations: this.options.automationService.listRegistrations() } }); return;
+    }
+    if (path === "/automations" && method === "POST") {
+      const body = await readJsonBody(request);
+      const automation = await this.options.automationService.requestRegistration({
+        id: requireString(body, "id"),
+        title: requireString(body, "title"),
+        applicantConversationId: requireString(body, "applicantConversationId"),
+        target: parseAutomationTarget(body.target, body.applicantConversationId),
+        reason: requireString(body, "reason"),
+        projectRoot: requireString(body, "projectRoot"),
+        rateLimit: parseAutomationRateLimit(body.rateLimit),
+        expiresAt: requireString(body, "expiresAt"),
+      });
+      json(response, 201, { ok: true, data: { automation } }); return;
+    }
+    const automationRoute = /^\/automations\/([^/]+)(?:\/(approve|pause|resume|stop))?$/.exec(path);
+    if (automationRoute) {
+      const id = decodeURIComponent(automationRoute[1]!);
+      const action = automationRoute[2];
+      if (!action && method === "GET") {
+        json(response, 200, { ok: true, data: { automation: this.options.automationService.getRegistration(id) } });
+      } else if (!action && method === "PATCH") {
+        const body = await readJsonBody(request);
+        const automation = await this.options.automationService.updateRegistration(id, {
+          ...(body.title === undefined ? {} : { title: requireString(body, "title") }),
+          ...(body.reason === undefined ? {} : { reason: requireString(body, "reason") }),
+          ...(body.projectRoot === undefined ? {} : { projectRoot: requireString(body, "projectRoot") }),
+          ...(body.rateLimit === undefined ? {} : { rateLimit: parseAutomationRateLimit(body.rateLimit) }),
+          ...(body.expiresAt === undefined ? {} : { expiresAt: requireString(body, "expiresAt") }),
+          ...(body.target === undefined ? {} : { target: parseAutomationTarget(body.target) }),
+        });
+        json(response, 200, { ok: true, data: { automation } });
+      } else if ((!action && method === "DELETE") || (action === "stop" && method === "POST")) {
+        json(response, 200, { ok: true, data: { automation: await this.options.automationService.revokeRegistration(id) } });
+      } else if (action === "approve" && method === "POST") {
+        json(response, 200, { ok: true, data: { automation: await this.options.automationService.approveRegistration(id) } });
+      } else if (action === "pause" && method === "POST") {
+        json(response, 200, { ok: true, data: { automation: this.options.automationService.pauseRegistration(id) } });
+      } else if (action === "resume" && method === "POST") {
+        json(response, 200, { ok: true, data: { automation: this.options.automationService.resumeRegistration(id) } });
+      } else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
+      return;
     }
     if (path === "/workspaces" && method === "GET") {
       const workspaces = await this.options.registry.listWorkspaces(url.searchParams.get("includeArchived") === "true");
@@ -817,6 +865,31 @@ function requireQuery(url: URL, name: string): string { const value = url.search
 function requireString(body: Record<string, unknown>, name: string): string { const value = body[name]; if (typeof value !== "string" || !value.trim()) throw new RequestError("invalid_payload", `${name} must be a non-empty string`); return value; }
 function optionalString(body: Record<string, unknown>, name: string): string | undefined { const value = body[name]; if (value === undefined || value === null || value === "") return undefined; if (typeof value !== "string") throw new RequestError("invalid_payload", `${name} must be a string`); return value; }
 function optionalText(body: Record<string, unknown>, name: string): string { const value = body[name]; if (typeof value !== "string") throw new RequestError("invalid_payload", `${name} must be a string`); return value; }
+function parseAutomationRateLimit(value: unknown): AutomationRateLimit {
+  const rate = requireObject(value, "rateLimit");
+  if (!Number.isInteger(rate.maxCalls) || !Number.isInteger(rate.windowSeconds)) {
+    throw new RequestError("invalid_payload", "rateLimit.maxCalls and rateLimit.windowSeconds must be integers");
+  }
+  return { maxCalls: rate.maxCalls as number, windowSeconds: rate.windowSeconds as number };
+}
+function parseAutomationTarget(value: unknown, fallbackConversationId?: unknown): AutomationConversationTarget {
+  if (value === undefined) {
+    if (typeof fallbackConversationId !== "string") throw new RequestError("invalid_payload", "target is required");
+    return { kind: "existing", conversationId: fallbackConversationId };
+  }
+  const target = requireObject(value, "target");
+  if (target.kind === "existing") return { kind: "existing", conversationId: requireString(target, "conversationId") };
+  if (target.kind !== "new" || (target.mode !== "dedicated" && target.mode !== "per-run")) {
+    throw new RequestError("invalid_payload", "target kind or mode is invalid");
+  }
+  return {
+    kind: "new",
+    mode: target.mode,
+    assistantId: requireString(target, "assistantId"),
+    workspaceId: optionalString(target, "workspaceId") ?? null,
+    cwd: optionalString(target, "cwd") ?? null,
+  };
+}
 function workspaceView(context: WorkspaceContext) {
   return {
     id: context.workspace.id,

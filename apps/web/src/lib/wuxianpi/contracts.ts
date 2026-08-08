@@ -222,6 +222,58 @@ export interface WorkspaceDeleteData {
   removed: boolean;
 }
 
+export type AutomationRegistrationStatus = "pending" | "active" | "paused" | "expired" | "revoked";
+
+export interface AutomationRateLimit {
+  maxCalls: number;
+  windowSeconds: number;
+}
+
+export interface AutomationRateUsage extends AutomationRateLimit {
+  used: number;
+  nextAllowedAt: string | null;
+}
+
+export type AutomationTarget =
+  | { kind: "existing"; conversationId: string }
+  | { kind: "new"; mode: "dedicated" | "per-run"; assistantId: string; workspaceId: string | null; cwd: string | null };
+
+export interface AutomationRegistration {
+  id: string;
+  title: string;
+  status: AutomationRegistrationStatus;
+  applicantConversationId: string;
+  targetConversationId: string | null;
+  target: AutomationTarget;
+  reason: string;
+  projectRoot: string;
+  rateLimit: AutomationRateLimit;
+  rateUsage: AutomationRateUsage;
+  expiresAt: string;
+  credentialPath: string | null;
+  createdAt: string;
+  approvedAt: string | null;
+  lastTriggeredAt: string | null;
+  pausedAt: string | null;
+  revokedAt: string | null;
+  updatedAt: string;
+}
+
+export interface AutomationListData { automations: AutomationRegistration[]; }
+
+export interface AutomationCreateRequest {
+  id: string;
+  title: string;
+  applicantConversationId: string;
+  target?: AutomationTarget;
+  reason: string;
+  projectRoot: string;
+  rateLimit: AutomationRateLimit;
+  expiresAt: string;
+}
+
+export type AutomationUpdateRequest = Partial<Omit<AutomationCreateRequest, "id" | "applicantConversationId">>;
+
 export interface ResolvedAssistantRuntime {
   assistantId: string;
   cwd: string;

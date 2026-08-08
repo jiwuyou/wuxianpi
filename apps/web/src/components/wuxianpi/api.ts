@@ -23,6 +23,9 @@ import type {
   WorkspaceCreateRequest,
   WorkspaceListOptions,
   WorkspaceUpdateRequest,
+  AutomationCreateRequest,
+  AutomationRegistration,
+  AutomationUpdateRequest,
 } from "@/lib/wuxianpi/contracts";
 import { WebApiError, webApi } from "@/lib/web-api-client";
 
@@ -91,6 +94,22 @@ export function updateWorkspace(id: string, input: WorkspaceUpdateRequest): Prom
 
 export function deleteWorkspace(id: string): Promise<boolean> {
   return webApi.deleteWorkspace(id);
+}
+
+export function listAutomations(): Promise<AutomationRegistration[]> {
+  return webApi.listAutomations();
+}
+
+export function createAutomation(input: AutomationCreateRequest): Promise<AutomationRegistration> {
+  return webApi.createAutomation(input);
+}
+
+export function updateAutomation(id: string, input: AutomationUpdateRequest): Promise<AutomationRegistration> {
+  return webApi.updateAutomation(id, input);
+}
+
+export function automationAction(id: string, action: "approve" | "pause" | "resume" | "stop"): Promise<AutomationRegistration> {
+  return webApi.automationAction(id, action);
 }
 
 export function cloneAssistant(id: string, newId?: string): Promise<AssistantSummary> {

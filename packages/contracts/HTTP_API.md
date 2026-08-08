@@ -50,31 +50,44 @@ constants.
 
 The local `automation-turn.v1` API is rooted at `/api/automation/v1`. It is a
 thin bridge for trusted local programs to append a visible automation message
-or trigger one Agent Turn in an existing WuxianPi conversation. It does not
-define scheduling, workflows, task execution, or program distribution.
+or trigger one Agent Turn. It does not define scheduling, workflows, task
+execution, or program distribution. The user-facing management page is named
+`自动化` and manages which projects may ask AI for help.
 
 The Runtime advertises support as `capabilities.automationTurn = 1`. The API
 does not enable CORS. Owner operations use the bearer token stored with mode
-`0600` at `~/.pi/agent/wuxianpi/automation-owner.token`; task operations use the
-scoped token returned when the binding is created. Only token hashes are stored
-in `automation-turn.sqlite`.
+`0600` at `~/.pi/agent/wuxianpi/automation-owner.token`; program operations use
+the scoped credential written with mode `0600` under
+`~/.pi/agent/wuxianpi/automation-credentials/`. Only credential hashes are
+stored in `automation-turn.sqlite`.
 
 | Method | Path | Authentication | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/api/automation/v1/bindings` | owner token | Bind `taskId`, `conversationId`, and canonical `taskRoot`; return a task token once |
-| `DELETE` | `/api/automation/v1/bindings/:taskId` | owner token | Revoke a binding and cancel its active Turns |
-| `POST` | `/api/automation/v1/messages` | task token | Append a visible `role: custom` automation message without starting the Agent |
-| `POST` | `/api/automation/v1/turns` | task token | Append the automation input and start one serialized Agent Turn |
-| `GET` | `/api/automation/v1/turns/:turnId?waitMs=30000` | task token | Read or bounded-wait for a Turn, up to 30 seconds per request |
-| `POST` | `/api/automation/v1/turns/:turnId/cancel` | task token | Cancel a queued or running Turn |
+| `GET` | `/api/automation/v1/registrations` | owner token | List automation approvals and current usage |
+| `POST` | `/api/automation/v1/registrations` | owner token | Create a pending approval request |
+| `POST` | `/api/automation/v1/registrations/:id/approve` | owner token | Enable a pending automation and issue its credential file |
+| `POST` | `/api/automation/v1/registrations/:id/pause` | owner token | Pause new AI use |
+| `POST` | `/api/automation/v1/registrations/:id/resume` | owner token | Resume a paused automation |
+| `POST` | `/api/automation/v1/registrations/:id/revoke` | owner token | Stop an automation and cancel its active Turns |
+| `POST` | `/api/automation/v1/messages` | registration credential | Append a visible `role: custom` automation message without starting the Agent |
+| `POST` | `/api/automation/v1/turns` | registration credential | Append the automation input and start one serialized Agent Turn |
+| `GET` | `/api/automation/v1/turns/:turnId?waitMs=30000` | registration credential | Read or bounded-wait for a Turn, up to 30 seconds per request |
+| `POST` | `/api/automation/v1/turns/:turnId/cancel` | registration credential | Cancel a queued or running Turn |
 
-Message and Turn requests contain `taskId`, `runId`, optional matching
+Message and Turn requests contain `registrationId`, `runId`, optional matching
 `conversationId`, `message`, optional `artifactRefs`, and a required
 `idempotencyKey`. Artifact references must resolve to existing files inside the
-bound canonical task root, including after symlink resolution.
+bound canonical project root, including after symlink resolution. A registration
+can bind an existing conversation, create one dedicated conversation when
+enabled, or create a new bounded conversation for every accepted Turn.
 
-Turn idempotency is scoped by `(taskId, idempotencyKey)`. Message idempotency is
-scoped by `(taskId, runId, idempotencyKey)`. A concurrent duplicate message
+An enabled registration also enforces a rolling AI usage ceiling such as
+`{ "maxCalls": 2, "windowSeconds": 86400 }`. Idempotent retries are resolved
+before quota counting. New accepted Turns count even when model execution later
+fails. Paused, expired, and revoked registrations reject new AI use.
+
+Turn idempotency is scoped by `(registrationId, idempotencyKey)`. Message idempotency is
+scoped by `(registrationId, runId, idempotencyKey)`. A concurrent duplicate message
 waits for the original append and returns the same message record. A completed
 duplicate returns HTTP 200 with `created: false`; the original returns HTTP 201
 with `created: true`. A failed append or a `pending` record left by an uncertain
@@ -82,9 +95,24 @@ process interruption is never appended again and returns HTTP 409 on retry.
 
 Automation inputs are persisted as custom messages with
 `customType: "wuxianpi.automation-turn"` and details containing `source`,
-`kind`, `taskId`, `runId`, `conversationId`, `artifactRefs`, and
+`kind`, `registrationId`, `runId`, `conversationId`, `artifactRefs`, and
 `idempotencyKey`. They do not impersonate ordinary user messages. Turns in one
 conversation share the existing session serialization lane.
+
+### Automation management endpoints
+
+The trusted local Web API exposes the product-facing management surface at
+`/api/web/v1/automations`:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/web/v1/automations` | List automations and rolling-window usage |
+| `POST` | `/api/web/v1/automations` | Create a pending automation request |
+| `PATCH` | `/api/web/v1/automations/:id` | Adjust metadata or limits; privilege increases return to confirmation |
+| `POST` | `/api/web/v1/automations/:id/approve` | Enable a pending request |
+| `POST` | `/api/web/v1/automations/:id/pause` | Pause AI use while leaving programs independent |
+| `POST` | `/api/web/v1/automations/:id/resume` | Resume a paused automation |
+| `POST` | `/api/web/v1/automations/:id/stop` | Permanently stop the automation |
 
 ## Assistant, Workspace, and session ownership
 
