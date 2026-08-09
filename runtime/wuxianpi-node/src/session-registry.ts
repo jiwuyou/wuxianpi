@@ -470,7 +470,7 @@ export class SessionRegistry {
 
       const previousCwd = slot.runtime.cwd;
       if (!existsSync(sessionPath)) {
-        const manager = slot.runtime.session.sessionManager as SessionManager & { _rewriteFile?: () => void; flushed?: boolean };
+        const manager = slot.runtime.session.sessionManager as unknown as { _rewriteFile?: () => void; flushed?: boolean };
         if (typeof manager._rewriteFile !== "function") {
           throw new RequestError("session_not_persisted", "Save the conversation before changing its scope");
         }

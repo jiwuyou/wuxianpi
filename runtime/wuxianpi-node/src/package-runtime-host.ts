@@ -75,7 +75,8 @@ export class PackageRuntimeHostV1 {
           moduleState.services.set(serviceId, service);
           moduleState.lifecycle.push({ serviceId, service });
         },
-        getService: (packageId, serviceId) => this.modules.get(packageId)?.services.get(serviceId) as Record<string, unknown> | undefined,
+        getService: <T = Record<string, unknown>>(packageId: string, serviceId: string) =>
+          this.modules.get(packageId)?.services.get(serviceId) as T | undefined,
         registry: this.options.registry,
         automation: this.options.automation,
       };
