@@ -1,7 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import lockfile from "proper-lockfile";
 import { RequestError } from "./protocol.js";
 import { AutomationTurnStore } from "./automation-turn-store.js";
 import type {
@@ -49,11 +48,11 @@ export interface AutomationRegistrationRequest {
 }
 
 export class AutomationTurnService {
-  readonly interruptedAtStartup: number;
+  interruptedAtStartup = 0;
   private readonly active = new Map<string, ActiveExecution>();
   private readonly activeMessages = new Map<string, Promise<AutomationMessage>>();
-  private readonly releaseOwnership: (() => void) | undefined;
   private readonly credentialDirectory: string | undefined;
+  private executionEnabled = true;
   private closing = false;
   private storeClosed = false;
   private closePromise: Promise<void> | undefined;
@@ -66,23 +65,25 @@ export class AutomationTurnService {
     this.credentialDirectory = options.credentialDirectory
       ? resolve(options.credentialDirectory)
       : store.path === ":memory:" ? undefined : join(dirname(store.path), "automation-credentials");
-    if (store.path !== ":memory:") {
-      try {
-        this.releaseOwnership = lockfile.lockSync(store.path, {
-          lockfilePath: `${store.path}.runtime.lock`, realpath: false, stale: 300_000, update: 30_000, retries: 0,
-        });
-      } catch {
-        store.close();
-        throw new RequestError("automation_runtime_owned", "Another WuxianPi Runtime owns the automation database", { httpStatus: 409 });
-      }
-    }
-    try {
-      this.interruptedAtStartup = this.store.interruptActiveTurns();
-    } catch (error) {
-      this.releaseOwnership?.();
-      this.store.close();
-      throw error;
-    }
+  }
+
+  recoverInterruptedTurns(): number {
+    this.assertAvailable();
+    this.interruptedAtStartup = this.store.interruptActiveTurns();
+    return this.interruptedAtStartup;
+  }
+
+  setExecutionEnabled(enabled: boolean): void {
+    this.executionEnabled = enabled;
+    if (!enabled) for (const execution of this.active.values()) execution.controller.abort();
+  }
+
+  async stopExecutions(): Promise<void> {
+    this.setExecutionEnabled(false);
+    const executions = Promise.allSettled([
+      ...[...this.active.values()].map((execution) => execution.promise), ...this.activeMessages.values(),
+    ]);
+    await Promise.race([executions, delay(SHUTDOWN_TIMEOUT_MS)]);
   }
 
   async requestRegistration(input: AutomationRegistrationRequest): Promise<AutomationRegistration> {
@@ -264,6 +265,7 @@ export class AutomationTurnService {
     artifactRefs?: unknown;
     idempotencyKey: string;
   }): Promise<AutomationTurn> {
+    this.assertExecutionEnabled();
     const registration = this.requireRegistration(validateRegistrationId(input.registrationId));
     if (registration.ownerPackageId !== validatePackageId(input.ownerPackageId)) {
       throw new RequestError("automation_grant_owner_mismatch", "Automation grant belongs to another Package", { httpStatus: 403 });
@@ -295,6 +297,7 @@ export class AutomationTurnService {
     idempotencyKey: string;
   }): Promise<{ message: AutomationMessage; artifactRefs: string[]; created: boolean }> {
     this.assertAvailable();
+    this.assertExecutionEnabled();
     const registration = this.authorizeRegistration(input.registrationId, input.registrationToken, input.conversationId);
     if (registration.target.kind === "new" && registration.target.mode === "per-run") {
       throw new RequestError("automation_target_requires_turn", "This automation creates a new conversation for each AI turn", { httpStatus: 409 });
@@ -335,6 +338,7 @@ export class AutomationTurnService {
     idempotencyKey: string;
   }): Promise<AutomationTurn> {
     this.assertAvailable();
+    this.assertExecutionEnabled();
     const registration = this.authorizeRegistration(input.registrationId, input.registrationToken, input.conversationId);
     const idempotencyKey = validateContextId(input.idempotencyKey, "idempotencyKey");
     const existing = this.store.getTurnByIdempotencyKey(registration.id, idempotencyKey);
@@ -405,7 +409,7 @@ export class AutomationTurnService {
     try { this.store.interruptActiveTurns(); }
     finally {
       this.storeClosed = true;
-      try { this.store.close(); } finally { this.releaseOwnership?.(); }
+      this.store.close();
     }
   }
 
@@ -492,6 +496,12 @@ export class AutomationTurnService {
       message: validateMessage(input.message),
       artifactRefs,
     };
+  }
+
+  private assertExecutionEnabled(): void {
+    if (!this.executionEnabled) {
+      throw new RequestError("automation_executor_standby", "This Runtime does not own the Automation executor", { httpStatus: 409 });
+    }
   }
 
   private requireRegistration(id: string): AutomationRegistrationRecord {

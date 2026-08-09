@@ -10,7 +10,7 @@ function parseListen(value: string): { host: string; port: number } {
   return { host: value.slice(0, lastColon) || "127.0.0.1", port: Number(value.slice(lastColon + 1)) };
 }
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  process.stdout.write("Usage: wuxianpi-node [--listen HOST:PORT] [--agent-dir PATH] [--idle-timeout-ms N] [--web-root PATH] [--preferred-web-ui-url URL]\n");
+  process.stdout.write("Usage: wuxianpi-node [--listen HOST:PORT] [--agent-dir PATH] [--idle-timeout-ms N] [--web-root PATH] [--preferred-web-ui-url URL] [--automation-database-path PATH] [--automation-owner-token-path PATH]\n");
   process.exit(0);
 }
 const listen = parseListen(readOption("--listen") ?? process.env.OPENHOUSE_PI_LISTEN ?? "127.0.0.1:20765");
@@ -19,7 +19,17 @@ const idleTimeoutMs = Number(readOption("--idle-timeout-ms") ?? process.env.OPEN
 const agentDir = readOption("--agent-dir") ?? process.env.PI_CODING_AGENT_DIR;
 const webRoot = readOption("--web-root") ?? process.env.WUXIANPI_WEB_ROOT;
 const preferredWebUiUrl = readOption("--preferred-web-ui-url") ?? process.env.OPENHOUSE_AIONUI_ORIGIN;
-const server = createRuntimeServer({ ...listen, idleTimeoutMs, agentDir, webRoot, preferredWebUiUrl });
+const automationDatabasePath = readOption("--automation-database-path") ?? process.env.WUXIANPI_AUTOMATION_DATABASE_PATH;
+const automationOwnerTokenPath = readOption("--automation-owner-token-path") ?? process.env.WUXIANPI_AUTOMATION_OWNER_TOKEN_PATH;
+const server = createRuntimeServer({
+  ...listen,
+  idleTimeoutMs,
+  agentDir,
+  webRoot,
+  preferredWebUiUrl,
+  automationDatabasePath,
+  automationOwnerTokenPath,
+});
 await server.start();
 process.stdout.write(`WuxianPi Node runtime listening on http://${listen.host}:${listen.port}\n`);
 let stopping = false;

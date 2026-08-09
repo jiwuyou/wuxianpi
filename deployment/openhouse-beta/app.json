@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "id": "wuxianpi-beta",
+  "enabled": true,
+  "title": "WuxianPi Beta",
+  "description": "WuxianPi 独立 Beta 工作台",
+  "kind": "app",
+  "shellMenu": {
+    "visible": true,
+    "title": "WuxianPi Beta",
+    "subtitle": "独立源码、共享用户数据的 Beta 工作台",
+    "section": "ai",
+    "order": 34,
+    "desktop": {
+      "visible": true,
+      "order": 34,
+      "icon": "flask-conical"
+    },
+    "entry": {
+      "type": "webview",
+      "url": "http://127.0.0.1:23130/"
+    },
+    "controlEntry": {
+      "type": "service-control",
+      "title": "控制",
+      "serviceNames": [
+        "wuxianpi-beta"
+      ],
+      "serviceRefs": [
+        "service-manager://services/wuxianpi-beta"
+      ]
+    }
+  },
+  "smallphoneApp": {
+    "visible": true,
+    "title": "WuxianPi Beta",
+    "section": "ai",
+    "order": 34,
+    "icon": "flask-conical",
+    "entry": {
+      "type": "webview",
+      "url": "http://127.0.0.1:23130/"
+    },
+    "controlEntry": {
+      "type": "service-control",
+      "title": "控制",
+      "serviceNames": [
+        "wuxianpi-beta"
+      ],
+      "serviceRefs": [
+        "service-manager://services/wuxianpi-beta"
+      ]
+    }
+  },
+  "serviceManager": {
+    "required": true,
+    "services": [
+      {
+        "name": "wuxianpi-beta",
+        "title": "WuxianPi Beta",
+        "role": "ai-workbench",
+        "port": 23130,
+        "url": "http://127.0.0.1:23130/",
+        "serviceRef": "service-manager://services/wuxianpi-beta",
+        "health": {
+          "type": "http",
+          "url": "http://127.0.0.1:23130/health"
+        },
+        "controls": [
+          "status",
+          "start",
+          "stop",
+          "restart",
+          "logs"
+        ]
+      }
+    ]
+  },
+  "ai": {
+    "visible": true,
+    "role": "agent-ui",
+    "agent": "pi",
+    "url": "http://127.0.0.1:23130/",
+    "intents": [
+      {
+        "name": "open",
+        "target": "shellMenu.entry"
+      },
+      {
+        "name": "control",
+        "target": "shellMenu.controlEntry"
+      }
+    ]
+  },
+  "tags": [
+    "group:local-stack",
+    "openhouse-component:wuxianpi-beta",
+    "openhouseai",
+    "pi",
+    "wuxianpi",
+    "beta"
+  ]
+}

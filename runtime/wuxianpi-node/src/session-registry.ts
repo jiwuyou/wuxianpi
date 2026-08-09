@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   type AgentSession, type AgentSessionEvent, type AgentSessionRuntime, buildSessionContext,
@@ -98,9 +98,12 @@ export interface RebindSessionRequest {
   reason?: string;
 }
 
+type SessionFileStamp = { size: number; mtimeMs: number };
+
 export type RuntimeSlot = {
   runtime: AgentSessionRuntime; serial: SerialExecutor; isRunning: boolean;
   agentStartCount: number; createdAt: Date; closeAfterSettled: boolean; unsubscribe?: () => void;
+  sessionFileStamp?: SessionFileStamp;
   ui?: ExtensionUiBridge; reclaimTimer?: NodeJS.Timeout;
   toolSource?: "assistant" | "override";
   binding: SessionProfileBinding | null;
@@ -738,7 +741,15 @@ export class SessionRegistry {
   }
 
   async snapshot(sessionId: string, leafId?: string | null): Promise<Record<string, unknown>> {
-    return this.control(sessionId, async (slot) => this.snapshotOf(slot, leafId));
+    return this.run(sessionId, async (slot) => {
+      await this.refreshExternallyChangedSession(slot);
+      return this.snapshotOf(slot, leafId);
+    });
+  }
+
+  async refreshExternalSnapshot(sessionId: string): Promise<Record<string, unknown> | null> {
+    return this.run(sessionId, async (slot) =>
+      await this.refreshExternallyChangedSession(slot) ? this.snapshotOf(slot) : null);
   }
 
   async snapshotAndSubscribe(
@@ -748,36 +759,39 @@ export class SessionRegistry {
   ): Promise<SnapshotSubscription> {
     const slot = await this.getOrOpen(sessionId);
     this.cancelReclaim(slot);
-    let active = false;
-    let subscribed = true;
-    const pending: RegistrySessionEvent[] = [];
-    const wrapped: EventSink = (event) => {
-      if (!subscribed || event.runtime !== slot || event.sessionId !== sessionId) return;
-      if (active) listener(event);
-      else pending.push(event);
-    };
-    this.listeners.add(wrapped);
-    try {
-      // Deliberately no await between listener registration and snapshot creation.
-      // JavaScript cannot interleave a session event inside this synchronous region.
-      const snapshot = this.snapshotOf(slot, leafId);
-      return {
-        snapshot,
-        activate: () => {
-          if (!subscribed || active) return;
-          active = true;
-          for (const event of pending.splice(0)) listener(event);
-        },
-        unsubscribe: () => {
-          subscribed = false;
-          pending.length = 0;
-          this.listeners.delete(wrapped);
-        },
+    return slot.serial.run(async () => {
+      await this.refreshExternallyChangedSession(slot);
+      let active = false;
+      let subscribed = true;
+      const pending: RegistrySessionEvent[] = [];
+      const wrapped: EventSink = (event) => {
+        if (!subscribed || event.runtime !== slot || event.sessionId !== sessionId) return;
+        if (active) listener(event);
+        else pending.push(event);
       };
-    } catch (error) {
-      this.listeners.delete(wrapped);
-      throw error;
-    }
+      this.listeners.add(wrapped);
+      try {
+        // Deliberately no await between listener registration and snapshot creation.
+        // JavaScript cannot interleave a session event inside this synchronous region.
+        const snapshot = this.snapshotOf(slot, leafId);
+        return {
+          snapshot,
+          activate: () => {
+            if (!subscribed || active) return;
+            active = true;
+            for (const event of pending.splice(0)) listener(event);
+          },
+          unsubscribe: () => {
+            subscribed = false;
+            pending.length = 0;
+            this.listeners.delete(wrapped);
+          },
+        };
+      } catch (error) {
+        this.listeners.delete(wrapped);
+        throw error;
+      }
+    });
   }
 
   async messages(sessionId: string): Promise<{ messages: readonly unknown[] }> {
@@ -1204,6 +1218,7 @@ export class SessionRegistry {
     });
     slot = { runtime, serial: new SerialExecutor(), isRunning: false,
       agentStartCount: 0, createdAt: new Date(), closeAfterSettled: false,
+      sessionFileStamp: this.readSessionFileStamp(runtime.session.sessionFile),
       binding: this.profileStateStore.getBinding(runtime.session.sessionId) ?? null,
       mandatoryPackageToolNames: [...loadedPackageToolNames],
       modelStatus: runtime.session.model ? {
@@ -1359,6 +1374,7 @@ export class SessionRegistry {
       onError: (error) => this.emit(slot, { type: "extension_error", ...error }),
     });
     slot.unsubscribe = session.subscribe((event) => this.onSessionEvent(slot, event));
+    slot.sessionFileStamp = this.readSessionFileStamp(session.sessionFile);
     this.markSessionModelReady(slot);
   }
 
@@ -1511,6 +1527,35 @@ export class SessionRegistry {
       ...(workspaceName ? { workspaceName } : {}),
       ownershipState: "bound",
     };
+  }
+
+  private readSessionFileStamp(path: string | undefined): SessionFileStamp | undefined {
+    if (!path) return undefined;
+    try {
+      const stat = statSync(path);
+      return { size: stat.size, mtimeMs: stat.mtimeMs };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async refreshExternallyChangedSession(slot: RuntimeSlot): Promise<boolean> {
+    if (slot.isRunning || !slot.runtime.session.isIdle) return false;
+    const sessionPath = slot.runtime.session.sessionFile;
+    const previous = slot.sessionFileStamp;
+    const current = this.readSessionFileStamp(sessionPath);
+    if (!sessionPath || !previous || !current ||
+      (previous.size === current.size && previous.mtimeMs === current.mtimeMs)) return false;
+    const sessionId = slot.runtime.session.sessionId;
+    const result = await this.withBindingTransition(slot, () => slot.runtime.switchSession(sessionPath));
+    if (result.cancelled) return false;
+    slot.sessionFileStamp = this.readSessionFileStamp(slot.runtime.session.sessionFile);
+    this.diagnostics?.record("session.external_change.reloaded", {
+      sessionId,
+      previousSize: previous.size,
+      currentSize: current.size,
+    });
+    return true;
   }
 
   private canonicalPath(path: string): string { return resolve(path); }

@@ -40,6 +40,8 @@ import { AutomationApi, loadOrCreateAutomationOwnerToken } from "./automation-ap
 import { AutomationTurnService } from "./automation-turn-service.js";
 import { AutomationTurnStore } from "./automation-turn-store.js";
 import { PackageRuntimeHostV1 } from "./package-runtime-host.js";
+import { PackageSingletonManager } from "./package-singleton-manager.js";
+import { loadOrCreateRuntimeInternalToken, RuntimeInternalApi } from "./runtime-internal-api.js";
 
 export interface RuntimeServerOptions {
   host: string;
@@ -62,6 +64,10 @@ export interface RuntimeServerOptions {
   automationDatabasePath?: string;
   automationOwnerTokenPath?: string;
   builtinPackagesRoot?: string | false;
+  runtimeId?: string;
+  runtimeUrl?: string;
+  singletonGuardDirectory?: string;
+  runtimeInternalTokenPath?: string;
 }
 
 interface ConnectionContext {
@@ -155,6 +161,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const automationService = new AutomationTurnService(automationStore, registry, {
     credentialDirectory: join(agentDir, "wuxianpi", "automation-credentials"),
   });
+  automationService.setExecutionEnabled(false);
   registry.setBeforeSessionRebind(({ conversationId }) => {
     automationService.pauseRegistrationsForConversation(conversationId);
   });
@@ -162,7 +169,21 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     service: automationService,
     ownerToken: loadOrCreateAutomationOwnerToken(automationOwnerTokenPath),
   });
-  const packageRuntimeHost = new PackageRuntimeHostV1({ packageManager, registry, automation: automationService });
+  const runtimeId = options.runtimeId ?? (process.env.WUXIANPI_RUNTIME_ID?.trim() || `wuxianpi-runtime-${process.pid}`);
+  const runtimeUrl = options.runtimeUrl ?? (process.env.WUXIANPI_RUNTIME_URL?.trim() || `http://${options.host}:${options.port}`);
+  const singletonGuardDirectory = options.singletonGuardDirectory ?? (process.env.WUXIANPI_SINGLETON_GUARD_DIR?.trim() || join(agentDir, "wuxianpi", "runtime-guards"));
+  const runtimeInternalToken = loadOrCreateRuntimeInternalToken(
+    options.runtimeInternalTokenPath ?? (process.env.WUXIANPI_RUNTIME_INTERNAL_TOKEN_PATH?.trim() || join(singletonGuardDirectory, "runtime-internal.token")),
+  );
+  const singletonManager = new PackageSingletonManager({
+    guardDirectory: singletonGuardDirectory,
+    runtimeId,
+    runtimeUrl,
+  });
+  const packageRuntimeHost = new PackageRuntimeHostV1({
+    packageManager, registry, automation: automationService, singletons: singletonManager, internalToken: runtimeInternalToken,
+  });
+  const runtimeInternalApi = new RuntimeInternalApi({ packageRuntimeHost, token: runtimeInternalToken });
   const nativeEvents = new NativeEventProjector(registry);
   registry.subscribe((event) => routeEvent(nativeEvents.project(event)));
   const adapter = new PiSdkAdapter(registry);
@@ -179,6 +200,8 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     staticWebUi: staticFiles.enabled ? 1 : 0,
     browserHost: 1,
     automationTurn: 1,
+    packageServiceRouting: 1,
+    packageSingletons: 1,
   } as const;
   const preferredWebUiUrl = options.preferredWebUiUrl ?? "http://127.0.0.1:25808/";
   const webApi = new WebApi({
@@ -186,6 +209,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     services: webServices,
     automationService,
     packageManager,
+    packageRuntimeHost,
     hubAuth,
     trustedOrigins: [
       ...(options.trustedOrigins ?? []),
@@ -202,6 +226,8 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       nativeWebsocketPath: "/v1/ws",
       browserHostWebsocketPath: BROWSER_HOST_WEBSOCKET_PATH,
       capabilities: runtimeCapabilities,
+      runtimeId,
+      singletons: packageRuntimeHost.singletons(),
     }),
   });
   const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
@@ -337,6 +363,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     const path = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`).pathname;
     const runtimeOrigin = `http://${request.headers.host ?? "127.0.0.1:20765"}`;
     if (await automationApi.handle(request, response)) return;
+    if (await runtimeInternalApi.handle(request, response)) return;
     if (await webApi.handle(request, response)) return;
     if (request.method === "GET" && (path === "/health" || path === "/admin/v1/health")) {
       json(response, 200, {
@@ -361,6 +388,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
           available: staticFiles.enabled,
         },
         webApiUrl: `${runtimeOrigin}/api/web/v1`,
+        runtimeApiUrl: `${runtimeOrigin}/api/runtime/v1`,
         capabilities: runtimeCapabilities,
       });
     } else if (request.method === "GET" && path === "/v1/status") {
@@ -748,6 +776,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     nativeEvents,
     diagnostics,
     hubAuth,
+    packageRuntimeHost,
     async start() {
       await hubAuth.initialize();
       if (options.builtinPackagesRoot !== false) {
