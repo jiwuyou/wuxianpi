@@ -30,6 +30,7 @@ export interface AutomationRegistration {
   title: string;
   status: AutomationRegistrationStatus;
   applicantConversationId: string;
+  ownerPackageId: string | null;
   targetConversationId: string | null;
   target: AutomationConversationTarget;
   reason: string;

@@ -39,6 +39,7 @@ import { BrowserHostRegistry, type BrowserHostConnection } from "./browser-host-
 import { AutomationApi, loadOrCreateAutomationOwnerToken } from "./automation-api.js";
 import { AutomationTurnService } from "./automation-turn-service.js";
 import { AutomationTurnStore } from "./automation-turn-store.js";
+import { PackageRuntimeHostV1 } from "./package-runtime-host.js";
 
 export interface RuntimeServerOptions {
   host: string;
@@ -60,6 +61,7 @@ export interface RuntimeServerOptions {
   trustedOrigins?: string[];
   automationDatabasePath?: string;
   automationOwnerTokenPath?: string;
+  builtinPackagesRoot?: string | false;
 }
 
 interface ConnectionContext {
@@ -153,14 +155,18 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const automationService = new AutomationTurnService(automationStore, registry, {
     credentialDirectory: join(agentDir, "wuxianpi", "automation-credentials"),
   });
+  registry.setBeforeSessionRebind(({ conversationId }) => {
+    automationService.pauseRegistrationsForConversation(conversationId);
+  });
   const automationApi = new AutomationApi({
     service: automationService,
     ownerToken: loadOrCreateAutomationOwnerToken(automationOwnerTokenPath),
   });
+  const packageRuntimeHost = new PackageRuntimeHostV1({ packageManager, registry, automation: automationService });
   const nativeEvents = new NativeEventProjector(registry);
   registry.subscribe((event) => routeEvent(nativeEvents.project(event)));
   const adapter = new PiSdkAdapter(registry);
-  webServices = new WebServices({ agentDir, registry, mcpConfigPath: options.mcpConfigPath, packageManager });
+  webServices = new WebServices({ agentDir, registry, mcpConfigPath: options.mcpConfigPath, packageManager, packageRuntimeHost });
   const staticFiles = new StaticFiles(options.webRoot);
   let deploymentId = options.deploymentId?.trim() || "starting";
   const runtimeCapabilities = {
@@ -744,6 +750,13 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     hubAuth,
     async start() {
       await hubAuth.initialize();
+      if (options.builtinPackagesRoot !== false) {
+        const builtinRoot = options.builtinPackagesRoot ?? join(dirname(fileURLToPath(import.meta.url)), "..", "builtin-packages");
+        for (const entry of await readdir(builtinRoot, { withFileTypes: true }).catch(() => [])) {
+          if (entry.isDirectory()) await packageManager.ensureBundledPackage(join(builtinRoot, entry.name));
+        }
+      }
+      await packageRuntimeHost.start();
       deploymentId = options.deploymentId?.trim() || await deriveDeploymentId(options.webRoot);
       await new Promise<void>((resolve, reject) => {
         httpServer.once("error", reject);
@@ -769,6 +782,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       for (const client of browserHostClients) client.close(1001, "runtime stopping");
       browserHosts.close();
       webApi.close();
+      await packageRuntimeHost.stop();
       await automationService.close();
       await registry.dispose();
       await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));

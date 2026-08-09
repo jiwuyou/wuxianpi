@@ -15,6 +15,18 @@ const namedEntry = {
   },
 } as const;
 
+const navigationEntry = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "title", "entry"],
+  properties: {
+    id: { type: "string", minLength: 1, maxLength: 120 },
+    title: { type: "string", minLength: 1, maxLength: 160 },
+    icon: { type: "string", minLength: 1, maxLength: 120 },
+    entry: safePath,
+  },
+} as const;
+
 export const WEB_EXTENSION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -30,12 +42,19 @@ export const WEB_EXTENSION_SCHEMA = {
     permissions: {
       type: "array",
       uniqueItems: true,
-      items: { enum: ["assistant.read", "storage.read", "storage.write", "tts.speak", "tools.call", "ui.notify", "ui.resize", "ui.close"] },
+      items: { enum: [
+        "assistant.read", "storage.read", "storage.write", "tts.speak", "tools.call",
+        "ui.notify", "ui.resize", "ui.close", "ui.openSession",
+        "session.readScope", "session.rebind", "session.create",
+        "workspace.list", "workspace.create", "workspace.file.read", "workspace.file.write",
+        "package.invoke",
+      ] },
     },
     contributes: {
       type: "object",
       additionalProperties: false,
       properties: {
+        navigationItems: { type: "array", items: navigationEntry },
         fullPages: { type: "array", items: namedEntry },
         settingsPanels: { type: "array", items: namedEntry },
         assistantEditorTabs: { type: "array", items: namedEntry },

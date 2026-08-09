@@ -7,6 +7,7 @@ import type {
   CreateSessionBindingInput,
   CreateWorkspaceInput,
   InheritSessionBindingInput,
+  RebindSessionInput,
   SessionBindingListFilter,
   SessionProfileBinding,
   UpdateWorkspaceInput,
@@ -17,7 +18,7 @@ import type {
 const SAFE_ENTITY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_SESSION_ID_LENGTH = 512;
 const MAX_WORKSPACE_NAME_LENGTH = 160;
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export interface ProfileStateStoreOptions {
   path: string;
@@ -131,6 +132,49 @@ export class ProfileStateStore {
     return this.transaction(() => this.createBindingInTransaction(normalized));
   }
 
+  rebind(input: RebindSessionInput): SessionProfileBinding {
+    this.assertOpen();
+    const normalized = this.normalizeBindingInput(input);
+    return this.transaction(() => {
+      const current = this.getBinding(normalized.sessionId);
+      if (!current) {
+        if (input.expectedRevision !== undefined && input.expectedRevision !== 0) {
+          throw new RequestError("session_binding_revision_conflict", "Unbound session revision must be 0");
+        }
+        return this.createBindingInTransaction(normalized);
+      }
+      if (input.expectedRevision !== undefined && input.expectedRevision !== current.bindingRevision) {
+        throw new RequestError("session_binding_revision_conflict", "Session binding changed before this operation", {
+          expectedRevision: input.expectedRevision,
+          currentRevision: current.bindingRevision,
+        });
+      }
+      if (bindingScopeMatches(current, normalized)) return current;
+      this.database.prepare(`
+        UPDATE session_bindings
+        SET assistant_id = ?, workspace_id = ?, cwd = ?, binding_revision = ?, updated_at = ?
+        WHERE session_id = ?
+      `).run(normalized.assistantId, normalized.workspaceId, normalized.cwd,
+        current.bindingRevision + 1, this.timestamp(), normalized.sessionId);
+      return this.requireBinding(normalized.sessionId);
+    });
+  }
+
+  restoreBinding(sessionId: string, binding: SessionProfileBinding | undefined): void {
+    this.assertOpen();
+    assertSessionId(sessionId, "session id");
+    this.transaction(() => {
+      this.database.prepare("DELETE FROM session_bindings WHERE session_id = ?").run(sessionId);
+      if (!binding) return;
+      this.database.prepare(`
+        INSERT INTO session_bindings
+          (session_id, assistant_id, workspace_id, cwd, binding_revision, inherited_from_session_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(binding.sessionId, binding.assistantId, binding.workspaceId, binding.cwd, binding.bindingRevision,
+        binding.inheritedFromSessionId, binding.createdAt, binding.updatedAt);
+    });
+  }
+
   inheritBinding(input: InheritSessionBindingInput): SessionProfileBinding {
     this.assertOpen();
     assertSessionId(input.sourceSessionId, "source session id");
@@ -166,7 +210,7 @@ export class ProfileStateStore {
     this.assertOpen();
     assertSessionId(sessionId, "session id");
     const row = this.database.prepare(`
-      SELECT session_id, assistant_id, workspace_id, cwd, inherited_from_session_id, created_at, updated_at
+      SELECT session_id, assistant_id, workspace_id, cwd, binding_revision, inherited_from_session_id, created_at, updated_at
       FROM session_bindings WHERE session_id = ?
     `).get(sessionId);
     return row ? bindingFromRow(row) : undefined;
@@ -197,7 +241,7 @@ export class ProfileStateStore {
     const offset = boundedInteger(filter.offset ?? 0, "offset", 0, Number.MAX_SAFE_INTEGER);
     parameters.push(limit, offset);
     const rows = this.database.prepare(`
-      SELECT session_id, assistant_id, workspace_id, cwd, inherited_from_session_id, created_at, updated_at
+      SELECT session_id, assistant_id, workspace_id, cwd, binding_revision, inherited_from_session_id, created_at, updated_at
       FROM session_bindings
       ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
       ORDER BY created_at, session_id
@@ -236,6 +280,7 @@ export class ProfileStateStore {
           assistant_id TEXT NOT NULL,
           workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
           cwd TEXT NOT NULL,
+          binding_revision INTEGER NOT NULL DEFAULT 1 CHECK (binding_revision >= 1),
           inherited_from_session_id TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -246,7 +291,14 @@ export class ProfileStateStore {
           ON session_bindings (workspace_id, created_at, session_id);
         CREATE INDEX IF NOT EXISTS session_bindings_cwd_idx
           ON session_bindings (cwd, created_at, session_id);
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
+        COMMIT;
+      `);
+    } else if (version === 1) {
+      this.database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE session_bindings ADD COLUMN binding_revision INTEGER NOT NULL DEFAULT 1;
+        PRAGMA user_version = 2;
         COMMIT;
       `);
     }
@@ -261,8 +313,8 @@ export class ProfileStateStore {
     const now = this.timestamp();
     this.database.prepare(`
       INSERT INTO session_bindings
-        (session_id, assistant_id, workspace_id, cwd, inherited_from_session_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        (session_id, assistant_id, workspace_id, cwd, binding_revision, inherited_from_session_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?)
     `).run(input.sessionId, input.assistantId, input.workspaceId, input.cwd, input.inheritedFromSessionId, now, now);
     return this.requireBinding(input.sessionId);
   }
@@ -397,6 +449,13 @@ function bindingIdentityMatches(
     existing.cwd === input.cwd && existing.inheritedFromSessionId === input.inheritedFromSessionId;
 }
 
+function bindingScopeMatches(
+  existing: SessionProfileBinding,
+  input: Pick<SessionProfileBinding, "assistantId" | "workspaceId" | "cwd">,
+): boolean {
+  return existing.assistantId === input.assistantId && existing.workspaceId === input.workspaceId && existing.cwd === input.cwd;
+}
+
 function isPathInsideOrEqual(root: string, candidate: string): boolean {
   const pathFromRoot = relative(root, candidate);
   return pathFromRoot === "" || (pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${sep}`) && !isAbsolute(pathFromRoot));
@@ -419,6 +478,7 @@ function bindingFromRow(row: Record<string, unknown>): SessionProfileBinding {
     assistantId: String(row.assistant_id),
     workspaceId: row.workspace_id === null ? null : String(row.workspace_id),
     cwd: String(row.cwd),
+    bindingRevision: Number(row.binding_revision ?? 1),
     inheritedFromSessionId: row.inherited_from_session_id === null ? null : String(row.inherited_from_session_id),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),

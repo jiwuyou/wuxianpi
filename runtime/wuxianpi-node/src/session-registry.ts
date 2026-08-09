@@ -75,6 +75,7 @@ function visibleToolNames(names: string[]): string[] {
 export interface RuntimeIdentity {
   sessionId: string; sessionPath?: string; cwd: string; isRunning: boolean; isIdle: boolean;
   assistantId: string | null; workspaceId: string | null; workspaceName?: string;
+  bindingRevision: number;
   ownershipState: "bound" | "unbound";
 }
 
@@ -82,6 +83,14 @@ export interface CreateSessionInput {
   assistantId?: string;
   workspaceId?: string | null;
   cwd?: string;
+}
+
+export interface RebindSessionRequest {
+  assistantId: string;
+  workspaceId?: string | null;
+  cwd: string;
+  expectedRevision?: number;
+  reason?: string;
 }
 
 export type RuntimeSlot = {
@@ -143,6 +152,12 @@ export class SessionRegistry {
   private readonly ownsProfileStateStore: boolean;
   private readonly cardExecutor = new CardExecutor();
   private readonly cardExecutions = new Map<string, AbortController>();
+  private readonly rebindings = new Map<string, Promise<RuntimeIdentity>>();
+  private beforeSessionRebind?: (input: {
+    conversationId: string;
+    previous: SessionProfileBinding | null;
+    next: Pick<SessionProfileBinding, "assistantId" | "workspaceId" | "cwd">;
+  }) => Promise<void> | void;
 
   constructor(emitEvent?: EventSink, options: {
     idleTimeoutMs?: number;
@@ -207,6 +222,10 @@ export class SessionRegistry {
   settings(): SettingsManager { return this.modelSettings; }
   modelSetup(): ModelSetupService { return this.modelSetupService; }
   profileState(): ProfileStateStore { return this.profileStateStore; }
+
+  setBeforeSessionRebind(handler?: SessionRegistry["beforeSessionRebind"]): void {
+    this.beforeSessionRebind = handler;
+  }
   workspaces(): WorkspaceManager { return this.workspaceManager; }
 
   async listWorkspaces(includeArchived = false): Promise<WorkspaceContext[]> {
@@ -369,18 +388,134 @@ export class SessionRegistry {
     if (existing) { this.cancelReclaim(existing); return this.identity(existing); }
     const inFlight = this.opening.get(canonical);
     if (inFlight) return this.identity(await inFlight);
-    const opening = this.createSlot(SessionManager.open(path));
+    let manager = SessionManager.open(path);
+    const binding = this.profileStateStore.getBinding(manager.getSessionId());
+    if (binding && resolve(binding.cwd) !== resolve(manager.getCwd())) {
+      manager = SessionManager.open(path, undefined, binding.cwd);
+    }
+    const opening = this.createSlot(manager);
     this.opening.set(canonical, opening);
     try { return this.identity(await opening); } finally { this.opening.delete(canonical); }
   }
 
   async getOrOpen(sessionId: string): Promise<RuntimeSlot> {
+    const rebinding = this.rebindings.get(sessionId);
+    if (rebinding) await rebinding;
     const existing = this.byId.get(sessionId);
     if (existing) { this.cancelReclaim(existing); return existing; }
     const openedIdentity = await this.open(sessionId);
     const opened = this.byId.get(openedIdentity.sessionId);
     if (!opened) throw new RequestError("session_not_found", `Session not found: ${sessionId}`);
     return opened;
+  }
+
+  async scope(sessionId: string): Promise<RuntimeIdentity> {
+    return this.identity(await this.getOrOpen(sessionId));
+  }
+
+  async rebind(sessionId: string, request: RebindSessionRequest): Promise<RuntimeIdentity> {
+    const activeRebind = this.rebindings.get(sessionId);
+    if (activeRebind) {
+      await activeRebind;
+      return this.rebind(sessionId, request);
+    }
+    const slot = await this.getOrOpen(sessionId);
+    const racedRebind = this.rebindings.get(sessionId);
+    if (racedRebind) {
+      await racedRebind;
+      return this.rebind(sessionId, request);
+    }
+    const sessionPath = slot.runtime.session.sessionFile;
+    const canonicalPath = sessionPath ? this.canonicalPath(sessionPath) : undefined;
+    let reboundSlot: RuntimeSlot | undefined;
+    let reboundManager: SessionManager | undefined;
+    const operation = slot.serial.run(async () => {
+      if (!this.slots.has(slot)) throw new RequestError("session_not_found", `Session not found: ${sessionId}`);
+      requireIdle(slot, "session.rebind");
+      if (!sessionPath) throw new RequestError("session_not_persisted", "Save the conversation before changing its scope");
+      const previous = slot.binding;
+      const currentRevision = previous?.bindingRevision ?? 0;
+      if (request.expectedRevision !== undefined && request.expectedRevision !== currentRevision) {
+        throw new RequestError("session_binding_revision_conflict", "Session binding changed before this operation", {
+          expectedRevision: request.expectedRevision,
+          currentRevision,
+        });
+      }
+      const workspaceId = request.workspaceId ?? null;
+      const candidate: SessionProfileBinding = {
+        sessionId,
+        assistantId: request.assistantId,
+        workspaceId,
+        cwd: resolve(request.cwd),
+        bindingRevision: previous?.bindingRevision ?? 0,
+        inheritedFromSessionId: previous?.inheritedFromSessionId ?? null,
+        createdAt: previous?.createdAt ?? new Date().toISOString(),
+        updatedAt: previous?.updatedAt ?? new Date().toISOString(),
+      };
+      const packageResources = await this.assistantResourcesResolver?.(candidate.assistantId);
+      await this.assembleProfilePrompt(candidate, packageResources);
+      const unchanged = previous && previous.assistantId === candidate.assistantId &&
+        previous.workspaceId === candidate.workspaceId && resolve(previous.cwd) === candidate.cwd;
+      if (unchanged) return this.identity(slot);
+      await this.beforeSessionRebind?.({
+        conversationId: sessionId,
+        previous,
+        next: { assistantId: candidate.assistantId, workspaceId: candidate.workspaceId, cwd: candidate.cwd },
+      });
+
+      const previousCwd = slot.runtime.cwd;
+      if (!existsSync(sessionPath)) {
+        const manager = slot.runtime.session.sessionManager as SessionManager & { _rewriteFile?: () => void; flushed?: boolean };
+        if (typeof manager._rewriteFile !== "function") {
+          throw new RequestError("session_not_persisted", "Save the conversation before changing its scope");
+        }
+        manager._rewriteFile();
+        manager.flushed = true;
+      }
+      reboundManager = SessionManager.open(sessionPath, undefined, candidate.cwd);
+      await this.disposeSlot(slot);
+      let rebound: SessionProfileBinding;
+      try {
+        rebound = this.profileStateStore.rebind({
+          sessionId,
+          assistantId: candidate.assistantId,
+          workspaceId: candidate.workspaceId,
+          cwd: candidate.cwd,
+          expectedRevision: request.expectedRevision,
+        });
+        reboundSlot = await this.createSlot(reboundManager ?? SessionManager.open(sessionPath, undefined, rebound.cwd));
+        this.emit(reboundSlot, {
+          type: "session_binding_changed",
+          reason: request.reason ?? "explicit",
+          previous: previous ? bindingEventView(previous) : null,
+          current: bindingEventView(rebound),
+        });
+        return this.identity(reboundSlot);
+      } catch (error) {
+        this.profileStateStore.restoreBinding(sessionId, previous ?? undefined);
+        try {
+          await this.createSlot(SessionManager.open(sessionPath, undefined, previous?.cwd ?? previousCwd));
+        } catch (restoreError) {
+          this.diagnostics?.record("session.rebind.restore_failed", { sessionId }, { error: restoreError });
+        }
+        throw error;
+      }
+    });
+    this.rebindings.set(sessionId, operation);
+    if (canonicalPath) {
+      const reboundOpening = operation.then(() => {
+        if (!reboundSlot) throw new RequestError("session_not_found", `Session not found after rebind: ${sessionId}`);
+        return reboundSlot;
+      });
+      reboundOpening.catch(() => undefined);
+      this.opening.set(canonicalPath, reboundOpening);
+    }
+    try {
+      return await operation;
+    } finally {
+      if (this.rebindings.get(sessionId) === operation) this.rebindings.delete(sessionId);
+      if (canonicalPath) this.opening.delete(canonicalPath);
+    }
   }
 
   async run<T>(sessionId: string, operation: (slot: RuntimeSlot) => Promise<T>): Promise<T> {
@@ -1356,12 +1491,13 @@ export class SessionRegistry {
   }
 
   private bindingIdentity(binding: SessionProfileBinding | null): Pick<RuntimeIdentity,
-    "assistantId" | "workspaceId" | "workspaceName" | "ownershipState"> {
-    if (!binding) return { assistantId: null, workspaceId: null, ownershipState: "unbound" };
+    "assistantId" | "workspaceId" | "workspaceName" | "bindingRevision" | "ownershipState"> {
+    if (!binding) return { assistantId: null, workspaceId: null, bindingRevision: 0, ownershipState: "unbound" };
     const workspaceName = binding.workspaceId ? this.profileStateStore.getWorkspace(binding.workspaceId)?.name : undefined;
     return {
       assistantId: binding.assistantId,
       workspaceId: binding.workspaceId,
+      bindingRevision: binding.bindingRevision,
       ...(workspaceName ? { workspaceName } : {}),
       ownershipState: "bound",
     };
@@ -1424,6 +1560,15 @@ export class SessionRegistry {
       throw error;
     }
   }
+}
+
+function bindingEventView(binding: SessionProfileBinding): Record<string, unknown> {
+  return {
+    assistantId: binding.assistantId,
+    workspaceId: binding.workspaceId,
+    cwd: binding.cwd,
+    bindingRevision: binding.bindingRevision,
+  };
 }
 
 function automationMessageDetails(

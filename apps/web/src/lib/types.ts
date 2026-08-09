@@ -268,6 +268,7 @@ export interface SessionInfo {
   assistantId: string | null;
   workspaceId: string | null;
   workspaceName?: string;
+  bindingRevision: number;
   ownershipState: "bound" | "unbound";
   name?: string;
   created: string;

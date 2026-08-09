@@ -10,10 +10,41 @@ import { McpConfigError, StandardMcpConfigStore, type McpServerConfig } from "./
 import type { WuxianPiPackageManager } from "./package-manager.js";
 import { RequestError } from "./protocol.js";
 import type { SessionRegistry } from "./session-registry.js";
+import type { PackageRuntimeHostV1 } from "./package-runtime-host.js";
 
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_ASSISTANT_AVATAR_BYTES = 1024 * 1024;
+const MAX_EXTENSION_WORKSPACE_FILE_BYTES = 2 * 1024 * 1024;
 const MANAGED_AVATAR_PREFIX = ".assets/avatar-";
+const EXTENSION_PERMISSIONS = new Set([
+  "assistant.read", "storage.read", "storage.write", "tts.speak", "tools.call",
+  "ui.notify", "ui.resize", "ui.close", "ui.openSession",
+  "session.readScope", "session.rebind", "session.create",
+  "workspace.list", "workspace.create", "workspace.file.read", "workspace.file.write",
+  "package.invoke",
+]);
+const EXTENSION_PERMISSION_BY_METHOD: Record<string, string> = {
+  "assistant.get": "assistant.read",
+  "storage.get": "storage.read",
+  "storage.set": "storage.write",
+  "tts.speak": "tts.speak",
+  "tools.call": "tools.call",
+  "ui.notify": "ui.notify",
+  "ui.resize": "ui.resize",
+  "ui.close": "ui.close",
+  "ui.openSession": "ui.openSession",
+  "session.getScope": "session.readScope",
+  "session.rebind": "session.rebind",
+  "session.create": "session.create",
+  "workspace.list": "workspace.list",
+  "workspace.create": "workspace.create",
+  "workspace.file.read": "workspace.file.read",
+  "workspace.file.write": "workspace.file.write",
+  "package.invoke": "package.invoke",
+};
+const CONFIRMABLE_EXTENSION_PERMISSIONS = new Set([
+  "session.rebind", "session.create", "workspace.create", "workspace.file.write", "package.invoke",
+]);
 const DEFAULT_ASSISTANT = {
   schemaVersion: 1,
   name: "WuxianPi",
@@ -70,6 +101,7 @@ export interface WebServicesOptions {
   registry: SessionRegistry;
   mcpConfigPath?: string;
   packageManager?: WuxianPiPackageManager;
+  packageRuntimeHost?: PackageRuntimeHostV1;
 }
 
 export class WebServices {
@@ -77,7 +109,14 @@ export class WebServices {
   readonly legacyExtensionsRoot: string;
   readonly defaultCwd: string;
   readonly mcpConfig: StandardMcpConfigStore;
-  private readonly nonces = new Map<string, { extensionId: string; assistantId: string; expiresAt: number }>();
+  private readonly nonces = new Map<string, {
+    extensionId: string;
+    assistantId: string;
+    sessionId?: string;
+    permissions: Set<string>;
+    builtin: boolean;
+    expiresAt: number;
+  }>();
   private readonly pendingPermissions = new Map<string, Record<string, unknown>>();
 
   constructor(private readonly options: WebServicesOptions) {
@@ -671,10 +710,26 @@ export class WebServices {
       data: Buffer.from(await cloud.arrayBuffer()).toString("base64") };
   }
 
-  async issueExtensionNonce(extensionId: string, assistantId: string): Promise<string> {
-    await Promise.all([this.getAssistant(assistantId), this.requireWebExtension(extensionId)]);
+  async issueExtensionNonce(extensionId: string, assistantId: string, sessionId?: string, approvedPermissions: string[] = []): Promise<string> {
+    const [, extension] = await Promise.all([this.getAssistant(assistantId), this.requireWebExtension(extensionId)]);
+    if (sessionId) await this.options.registry.scope(sessionId);
+    const manifest = isRecord(extension.manifest) ? extension.manifest : {};
+    const permissions = new Set((Array.isArray(manifest.permissions) ? manifest.permissions : []).map(String));
+    for (const permission of permissions) {
+      if (!EXTENSION_PERMISSIONS.has(permission)) throw new RequestError("invalid_extension_permission", `Unknown extension permission: ${permission}`);
+    }
+    const builtin = extension.builtin === true;
+    const approved = new Set(approvedPermissions);
+    const missingConfirmation = [...permissions].find((permission) =>
+      !builtin && CONFIRMABLE_EXTENSION_PERMISSIONS.has(permission) && !approved.has(permission));
+    if (missingConfirmation) {
+      throw new RequestError("extension_permission_confirmation_required", `Extension permission requires confirmation: ${missingConfirmation}`, {
+        httpStatus: 403,
+        permission: missingConfirmation,
+      });
+    }
     const nonce = randomUUID();
-    this.nonces.set(nonce, { extensionId, assistantId, expiresAt: Date.now() + 30 * 60_000 });
+    this.nonces.set(nonce, { extensionId, assistantId, ...(sessionId ? { sessionId } : {}), permissions, builtin, expiresAt: Date.now() + 30 * 60_000 });
     return nonce;
   }
 
@@ -688,6 +743,11 @@ export class WebServices {
       this.nonces.delete(nonce);
       throw new RequestError("invalid_extension_nonce", "Invalid or expired extension bridge nonce");
     }
+    const requiredPermission = EXTENSION_PERMISSION_BY_METHOD[method];
+    if (!requiredPermission) throw new RequestError("unknown_bridge_method", `Unknown extension bridge method: ${method}`);
+    if (!grant.permissions.has(requiredPermission)) {
+      throw new RequestError("extension_permission_denied", `Extension did not declare permission: ${requiredPermission}`, { httpStatus: 403 });
+    }
     const params = isRecord(body.params) ? body.params : {};
     let result: unknown = {};
     if (method === "assistant.get") result = await this.getAssistant(grant.assistantId);
@@ -700,9 +760,93 @@ export class WebServices {
       data[key] = params.value;
       await writeJson(this.extensionStoragePath(extensionId, grant.assistantId), data);
     } else if (method === "tts.speak") result = await this.speak(params);
-    else if (["ui.notify", "ui.resize", "ui.close"].includes(method)) result = { handled: true };
-    else if (method === "tools.call") throw new RequestError("tools_owned_by_pi", "Web extensions must invoke tools through their Pi extension counterpart");
-    else throw new RequestError("unknown_bridge_method", `Unknown extension bridge method: ${method}`);
+    else if (["ui.notify", "ui.resize", "ui.close", "ui.openSession"].includes(method)) result = { handled: true };
+    else if (method === "session.getScope") {
+      result = await this.options.registry.scope(requireExtensionSession(grant));
+    } else if (method === "session.rebind") {
+      const conversationId = requireExtensionSession(grant);
+      const current = await this.options.registry.scope(conversationId);
+      const assistantId = optionalRecordString(params, "assistantId") ?? grant.assistantId;
+      const workspaceId = params.workspaceId === null ? null : optionalRecordString(params, "workspaceId");
+      const cwd = requireRecordString(params, "cwd");
+      const expectedRevision = optionalNonNegativeInteger(params, "expectedRevision");
+      const changesExistingBoundary = current.ownershipState === "bound" && (
+        current.assistantId !== assistantId || current.workspaceId !== (workspaceId ?? null) || resolve(current.cwd) !== resolve(cwd)
+      );
+      if (grant.builtin && changesExistingBoundary && params.confirmed !== true) {
+        throw new RequestError("session_rebind_confirmation_required", "Changing an existing session boundary requires confirmation", { httpStatus: 403 });
+      }
+      result = await this.options.registry.rebind(conversationId, {
+        assistantId,
+        workspaceId: workspaceId ?? null,
+        cwd,
+        ...(expectedRevision === undefined ? {} : { expectedRevision }),
+        reason: optionalRecordString(params, "reason") ?? `extension:${extensionId}`,
+      });
+    } else if (method === "session.create") {
+      const requestedAssistantId = optionalRecordString(params, "assistantId") ?? grant.assistantId;
+      if (requestedAssistantId !== grant.assistantId) {
+        throw new RequestError("extension_assistant_scope_mismatch", "Extension may only create sessions for its granted assistant", { httpStatus: 403 });
+      }
+      const workspaceId = params.workspaceId === null ? null : optionalRecordString(params, "workspaceId");
+      const cwd = optionalRecordString(params, "cwd");
+      result = await this.options.registry.create({
+        assistantId: requestedAssistantId,
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(cwd ? { cwd } : {}),
+      });
+    } else if (method === "workspace.list") {
+      result = { workspaces: (await this.options.registry.listWorkspaces(params.includeArchived === true)).map(workspaceBridgeView) };
+    } else if (method === "workspace.create") {
+      const id = optionalRecordString(params, "id") ?? slugId(requireRecordString(params, "name"));
+      const suppliedRoot = optionalRecordString(params, "rootCwd");
+      const rootCwd = suppliedRoot ?? join(this.options.agentDir, "workspaces", id);
+      if (!suppliedRoot) await mkdir(rootCwd, { recursive: true, mode: 0o700 });
+      const workspace = await this.options.registry.createWorkspace({
+        id,
+        name: requireRecordString(params, "name"),
+        rootCwd,
+        ...(params.instructions === undefined ? {} : { instructions: String(params.instructions ?? "") }),
+        ...(params.memory === undefined ? {} : { memory: String(params.memory ?? "") }),
+      });
+      result = { workspace: workspaceBridgeView(workspace) };
+    } else if (method === "workspace.file.read") {
+      const workspace = await this.options.registry.getWorkspace(requireRecordString(params, "workspaceId"));
+      const target = await resolveWorkspaceFile(workspace.workspace.rootCwd, requireRecordString(params, "path"), false);
+      const info = await stat(target);
+      if (!info.isFile() || info.size > MAX_EXTENSION_WORKSPACE_FILE_BYTES) {
+        throw new RequestError("workspace_file_unavailable", "Workspace file is not a readable text file or is too large");
+      }
+      result = { path: requireRecordString(params, "path"), content: await readFile(target, "utf8"), modifiedAt: info.mtime.toISOString() };
+    } else if (method === "workspace.file.write") {
+      const workspace = await this.options.registry.getWorkspace(requireRecordString(params, "workspaceId"));
+      const content = String(params.content ?? "");
+      if (Buffer.byteLength(content) > MAX_EXTENSION_WORKSPACE_FILE_BYTES) {
+        throw new RequestError("workspace_file_too_large", "Workspace file exceeds the extension write limit");
+      }
+      const target = await resolveWorkspaceFile(workspace.workspace.rootCwd, requireRecordString(params, "path"), true);
+      await writeAtomicTextFile(target, content);
+      result = { path: requireRecordString(params, "path"), bytes: Buffer.byteLength(content) };
+    } else if (method === "package.invoke") {
+      const host = this.options.packageRuntimeHost;
+      if (!host) throw new RequestError("package_runtime_unavailable", "Package runtime host is not configured", { httpStatus: 503 });
+      const extension = await this.requireWebExtension(extensionId);
+      const packageId = typeof extension.packageId === "string" ? extension.packageId : undefined;
+      if (!packageId || !host.has(packageId, requireRecordString(params, "namespace"))) {
+        throw new RequestError("package_api_unavailable", "Package API is not available", { httpStatus: 404 });
+      }
+      result = await host.invoke({
+        packageId,
+        namespace: requireRecordString(params, "namespace"),
+        method: requireRecordString(params, "method"),
+        params: isRecord(params.params) ? params.params : {},
+        extensionId,
+        assistantId: grant.assistantId,
+        ...(grant.sessionId ? { sessionId: grant.sessionId } : {}),
+      });
+    } else if (method === "tools.call") {
+      throw new RequestError("tools_owned_by_pi", "Web extensions must invoke tools through their Pi extension counterpart");
+    }
     return { type: "wuxianpi_bridge_response", requestId, extensionId, nonce, ok: true, result };
   }
 
@@ -816,6 +960,81 @@ function requireRecordString(value: Record<string, unknown>, name: string): stri
   const item = value[name];
   if (typeof item !== "string" || !item.trim()) throw new RequestError("invalid_payload", `${name} must be a non-empty string`);
   return item;
+}
+
+function optionalRecordString(value: Record<string, unknown>, name: string): string | undefined {
+  const item = value[name];
+  if (item === undefined || item === null || item === "") return undefined;
+  if (typeof item !== "string" || !item.trim()) throw new RequestError("invalid_payload", `${name} must be text`);
+  return item;
+}
+
+function optionalNonNegativeInteger(value: Record<string, unknown>, name: string): number | undefined {
+  const item = value[name];
+  if (item === undefined) return undefined;
+  if (!Number.isSafeInteger(item) || (item as number) < 0) {
+    throw new RequestError("invalid_payload", `${name} must be a non-negative integer`);
+  }
+  return item as number;
+}
+
+function requireExtensionSession(grant: { sessionId?: string }): string {
+  if (!grant.sessionId) throw new RequestError("extension_session_required", "This extension action requires an active conversation", { httpStatus: 409 });
+  return grant.sessionId;
+}
+
+function workspaceBridgeView(context: Awaited<ReturnType<SessionRegistry["getWorkspace"]>>): Record<string, unknown> {
+  return {
+    id: context.workspace.id,
+    name: context.workspace.name,
+    rootCwd: context.workspace.rootCwd,
+    archived: context.workspace.archived,
+    createdAt: context.workspace.createdAt,
+    updatedAt: context.workspace.updatedAt,
+  };
+}
+
+function slugId(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 56);
+  return normalized && SAFE_ID.test(normalized) ? normalized : `workspace-${randomUUID().slice(0, 8)}`;
+}
+
+async function resolveWorkspaceFile(root: string, relativePath: string, createParents: boolean): Promise<string> {
+  if (!relativePath || isAbsolute(relativePath) || relativePath.includes("\\") || relativePath.split("/").some((part) => !part || part === "." || part === "..")) {
+    throw new RequestError("invalid_workspace_file_path", "Workspace file path must be a safe relative path");
+  }
+  const rootReal = await realpath(root);
+  const parts = relativePath.split("/");
+  let parent = rootReal;
+  for (const part of parts.slice(0, -1)) {
+    const next = join(parent, part);
+    try {
+      const info = await lstat(next);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new RequestError("invalid_workspace_file_path", "Workspace file path crosses an unsafe directory");
+    } catch (error) {
+      if (!isMissing(error) || !createParents) throw error;
+      await mkdir(next, { mode: 0o700 });
+    }
+    parent = next;
+  }
+  const target = join(parent, parts.at(-1)!);
+  if (!isInside(rootReal, target)) throw new RequestError("invalid_workspace_file_path", "Workspace file path escapes its Workspace");
+  try {
+    const info = await lstat(target);
+    if (info.isSymbolicLink() || !info.isFile()) throw new RequestError("invalid_workspace_file_path", "Workspace file target must be a regular file");
+    const targetReal = await realpath(target);
+    if (!isInside(rootReal, targetReal)) throw new RequestError("invalid_workspace_file_path", "Workspace file resolves outside its Workspace");
+    return targetReal;
+  } catch (error) {
+    if (!createParents || !isMissing(error)) throw error;
+    return target;
+  }
+}
+
+async function writeAtomicTextFile(path: string, content: string): Promise<void> {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, content, { mode: 0o600 });
+  await rename(temporary, path);
 }
 
 function stringOr(value: unknown, fallback: string): string { return typeof value === "string" ? value : fallback; }

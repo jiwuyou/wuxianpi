@@ -20,6 +20,7 @@ export type ContributionType =
   | "wuxianpi.assistantTemplate"
   | "wuxianpi.context"
   | "wuxianpi.experience"
+  | "wuxianpi.runtime"
   | "openhouse.app"
   | "service-manager.service"
   | "artifact";
@@ -177,6 +178,7 @@ export interface InstalledPackageState {
   installedAt: string;
   updatedAt: string;
   lastError?: { code: string; message: string; logPath?: string };
+  sourceKind?: "market" | "bundled";
 }
 
 export interface ActiveContributionRecord {

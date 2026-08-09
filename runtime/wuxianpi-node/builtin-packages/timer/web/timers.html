@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>定时对话管理</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #17201c; background: #f6f7f8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    .page { width: min(960px, 100%); margin: auto; padding: 18px 16px 48px; }
+    header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 16px; }
+    h1 { font-size: 24px; margin: 0; }
+    .list { display: grid; gap: 10px; }
+    .item { background: white; border: 1px solid #d8dedb; border-radius: 8px; padding: 14px; display: grid; gap: 8px; }
+    .meta { color: #68726d; font-size: 13px; overflow-wrap: anywhere; display: flex; gap: 12px; flex-wrap: wrap; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .button { min-height: 36px; border: 1px solid #c9d0cc; border-radius: 6px; padding: 7px 11px; background: #fff; color: #17201c; }
+    .button.primary { background: #13795b; border-color: #13795b; color: #fff; }
+    .empty { border: 1px dashed #c7cfcb; background: #fff; padding: 28px; text-align: center; color: #68726d; border-radius: 8px; }
+    @media (prefers-color-scheme: dark) {
+      :root, body { background: #171a18; color: #edf2ef; }
+      .item, .empty { background: #222724; border-color: #3b443f; }
+      .button { background: #252b28; color: #edf2ef; border-color: #4c5751; }
+      .button.primary { background: #2a9b76; color: #08140f; }
+      .meta, .empty { color: #aeb9b3; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header><h1>定时对话管理</h1></header>
+    <div id="state">正在加载...</div>
+    <section id="list" class="list"></section>
+  </main>
+  <script>
+    let host;
+    const pending = new Map();
+    const state = document.querySelector("#state");
+    const list = document.querySelector("#list");
+
+    addEventListener("message", (event) => {
+      const message = event.data;
+      if (message?.type === "wuxianpi_host_context") {
+        host = message;
+        void load();
+        return;
+      }
+      if (message?.type !== "wuxianpi_bridge_response") return;
+      const operation = pending.get(message.requestId);
+      if (!operation) return;
+      pending.delete(message.requestId);
+      message.ok ? operation.resolve(message.result) : operation.reject(new Error(message.error?.message || "操作失败"));
+    });
+
+    function call(method, params = {}) {
+      const requestId = crypto.randomUUID();
+      return new Promise((resolve, reject) => {
+        pending.set(requestId, { resolve, reject });
+        parent.postMessage({
+          type: "wuxianpi_bridge_request",
+          requestId,
+          extensionId: host.extensionId,
+          nonce: host.nonce,
+          method,
+          params,
+        }, "*");
+      });
+    }
+
+    function api(method, params = {}) {
+      return call("package.invoke", {
+        namespace: "timer.v1",
+        method,
+        params,
+      });
+    }
+
+    async function load() {
+      try {
+        const data = await api("list");
+        state.hidden = true;
+        await render(Array.isArray(data.timers) ? data.timers : []);
+      } catch (error) {
+        state.textContent = error.message || String(error);
+        state.className = "empty";
+      }
+    }
+
+    async function render(items) {
+      if (!items.length) {
+        list.innerHTML = '<div class="empty">暂无定时对话。</div>';
+        return;
+      }
+      const occurrences = await Promise.all(items.map((item) => api("occurrences", { timerId: item.id }).catch(() => ({ occurrences: [] }))));
+      list.innerHTML = items.map((item, index) => {
+        const last = Array.isArray(occurrences[index]?.occurrences) ? occurrences[index].occurrences[0] : null;
+        return '<article class="item" data-timer-id="' + escapeHtml(item.id) + '">' +
+          '<strong>' + escapeHtml(item.title) + '</strong>' +
+          '<div class="meta">' +
+            '<span>' + escapeHtml(item.status) + '</span>' +
+            '<span>下次 ' + escapeHtml(item.nextRunAt ? formatDate(item.nextRunAt) : "无") + '</span>' +
+            '<span>来源 ' + escapeHtml(item.consumerId + "/" + item.handlerId) + '</span>' +
+            '<span>最近 ' + escapeHtml(last ? (last.status + " · " + formatDate(last.scheduledAt)) : "尚未执行") + '</span>' +
+          '</div>' +
+          '<div class="actions">' +
+            '<button class="button primary" data-action="runNow">立即运行</button>' +
+            '<button class="button" data-action="' + (item.status === "paused" ? "resume" : "pause") + '">' + (item.status === "paused" ? "恢复" : "暂停") + '</button>' +
+            '<button class="button" data-action="cancel">取消</button>' +
+          '</div>' +
+        '</article>';
+      }).join("");
+    }
+
+    list.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-action]");
+      const row = button?.closest("[data-timer-id]");
+      if (!button || !row) return;
+      try {
+        await api(button.dataset.action, { timerId: row.dataset.timerId });
+        await load();
+      } catch (error) {
+        state.hidden = false;
+        state.textContent = error.message || String(error);
+        state.className = "empty";
+      }
+    });
+
+    function formatDate(value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character]);
+    }
+  </script>
+</body>
+</html>

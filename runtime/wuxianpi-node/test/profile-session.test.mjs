@@ -180,6 +180,98 @@ test("Web Workspace API creates bound sessions and rejects cwd escape", { timeou
   assert.equal((await missingAssistant.json()).error.code, "invalid_payload");
 });
 
+test("session rebind preserves history, reloads scope, rejects busy turns, and survives restart", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-session-rebind-"));
+  const agentDir = join(root, "agent");
+  const alphaRoot = join(root, "alpha-workspace");
+  const betaRoot = join(root, "beta-workspace");
+  await Promise.all([mkdir(alphaRoot, { recursive: true }), mkdir(betaRoot, { recursive: true })]);
+  await Promise.all([
+    writeAssistant(agentDir, "alpha", "Alpha identity", "Alpha memory"),
+    writeAssistant(agentDir, "beta", "Beta identity", "Beta memory"),
+  ]);
+  const makeRegistry = () => new SessionRegistry(undefined, { agentDir, idleTimeoutMs: 0 });
+  let registry = makeRegistry();
+  let sessionPath;
+  let sessionId;
+  try {
+    await registry.createWorkspace({ id: "alpha-space", name: "Alpha", rootCwd: alphaRoot, instructions: "Alpha workspace" });
+    await registry.createWorkspace({ id: "beta-space", name: "Beta", rootCwd: betaRoot, instructions: "Beta workspace" });
+    const created = await registry.create({ assistantId: "alpha", workspaceId: "alpha-space", cwd: alphaRoot });
+    const slot = await registry.getOrOpen(created.sessionId);
+    persistTurn(slot, "keep this history", "history kept");
+    sessionPath = slot.runtime.session.sessionFile;
+    sessionId = created.sessionId;
+    slot.isRunning = true;
+    await assert.rejects(() => registry.rebind(sessionId, {
+      assistantId: "beta", workspaceId: "beta-space", cwd: betaRoot, expectedRevision: 1,
+    }), (error) => error.code === "session_busy");
+    slot.isRunning = false;
+    const rebound = await registry.rebind(sessionId, {
+      assistantId: "beta", workspaceId: "beta-space", cwd: betaRoot, expectedRevision: 1, reason: "test",
+    });
+    assert.equal(rebound.sessionId, sessionId);
+    assert.equal(rebound.bindingRevision, 2);
+    assert.equal(rebound.cwd, betaRoot);
+    const reboundSlot = await registry.getOrOpen(sessionId);
+    assert.equal(reboundSlot.runtime.session.sessionFile, sessionPath);
+    assert.equal(reboundSlot.runtime.session.messages.some((message) => message.role === "user" && message.content === "keep this history"), true);
+    assert.match(reboundSlot.runtime.session.systemPrompt, /Beta identity/);
+    assert.match(reboundSlot.runtime.session.systemPrompt, /Beta workspace/);
+    assert.doesNotMatch(reboundSlot.runtime.session.systemPrompt, /Alpha workspace/);
+    await assert.rejects(() => registry.rebind(sessionId, {
+      assistantId: "alpha", workspaceId: "alpha-space", cwd: alphaRoot, expectedRevision: 1,
+    }), (error) => error.code === "session_binding_revision_conflict");
+  } finally {
+    await registry.dispose();
+  }
+  registry = makeRegistry();
+  try {
+    const reopened = await registry.open(sessionPath);
+    assert.equal(reopened.sessionId, sessionId);
+    assert.equal(reopened.assistantId, "beta");
+    assert.equal(reopened.workspaceId, "beta-space");
+    assert.equal(reopened.cwd, betaRoot);
+  } finally {
+    await registry.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session rebind restores the previous binding and Runtime when reconstruction fails", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-session-rebind-rollback-"));
+  const agentDir = join(root, "agent");
+  const alphaRoot = join(root, "alpha");
+  const betaRoot = join(root, "beta");
+  await Promise.all([mkdir(alphaRoot, { recursive: true }), mkdir(betaRoot, { recursive: true })]);
+  await Promise.all([
+    writeAssistant(agentDir, "alpha", "Alpha identity", "Alpha memory"),
+    writeAssistant(agentDir, "beta", "Beta identity", "Beta memory"),
+  ]);
+  let betaResourceLoads = 0;
+  const registry = new SessionRegistry(undefined, {
+    agentDir,
+    idleTimeoutMs: 0,
+    assistantResourcesResolver: async (assistantId) => {
+      if (assistantId === "beta" && ++betaResourceLoads === 2) throw new Error("rebuild failed");
+      return emptyResources();
+    },
+  });
+  t.after(async () => { await registry.dispose(); await rm(root, { recursive: true, force: true }); });
+  await registry.createWorkspace({ id: "alpha-space", name: "Alpha", rootCwd: alphaRoot });
+  await registry.createWorkspace({ id: "beta-space", name: "Beta", rootCwd: betaRoot });
+  const created = await registry.create({ assistantId: "alpha", workspaceId: "alpha-space", cwd: alphaRoot });
+  await assert.rejects(() => registry.rebind(created.sessionId, {
+    assistantId: "beta", workspaceId: "beta-space", cwd: betaRoot, expectedRevision: 1,
+  }), /rebuild failed/);
+  const restored = await registry.scope(created.sessionId);
+  assert.equal(restored.assistantId, "alpha");
+  assert.equal(restored.workspaceId, "alpha-space");
+  assert.equal(restored.cwd, alphaRoot);
+  assert.equal(restored.bindingRevision, 1);
+  assert.match((await registry.state(created.sessionId)).systemPrompt, /Alpha identity/);
+});
+
 async function writeAssistant(agentDir, id, identity, memory) {
   const directory = join(agentDir, "assistants", id);
   await mkdir(join(directory, ".pi", "skills"), { recursive: true });

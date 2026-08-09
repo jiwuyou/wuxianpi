@@ -122,6 +122,7 @@ export function normalizeSessionList(body: unknown): SessionInfo[] {
       cwd: text(row.cwd),
       assistantId,
       workspaceId,
+      bindingRevision: numberValue(row.bindingRevision),
       ...(ownershipState === "bound" && optionalText(row.workspaceName) ? { workspaceName: optionalText(row.workspaceName) } : {}),
       ownershipState,
       name: typeof row.name === "string" ? row.name : undefined,

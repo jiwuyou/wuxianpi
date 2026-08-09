@@ -397,8 +397,16 @@ export class WebApi {
       const body = await readJsonBody(request);
       const extensionId = requireString(body, "extensionId");
       const assistantId = requireString(body, "assistantId");
+      const sessionId = optionalString(body, "sessionId");
+      if (body.approvedPermissions !== undefined && (!Array.isArray(body.approvedPermissions) ||
+          !body.approvedPermissions.every((permission) => typeof permission === "string"))) {
+        throw new RequestError("invalid_payload", "approvedPermissions must be an array of strings");
+      }
       json(response, 200, { ok: true, data: {
-        extensionId, assistantId, nonce: await this.options.services.issueExtensionNonce(extensionId, assistantId),
+        extensionId, assistantId, ...(sessionId ? { sessionId } : {}),
+        nonce: await this.options.services.issueExtensionNonce(
+          extensionId, assistantId, sessionId, body.approvedPermissions as string[] | undefined,
+        ),
       } }); return;
     }
     if (path === "/extensions/bridge" && method === "POST") {
@@ -586,6 +594,21 @@ export class WebApi {
       json(response, 200, { ok: true, data: await registry.snapshot(sessionId) }); return;
     }
     if (action === "snapshot" && method === "GET") { json(response, 200, { ok: true, data: await registry.snapshot(sessionId, requestedLeafId) }); return; }
+    if (action === "scope" && method === "GET") { json(response, 200, { ok: true, data: await registry.scope(sessionId) }); return; }
+    if (action === "rebind" && method === "POST") {
+      const body = await readJsonBody(request);
+      const expectedRevision = body.expectedRevision;
+      if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || (expectedRevision as number) < 0)) {
+        throw new RequestError("invalid_payload", "expectedRevision must be a non-negative integer");
+      }
+      json(response, 200, { ok: true, data: await registry.rebind(sessionId, {
+        assistantId: requireString(body, "assistantId"),
+        workspaceId: body.workspaceId === null ? null : optionalString(body, "workspaceId"),
+        cwd: requireString(body, "cwd"),
+        ...(expectedRevision === undefined ? {} : { expectedRevision: expectedRevision as number }),
+        ...(optionalString(body, "reason") ? { reason: optionalString(body, "reason") } : {}),
+      }) }); return;
+    }
     if (action === "events" && method === "GET") { await this.openEventStream(request, response, sessionId); return; }
     if (action === "tree" && method === "GET") { json(response, 200, { ok: true, data: await registry.tree(sessionId) }); return; }
     if (action === "commands" && method === "GET") { json(response, 200, { ok: true, data: await registry.commands(sessionId) }); return; }

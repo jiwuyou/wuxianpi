@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "timer",
+  "name": "定时对话管理",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "description": "查看和控制定时触发器",
+  "entry": "timers.html",
+  "permissions": ["package.invoke", "ui.notify"],
+  "contributes": { "navigationItems": [{ "id": "timers", "title": "定时对话管理", "icon": "clock-3", "entry": "timers.html" }] }
+}

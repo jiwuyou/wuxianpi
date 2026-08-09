@@ -372,6 +372,7 @@
             "wuxianpi.assistantTemplate",
             "wuxianpi.context",
             "wuxianpi.experience",
+            "wuxianpi.runtime",
             "openhouse.app",
             "service-manager.service",
             "artifact"
@@ -425,6 +426,14 @@
           "allOf": [
             { "$ref": "#/$defs/pathContribution" },
             { "type": "object", "properties": { "type": { "const": "pi.theme" } } }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "type": "object",
+          "allOf": [
+            { "$ref": "#/$defs/pathContribution" },
+            { "type": "object", "properties": { "type": { "const": "wuxianpi.runtime" } } }
           ],
           "unevaluatedProperties": false
         },

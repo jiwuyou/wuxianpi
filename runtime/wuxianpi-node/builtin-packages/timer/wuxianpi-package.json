@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "com.wuxianpi.builtin.timer",
+  "name": "定时对话管理",
+  "version": "1.0.0",
+  "summary": "提供通用定时触发能力，不理解任务或对话内容。",
+  "categories": ["capability"],
+  "requires": { "hostCapabilities": [], "packages": [] },
+  "build": { "mode": "none" },
+  "artifacts": [],
+  "contributions": [
+    {
+      "id": "com.wuxianpi.builtin.timer/runtime.timer",
+      "type": "wuxianpi.runtime",
+      "name": "Timer Service",
+      "path": "runtime/service.mjs"
+    },
+    {
+      "id": "com.wuxianpi.builtin.timer/web.timer",
+      "type": "wuxianpi.webExtension",
+      "name": "定时对话管理",
+      "manifest": "web/web.json"
+    }
+  ]
+}

@@ -59,6 +59,7 @@ export interface SessionProfileBinding {
   assistantId: AssistantId;
   workspaceId: WorkspaceId | null;
   cwd: string;
+  bindingRevision: number;
   inheritedFromSessionId: SessionId | null;
   createdAt: string;
   updatedAt: string;
@@ -77,6 +78,14 @@ export interface InheritSessionBindingInput {
   targetSessionId: SessionId;
   cwd?: string;
   workspaceId?: WorkspaceId | null;
+}
+
+export interface RebindSessionInput {
+  sessionId: SessionId;
+  assistantId: AssistantId;
+  workspaceId?: WorkspaceId | null;
+  cwd: string;
+  expectedRevision?: number;
 }
 
 export interface SessionBindingListFilter {

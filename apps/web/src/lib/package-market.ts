@@ -31,6 +31,7 @@ export const PACKAGE_CONTRIBUTION_TYPES = [
   "wuxianpi.assistantTemplate",
   "wuxianpi.context",
   "wuxianpi.experience",
+  "wuxianpi.runtime",
   "openhouse.app",
   "service-manager.service",
   "artifact",

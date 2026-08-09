@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "com.wuxianpi.builtin.tasks",
+  "name": "任务",
+  "version": "1.0.0",
+  "summary": "将会话、工作区与任务记忆组合成可管理的长期任务。",
+  "categories": ["solution"],
+  "requires": {
+    "hostCapabilities": [],
+    "packages": []
+  },
+  "build": {
+    "mode": "none"
+  },
+  "artifacts": [],
+  "contributions": [
+    {
+      "id": "com.wuxianpi.builtin.tasks/runtime.task",
+      "type": "wuxianpi.runtime",
+      "name": "Task Service",
+      "path": "runtime/service.mjs"
+    },
+    {
+      "id": "com.wuxianpi.builtin.tasks/extension.task-context",
+      "type": "pi.extension",
+      "name": "任务上下文",
+      "description": "在任务会话每轮开始时加载对应的任务记忆。",
+      "path": "extension/task-context.mjs",
+      "assistantSelectable": false
+    },
+    {
+      "id": "com.wuxianpi.builtin.tasks/skill.task",
+      "type": "pi.skill",
+      "name": "任务管理 Skill",
+      "description": "帮助助手维护任务目标、决策与下一步。",
+      "path": "skills/task",
+      "assistantSelectable": false
+    },
+    {
+      "id": "com.wuxianpi.builtin.tasks/web.tasks",
+      "type": "wuxianpi.webExtension",
+      "name": "任务",
+      "description": "任务控制台",
+      "manifest": "web/web.json",
+      "assistantSelectable": false
+    }
+  ]
+}

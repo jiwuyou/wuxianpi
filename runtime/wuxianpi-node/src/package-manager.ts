@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { FunctionalAssistantStorage } from "./functional-assistant-storage.js";
@@ -160,6 +160,42 @@ export class WuxianPiPackageManager {
       .map((item) => this.localPackageView(state, item)));
   }
 
+  async packageDataPath(packageId: string): Promise<string> {
+    const state = await this.store.read();
+    const installed = state.packages[packageId];
+    if (!installed) throw new RequestError("package_not_found", `Package is not installed: ${packageId}`);
+    await mkdir(installed.dataPath, { recursive: true, mode: 0o700 });
+    return installed.dataPath;
+  }
+
+  async isPackageEnabled(packageId: string): Promise<boolean> {
+    const state = await this.store.read();
+    const installed = state.packages[packageId];
+    return Boolean(installed && installed.enabledContributionIds.length > 0);
+  }
+
+  async listActiveRuntimeContributions(): Promise<Array<{
+    packageId: string;
+    contributionId: string;
+    packageVersion: string;
+    dataPath: string;
+    runtimePath: string;
+  }>> {
+    const state = await this.store.read();
+    return Object.values(state.contributions).flatMap((record) => {
+      if (!record.enabled || record.contribution.type !== "wuxianpi.runtime" || !record.contribution.path) return [];
+      const installed = state.packages[record.packageId];
+      if (!installed) return [];
+      return [{
+        packageId: record.packageId,
+        contributionId: record.id,
+        packageVersion: installed.version,
+        dataPath: installed.dataPath,
+        runtimePath: safePackagePath(record.revisionPath, record.contribution.path),
+      }];
+    });
+  }
+
   async detail(packageId: string): Promise<Record<string, unknown>> {
     const state = await this.store.read();
     const installed = state.packages[packageId];
@@ -168,15 +204,111 @@ export class WuxianPiPackageManager {
       ...packageSummary(installed),
       manifest: installed.manifest,
       installPlan: installed.installPlan,
-      git: {
+      ...(installed.sourceKind === "bundled" ? { bundled: true } : { git: {
         sourcePath: installed.sourcePath,
         baseCommit: installed.baseCommit,
         localHead: installed.localHead,
         targetCommit: installed.targetCommit,
         status: await this.git.status(installed.sourcePath),
         conflicts: await this.git.conflicts(installed.sourcePath),
-      },
+      } }),
     });
+  }
+
+  async ensureBundledPackage(sourceRootValue: string): Promise<Record<string, unknown>> {
+    const sourceRoot = resolve(sourceRootValue);
+    const manifestPath = join(sourceRoot, "wuxianpi-package.json");
+    const manifestBytes = await readFile(manifestPath);
+    let manifest: WuxianPiPackageManifest;
+    try { manifest = JSON.parse(manifestBytes.toString("utf8")) as WuxianPiPackageManifest; }
+    catch { throw new RequestError("invalid_package_manifest", `Bundled Package manifest is invalid: ${manifestPath}`); }
+    await validatePackageManifest(sourceRoot, manifest);
+    this.validateHostCapabilities(manifest);
+    if (manifest.build.mode !== "none" || manifest.requires.packages.length > 0) {
+      throw new RequestError("invalid_bundled_package", "Bundled Packages must use build.mode=none and cannot depend on market Packages");
+    }
+    const digest = await digestDirectory(sourceRoot);
+    const manifestDigest = createHash("sha256").update(manifestBytes).digest("hex");
+    const revisionId = `bundled-${digest.slice(0, 16)}`;
+    const commit = digest.slice(0, 40);
+    const paths = this.paths(manifest.id);
+    const revisionPath = join(paths.revisions, revisionId);
+    try {
+      await lstat(revisionPath);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      const candidate = join(paths.candidates, `${revisionId}-${randomUUID().slice(0, 8)}`);
+      await mkdir(dirname(candidate), { recursive: true, mode: 0o700 });
+      await cp(sourceRoot, candidate, { recursive: true, force: true });
+      await validatePackageManifest(candidate, manifest);
+      await mkdir(paths.revisions, { recursive: true, mode: 0o700 });
+      await rename(candidate, revisionPath);
+    }
+    const now = new Date().toISOString();
+    const installPlan: InstallPlan = {
+      schemaVersion: 1,
+      packageId: manifest.id,
+      releaseId: `bundled:${manifest.version}`,
+      version: manifest.version,
+      approvedCommit: commit,
+      manifestPath: "wuxianpi-package.json",
+      manifestDigest,
+      gitSources: [],
+      artifacts: manifest.artifacts,
+      compatibility: manifest.requires,
+      verification: { status: "bundled", verifiedAt: now, checks: ["runtime-distribution"] },
+      revoked: false,
+    };
+    await this.store.update((state) => {
+      const existing = state.packages[manifest.id];
+      if (existing && existing.sourceKind !== "bundled") {
+        throw new RequestError("package_source_conflict", `A non-bundled Package already uses id ${manifest.id}`);
+      }
+      const previousEnabled = new Map(Object.values(state.contributions)
+        .filter((record) => record.packageId === manifest.id)
+        .map((record) => [record.id, record.enabled]));
+      for (const [id, record] of Object.entries(state.contributions)) {
+        if (record.packageId === manifest.id) delete state.contributions[id];
+      }
+      const enabledContributionIds: string[] = [];
+      for (const contribution of manifest.contributions) {
+        const enabled = previousEnabled.get(contribution.id) ?? true;
+        state.contributions[contribution.id] = {
+          id: contribution.id,
+          packageId: manifest.id,
+          revisionId,
+          revisionPath,
+          enabled,
+          contribution,
+        };
+        if (enabled) enabledContributionIds.push(contribution.id);
+      }
+      for (const binding of Object.values(state.assistantBindings)) {
+        binding.enabledContributionIds = binding.enabledContributionIds.filter((id) => state.contributions[id] !== undefined);
+      }
+      state.packages[manifest.id] = {
+        packageId: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        sourcePath: sourceRoot,
+        dataPath: paths.data,
+        baseCommit: commit,
+        localHead: commit,
+        targetCommit: commit,
+        activeRevisionId: revisionId,
+        knownGoodRevisionId: revisionId,
+        sourceStatus: "ready",
+        manifest,
+        installPlan,
+        enabledContributionIds,
+        installedAt: existing?.installedAt ?? now,
+        updatedAt: now,
+        sourceKind: "bundled",
+      };
+    });
+    const state = await this.store.read();
+    await this.writeActiveRegistry(state);
+    return this.localPackageView(state, requireInstalled(state, manifest.id));
   }
 
   install(packageId: string, releaseId?: string): Promise<Record<string, unknown>> {
@@ -191,6 +323,7 @@ export class WuxianPiPackageManager {
     return this.mutate(() => this.runOperation("commit-local", packageId, async (operationId) => {
       const state = await this.store.read();
       const installed = requireInstalled(state, packageId);
+      if (installed.sourceKind === "bundled") throw new RequestError("package_managed_by_runtime", "Bundled Packages cannot be committed through Package Manager");
       const committed = await this.git.commitLocal(installed.sourcePath, message);
       if (!committed.committed) return { committed: false, head: committed.head, package: packageSummary(installed) };
       const targetCommit = committed.completedMerge ? installed.targetCommit : installed.baseCommit;
@@ -212,6 +345,7 @@ export class WuxianPiPackageManager {
     return this.mutate(() => this.runOperation("uninstall", packageId, async (operationId) => {
       const current = await this.store.read();
       const installed = requireInstalled(current, packageId);
+      if (installed.sourceKind === "bundled") throw new RequestError("package_managed_by_runtime", "Bundled Packages can be disabled but not uninstalled");
       const functionalAssistantIds = Object.values(current.contributions)
         .filter((record) => record.packageId === packageId && isFunctionalAssistant(record.contribution))
         .map((record) => record.id);
@@ -417,6 +551,7 @@ export class WuxianPiPackageManager {
         enabled: true,
         packageId: record.packageId,
         contributionId: record.id,
+        builtin: state.packages[record.packageId]?.sourceKind === "bundled",
         contentTypes: record.contribution.contentTypes ?? [],
         diagnostics: [],
         resourceBaseUrl: `/api/web/v1/extensions/${encodeURIComponent(record.id)}/assets/`,
@@ -461,6 +596,10 @@ export class WuxianPiPackageManager {
     const installed = packageId ? [requireInstalled(state, packageId)] : Object.values(state.packages);
     const results: Array<Record<string, unknown>> = [];
     for (const item of installed) {
+      if (item.sourceKind === "bundled") {
+        results.push({ packageId: item.packageId, currentCommit: item.baseCommit, available: false, bundled: true });
+        continue;
+      }
       try {
         const plan = await this.marketInstallPlan(item.packageId);
         results.push({ packageId: item.packageId, currentCommit: item.baseCommit, targetCommit: plan.approvedCommit, available: item.baseCommit !== plan.approvedCommit, releaseId: plan.releaseId, version: plan.version });
@@ -501,6 +640,7 @@ export class WuxianPiPackageManager {
   private async updateInternal(packageId: string, releaseId: string | undefined, operationId: string): Promise<Record<string, unknown>> {
     const state = await this.store.read();
     const installed = requireInstalled(state, packageId);
+    if (installed.sourceKind === "bundled") throw new RequestError("package_managed_by_runtime", "Bundled Packages are updated with WuxianPi Runtime");
     const plan = await this.marketInstallPlan(packageId, releaseId);
     if (plan.approvedCommit === installed.baseCommit && installed.sourceStatus === "ready") {
       return { package: packageSummary(installed), updated: false };
@@ -947,7 +1087,32 @@ function packageSummary(item: InstalledPackageState): Record<string, unknown> {
     installedAt: item.installedAt,
     updatedAt: item.updatedAt,
     lastError: item.lastError ?? null,
+    sourceKind: item.sourceKind ?? "market",
   };
+}
+
+async function digestDirectory(root: string): Promise<string> {
+  const digest = createHash("sha256");
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolutePath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        digest.update(`d:${relativePath}\0`);
+        await visit(absolutePath, relativePath);
+      } else if (entry.isFile()) {
+        digest.update(`f:${relativePath}\0`);
+        digest.update(await readFile(absolutePath));
+        digest.update("\0");
+      } else {
+        throw new RequestError("invalid_bundled_package", `Bundled Package contains an unsupported entry: ${relativePath}`);
+      }
+    }
+  };
+  await visit(root, "");
+  return digest.digest("hex");
 }
 
 function requireInstalled(state: PackageManagerState, packageId: string): InstalledPackageState {

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "automation-control",
+  "name": "高级自动化",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "description": "管理程序自动使用 AI 的许可",
+  "entry": "automations.html",
+  "permissions": ["package.invoke", "ui.notify"],
+  "contributes": { "navigationItems": [{ "id": "advanced-automation", "title": "高级自动化", "icon": "shield-check", "entry": "automations.html" }] }
+}

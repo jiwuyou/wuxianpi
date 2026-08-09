@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "tasks",
+  "name": "任务",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "description": "查看任务并进入对应对话",
+  "entry": "tasks.html",
+  "permissions": [
+    "package.invoke",
+    "ui.notify",
+    "ui.openSession",
+    "session.readScope"
+  ],
+  "contributes": {
+    "navigationItems": [
+      {
+        "id": "tasks",
+        "title": "任务",
+        "icon": "list-check",
+        "entry": "tasks.html"
+      }
+    ]
+  }
+}

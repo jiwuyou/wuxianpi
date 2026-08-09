@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "com.wuxianpi.builtin.automation",
+  "name": "高级自动化",
+  "version": "1.0.0",
+  "summary": "管理哪些普通程序可以自动使用 AI。",
+  "categories": ["capability"],
+  "requires": { "hostCapabilities": [], "packages": [] },
+  "build": { "mode": "none" },
+  "artifacts": [],
+  "contributions": [
+    { "id": "com.wuxianpi.builtin.automation/runtime.control", "type": "wuxianpi.runtime", "name": "Automation Control", "path": "runtime/service.mjs" },
+    { "id": "com.wuxianpi.builtin.automation/web.control", "type": "wuxianpi.webExtension", "name": "高级自动化", "manifest": "web/web.json" }
+  ]
+}

@@ -19,6 +19,7 @@ interface Props {
   className?: string;
   onClose?: () => void;
   onNotify?: (message: string) => void;
+  onOpenSession?: (sessionId: string) => void;
   fallback?: React.ReactNode;
   initialData?: JsonValue;
 }
@@ -40,7 +41,25 @@ function isBridgeRequest(value: unknown): value is ExtensionBridgeRequest {
     && typeof candidate.method === "string";
 }
 
-export function ExtensionHost({ extension, entry, assistantId, sessionId, title, initialHeight = 420, className, onClose, onNotify, fallback, initialData }: Props) {
+const CONFIRMABLE_PERMISSIONS = new Set(["session.rebind", "session.create", "workspace.create", "workspace.file.write", "package.invoke"]);
+
+function approvedPermissions(extension: WebExtensionSummary): string[] | null {
+  const requested = (extension.manifest.permissions ?? []).filter((permission) => CONFIRMABLE_PERMISSIONS.has(permission));
+  if (extension.builtin || requested.length === 0) return requested;
+  const storageKey = `wuxianpi:extension-permissions:${extension.id}:${extension.manifest.version}`;
+  try {
+    const stored = JSON.parse(localStorage.getItem(storageKey) ?? "[]") as unknown;
+    if (Array.isArray(stored) && requested.every((permission) => stored.includes(permission))) return requested;
+  } catch {
+    // Ask again when browser storage is unavailable or invalid.
+  }
+  const accepted = window.confirm(`${extension.manifest.name} 需要创建或调整会话与工作区。是否允许？`);
+  if (!accepted) return null;
+  try { localStorage.setItem(storageKey, JSON.stringify(requested)); } catch { /* One-page approval still applies. */ }
+  return requested;
+}
+
+export function ExtensionHost({ extension, entry, assistantId, sessionId, title, initialHeight = 420, className, onClose, onNotify, onOpenSession, fallback, initialData }: Props) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [nonce, setNonce] = useState<string | null>(null);
   const [height, setHeight] = useState(initialHeight);
@@ -65,7 +84,13 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
       setFailed(true);
       return;
     }
-    issueExtensionNonce(extension.id, assistantId)
+    const approved = approvedPermissions(extension);
+    if (approved === null) {
+      setFailureReason("未授予该扩展所需权限。");
+      setFailed(true);
+      return;
+    }
+    issueExtensionNonce(extension.id, assistantId, sessionId, approved)
       .then(async (value) => {
         const candidate = resourceUrl(extension.resourceBaseUrl, extension.id, entry, value);
         if (!candidate) throw new Error("扩展入口无效");
@@ -81,7 +106,7 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
         }
       });
     return () => { cancelled = true; };
-  }, [assistantId, entry, extension.id, extension.resourceBaseUrl, retryKey]);
+  }, [assistantId, entry, extension, extension.id, extension.resourceBaseUrl, retryKey, sessionId]);
 
   const respond = useCallback((response: ExtensionBridgeResponse) => {
     iframeRef.current?.contentWindow?.postMessage(response, "*");
@@ -121,6 +146,9 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
           } else if (request.method === "ui.notify") {
             const message = String((params as Record<string, JsonValue>).message ?? "");
             if (message) onNotify?.(message);
+          } else if (request.method === "ui.openSession") {
+            const targetSessionId = String((params as Record<string, JsonValue>).sessionId ?? "");
+            if (targetSessionId) onOpenSession?.(targetSessionId);
           }
         }
         respond(response);
@@ -128,7 +156,7 @@ export function ExtensionHost({ extension, entry, assistantId, sessionId, title,
     };
     window.addEventListener("message", listener);
     return () => window.removeEventListener("message", listener);
-  }, [assistantId, extension.id, nonce, onClose, onNotify, respond, sessionId]);
+  }, [assistantId, extension.id, nonce, onClose, onNotify, onOpenSession, respond, sessionId]);
 
   if (failed) {
     return (

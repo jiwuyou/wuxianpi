@@ -13,7 +13,16 @@ export type ExtensionBridgePermission =
   | "tools.call"
   | "ui.notify"
   | "ui.resize"
-  | "ui.close";
+  | "ui.close"
+  | "ui.openSession"
+  | "session.readScope"
+  | "session.rebind"
+  | "session.create"
+  | "workspace.list"
+  | "workspace.create"
+  | "workspace.file.read"
+  | "workspace.file.write"
+  | "package.invoke";
 export type CapabilitySource = "pi-builtin" | "pi-extension" | "skill" | "mcp" | "tts" | "web-extension" | "ubuntu";
 export type CapabilityStatus = "available" | "unavailable" | "error";
 export type RuntimeLocation = "termux" | "ubuntu";
@@ -103,6 +112,7 @@ export interface McpServerConfig {
 }
 
 export interface WebExtensionContribution {
+  navigationItems?: Array<{ id: string; title: string; icon?: string; entry: string }>;
   fullPages?: Array<{ id: string; title: string; entry: string }>;
   settingsPanels?: Array<{ id: string; title: string; entry: string }>;
   assistantEditorTabs?: Array<{ id: string; title: string; entry: string }>;
@@ -332,7 +342,12 @@ export interface ExtensionBridgeRequest {
   requestId: string;
   extensionId: string;
   nonce: string;
-  method: "assistant.get" | "storage.get" | "storage.set" | "tts.speak" | "tools.call" | "ui.notify" | "ui.resize" | "ui.close";
+  method:
+    | "assistant.get" | "storage.get" | "storage.set" | "tts.speak" | "tools.call"
+    | "ui.notify" | "ui.resize" | "ui.close" | "ui.openSession"
+    | "session.getScope" | "session.rebind" | "session.create"
+    | "workspace.list" | "workspace.create" | "workspace.file.read" | "workspace.file.write"
+    | "package.invoke";
   params?: JsonValue;
 }
 
@@ -496,6 +511,7 @@ export interface WebExtensionSummary {
   enabled: boolean;
   resourceBaseUrl: string;
   diagnostics: CapabilityDiagnostic[];
+  builtin?: boolean;
 }
 
 export interface WebExtensionListData {

@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>任务</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; background: #f6f7f8; color: #17201c; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f6f7f8; color: #17201c; }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    .page { width: min(1040px, 100%); margin: 0 auto; padding: 18px 16px 48px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    h1, h2 { margin: 0; letter-spacing: 0; }
+    h1 { font-size: 24px; }
+    h2 { font-size: 18px; }
+    .actions, .row-actions, .form-footer { display: flex; gap: 8px; flex-wrap: wrap; }
+    .button { min-height: 38px; border: 1px solid #c9d0cc; border-radius: 6px; padding: 8px 13px; background: #fff; color: #17201c; }
+    .button.primary { border-color: #13795b; background: #13795b; color: #fff; }
+    .button.danger { border-color: #b42318; color: #b42318; }
+    .button:disabled { cursor: not-allowed; opacity: .45; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .metric { border-top: 3px solid #13795b; background: #fff; padding: 12px; min-height: 78px; }
+    .metric:nth-child(2) { border-color: #d08b18; }
+    .metric:nth-child(3) { border-color: #4c6fbf; }
+    .metric:nth-child(4) { border-color: #a85518; }
+    .metric strong { display: block; font-size: 24px; }
+    .metric span { color: #68726d; font-size: 13px; }
+    .panel { display: none; border: 1px solid #d8dedb; border-radius: 8px; background: #fff; padding: 16px; margin-bottom: 16px; }
+    .panel.open { display: block; }
+    .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    label { display: grid; gap: 6px; color: #4f5a55; font-size: 13px; }
+    label.full { grid-column: 1 / -1; }
+    input, select, textarea {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid #bdc7c2;
+      border-radius: 5px;
+      padding: 8px 10px;
+      background: #fff;
+      color: #17201c;
+    }
+    textarea { min-height: 100px; resize: vertical; }
+    .task-list { display: grid; gap: 10px; }
+    .task { border: 1px solid #d8dedb; border-radius: 8px; background: #fff; padding: 14px; display: grid; gap: 10px; }
+    .task-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .task-title { display: flex; gap: 8px; align-items: center; min-width: 0; }
+    .task-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .task-meta, .task-submeta { color: #68726d; font-size: 13px; overflow-wrap: anywhere; }
+    .task-submeta { display: flex; gap: 12px; flex-wrap: wrap; }
+    .badge { flex: none; border-radius: 999px; padding: 2px 8px; background: #e8f4ef; color: #0f684e; font-size: 12px; }
+    .badge.paused { background: #fff3d6; color: #895b0b; }
+    .badge.completed { background: #eaf0ff; color: #36599f; }
+    .badge.archived { background: #ecefed; color: #58625d; }
+    .empty, .state { border: 1px dashed #c7cfcb; padding: 28px 16px; text-align: center; color: #68726d; background: #fff; border-radius: 8px; }
+    .state.error { border-style: solid; border-color: #e7b6b2; color: #9d241b; }
+    @media (max-width: 720px) {
+      .page { padding: 12px 10px 36px; }
+      header { align-items: flex-start; }
+      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+      .metric { padding: 9px; min-height: 68px; }
+      .metric strong { font-size: 20px; }
+      .form-grid { grid-template-columns: 1fr; }
+      label.full { grid-column: auto; }
+      .task-head { display: grid; }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root, body { background: #171a18; color: #edf2ef; }
+      .metric, .panel, .task, .empty, .state { background: #222724; border-color: #3b443f; }
+      .button, input, select, textarea { background: #252b28; border-color: #4c5751; color: #edf2ef; }
+      .button.primary { background: #2a9b76; border-color: #2a9b76; color: #08140f; }
+      .metric span, .task-meta, .task-submeta, label, .empty, .state { color: #aeb9b3; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>任务</h1>
+      <div class="actions">
+        <button id="convertButton" class="button" type="button" disabled>转为任务</button>
+        <button id="newButton" class="button primary" type="button">新建任务</button>
+      </div>
+    </header>
+
+    <section class="summary" aria-label="任务概览">
+      <div class="metric"><strong id="activeCount">0</strong><span>进行中</span></div>
+      <div class="metric"><strong id="pausedCount">0</strong><span>已暂停</span></div>
+      <div class="metric"><strong id="scheduledCount">0</strong><span>定时动作</span></div>
+      <div class="metric"><strong id="workspaceCount">0</strong><span>工作区</span></div>
+    </section>
+
+    <section id="taskPanel" class="panel">
+      <div class="panel-header">
+        <h2 id="taskPanelTitle">新建任务</h2>
+      </div>
+      <form id="taskForm">
+        <div class="form-grid">
+          <label class="full">任务名称<input id="taskTitle" required maxlength="120" autocomplete="off"></label>
+          <label>工作区<select id="workspaceSelect"></select></label>
+          <label id="workspaceNameLabel">新工作区名称<input id="workspaceName" maxlength="120" autocomplete="off"></label>
+        </div>
+        <div class="form-footer">
+          <button id="taskCancelButton" class="button" type="button">取消</button>
+          <button id="taskSubmitButton" class="button primary" type="submit">创建</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="schedulePanel" class="panel">
+      <div class="panel-header">
+        <h2>添加定时对话</h2>
+      </div>
+      <form id="scheduleForm">
+        <div class="form-grid">
+          <label class="full">动作名称<input id="scheduleTitle" required maxlength="120" autocomplete="off"></label>
+          <label>触发方式
+            <select id="scheduleKind">
+              <option value="daily">每天</option>
+              <option value="interval">间隔</option>
+              <option value="once">一次</option>
+            </select>
+          </label>
+          <label id="scheduleValueLabel">时间<input id="scheduleValue" required placeholder="09:00"></label>
+          <label>对话方式
+            <select id="scheduleMode">
+              <option value="select">继续相关对话</option>
+              <option value="new">每次新建对话</option>
+            </select>
+          </label>
+          <label>用途
+            <select id="schedulePurpose">
+              <option value="general">通用</option>
+              <option value="planning">规划</option>
+              <option value="execution">执行</option>
+              <option value="report">报告</option>
+              <option value="repair">修复</option>
+            </select>
+          </label>
+          <label class="full">触发消息<textarea id="scheduleMessage">请继续处理当前任务。</textarea></label>
+        </div>
+        <div class="form-footer">
+          <button id="scheduleCancelButton" class="button" type="button">取消</button>
+          <button id="scheduleSubmitButton" class="button primary" type="submit">保存定时</button>
+        </div>
+      </form>
+    </section>
+
+    <div id="state" class="state">正在加载...</div>
+    <section id="taskList" class="task-list" hidden></section>
+  </main>
+
+  <script>
+    const pending = new Map();
+    let host = null;
+    let tasks = [];
+    let workspaces = [];
+    let taskFormMode = "new";
+    let schedulingTaskId = null;
+
+    const state = document.getElementById("state");
+    const taskList = document.getElementById("taskList");
+    const taskPanel = document.getElementById("taskPanel");
+    const taskPanelTitle = document.getElementById("taskPanelTitle");
+    const taskForm = document.getElementById("taskForm");
+    const taskTitle = document.getElementById("taskTitle");
+    const workspaceSelect = document.getElementById("workspaceSelect");
+    const workspaceName = document.getElementById("workspaceName");
+    const workspaceNameLabel = document.getElementById("workspaceNameLabel");
+    const taskSubmitButton = document.getElementById("taskSubmitButton");
+    const convertButton = document.getElementById("convertButton");
+    const schedulePanel = document.getElementById("schedulePanel");
+    const scheduleForm = document.getElementById("scheduleForm");
+    const scheduleTitle = document.getElementById("scheduleTitle");
+    const scheduleKind = document.getElementById("scheduleKind");
+    const scheduleValue = document.getElementById("scheduleValue");
+    const scheduleMode = document.getElementById("scheduleMode");
+    const schedulePurpose = document.getElementById("schedulePurpose");
+    const scheduleMessage = document.getElementById("scheduleMessage");
+    const scheduleValueLabel = document.getElementById("scheduleValueLabel");
+    const scheduleSubmitButton = document.getElementById("scheduleSubmitButton");
+
+    addEventListener("message", (event) => {
+      const message = event.data;
+      if (message?.type === "wuxianpi_host_context") {
+        host = message;
+        convertButton.disabled = !host.sessionId;
+        void load();
+        return;
+      }
+      if (message?.type !== "wuxianpi_bridge_response") return;
+      const operation = pending.get(message.requestId);
+      if (!operation) return;
+      pending.delete(message.requestId);
+      message.ok ? operation.resolve(message.result) : operation.reject(new Error(message.error?.message || "操作失败"));
+    });
+
+    function call(method, params = {}) {
+      if (!host) return Promise.reject(new Error("页面尚未连接 WuxianPi"));
+      const requestId = crypto.randomUUID();
+      const request = {
+        type: "wuxianpi_bridge_request",
+        requestId,
+        extensionId: host.extensionId,
+        nonce: host.nonce,
+        method,
+        params,
+      };
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          pending.delete(requestId);
+          reject(new Error("操作超时"));
+        }, 30000);
+        pending.set(requestId, {
+          resolve: (value) => { clearTimeout(timeout); resolve(value); },
+          reject: (error) => { clearTimeout(timeout); reject(error); },
+        });
+        parent.postMessage(request, "*");
+      });
+    }
+
+    function api(method, params = {}) {
+      return call("package.invoke", {
+        namespace: "task.v1",
+        method,
+        params,
+      });
+    }
+
+    async function load() {
+      setState("正在加载...");
+      try {
+        const [taskData, workspaceData] = await Promise.all([
+          api("list"),
+          api("workspaces"),
+        ]);
+        tasks = Array.isArray(taskData.tasks) ? taskData.tasks : [];
+        workspaces = Array.isArray(workspaceData.workspaces) ? workspaceData.workspaces : [];
+        renderWorkspaceOptions();
+        render();
+      } catch (error) {
+        setState(error.message || String(error), true);
+      }
+    }
+
+    function renderWorkspaceOptions(preferredId) {
+      workspaceSelect.innerHTML = [
+        '<option value="__new__">新建工作区</option>',
+        ...workspaces.map((workspace) => '<option value="' + escapeHtml(workspace.id) + '">' + escapeHtml(workspace.name) + "</option>"),
+      ].join("");
+      if (preferredId && workspaces.some((workspace) => workspace.id === preferredId)) workspaceSelect.value = preferredId;
+      toggleWorkspaceName();
+    }
+
+    function render() {
+      const visible = tasks.filter((task) => task.status !== "archived");
+      document.getElementById("activeCount").textContent = String(visible.filter((task) => task.status === "active").length);
+      document.getElementById("pausedCount").textContent = String(visible.filter((task) => task.status === "paused").length);
+      document.getElementById("scheduledCount").textContent = String(visible.reduce((count, task) => count + (Array.isArray(task.actions) ? task.actions.filter((action) => action.kind === "scheduled_conversation").length : 0), 0));
+      document.getElementById("workspaceCount").textContent = String(new Set(visible.map((task) => task.workspaceId)).size);
+      if (visible.length === 0) {
+        taskList.hidden = true;
+        setState("还没有任务");
+        return;
+      }
+      state.hidden = true;
+      taskList.hidden = false;
+      taskList.innerHTML = visible.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).map((task) => {
+        const primaryConversation = pickConversation(task);
+        const scheduledCount = Array.isArray(task.actions) ? task.actions.filter((action) => action.kind === "scheduled_conversation").length : 0;
+        return '<article class="task" data-task-id="' + escapeHtml(task.id) + '">' +
+          '<div class="task-head">' +
+            '<div>' +
+              '<div class="task-title"><strong>' + escapeHtml(task.title) + '</strong><span class="badge ' + escapeHtml(task.status) + '">' + statusLabel(task.status) + '</span></div>' +
+              '<div class="task-meta">' + escapeHtml(task.workspaceName || task.workspaceId) + ' · ' + formatDate(task.updatedAt) + '</div>' +
+            '</div>' +
+            '<div class="row-actions">' +
+              '<button type="button" class="button" data-action="open"' + (primaryConversation ? "" : " disabled") + '>进入对话</button>' +
+              '<button type="button" class="button" data-action="schedule">定时对话</button>' +
+              '<button type="button" class="button" data-action="toggle">' + (task.status === "paused" ? "恢复" : "暂停") + '</button>' +
+              '<button type="button" class="button danger" data-action="archive">归档</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="task-submeta">' +
+            '<span>关联对话 ' + String(Array.isArray(task.conversations) ? task.conversations.length : 0) + '</span>' +
+            '<span>定时动作 ' + String(scheduledCount) + '</span>' +
+            '<span>下次执行 ' + escapeHtml(task.nextRunAt ? formatDate(task.nextRunAt) : "未设置") + '</span>' +
+          '</div>' +
+        '</article>';
+      }).join("");
+    }
+
+    function setState(message, isError = false) {
+      state.hidden = false;
+      state.className = "state" + (isError ? " error" : "");
+      state.textContent = message;
+      taskList.hidden = true;
+    }
+
+    async function openTaskPanel(mode) {
+      taskFormMode = mode;
+      taskForm.reset();
+      taskPanelTitle.textContent = mode === "convert" ? "转为任务" : "新建任务";
+      taskSubmitButton.textContent = mode === "convert" ? "转为任务" : "创建";
+      taskPanel.classList.add("open");
+      if (mode === "convert" && host?.sessionId) {
+        try {
+          const scope = await call("session.getScope");
+          renderWorkspaceOptions(scope.workspaceId || undefined);
+        } catch {
+          renderWorkspaceOptions();
+        }
+      } else renderWorkspaceOptions();
+      taskTitle.focus();
+    }
+
+    function closeTaskPanel() { taskPanel.classList.remove("open"); }
+
+    function openSchedulePanel(task) {
+      schedulingTaskId = task.id;
+      scheduleForm.reset();
+      scheduleTitle.value = task.title + " 定时对话";
+      scheduleMessage.value = "请继续处理任务“" + task.title + "”。";
+      scheduleKind.value = "daily";
+      scheduleMode.value = "select";
+      schedulePurpose.value = "general";
+      updateScheduleValueLabel();
+      schedulePanel.classList.add("open");
+      scheduleTitle.focus();
+    }
+
+    function closeSchedulePanel() {
+      schedulingTaskId = null;
+      schedulePanel.classList.remove("open");
+    }
+
+    function toggleWorkspaceName() { workspaceNameLabel.hidden = workspaceSelect.value !== "__new__"; }
+
+    function updateScheduleValueLabel() {
+      if (scheduleKind.value === "interval") {
+        scheduleValueLabel.firstChild.textContent = "秒数";
+        scheduleValue.placeholder = "3600";
+      } else if (scheduleKind.value === "once") {
+        scheduleValueLabel.firstChild.textContent = "时间";
+        scheduleValue.placeholder = "2026-08-10T09:00:00Z";
+      } else {
+        scheduleValueLabel.firstChild.textContent = "时间";
+        scheduleValue.placeholder = "09:00";
+      }
+    }
+
+    function pickConversation(task) {
+      if (!Array.isArray(task.conversations)) return null;
+      return task.conversations.find((conversation) => conversation.status === "active") || task.conversations[0] || null;
+    }
+
+    function buildSchedule() {
+      if (scheduleKind.value === "interval") {
+        const seconds = Number(scheduleValue.value);
+        if (!Number.isInteger(seconds) || seconds < 1) throw new Error("请输入有效的秒数");
+        return { kind: "interval", seconds };
+      }
+      if (scheduleKind.value === "once") {
+        if (!scheduleValue.value.trim()) throw new Error("请输入执行时间");
+        return { kind: "once", runAt: scheduleValue.value.trim() };
+      }
+      const parts = scheduleValue.value.trim().split(":");
+      const hour = Number(parts[0]);
+      const minute = Number(parts[1] || "0");
+      if (!Number.isInteger(hour) || hour < 0 || hour > 23 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+        throw new Error("请输入 HH:MM 格式的时间");
+      }
+      return { kind: "rrule", value: "FREQ=DAILY;BYHOUR=" + hour + ";BYMINUTE=" + minute };
+    }
+
+    taskForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const title = taskTitle.value.trim();
+      if (!title) return;
+      taskSubmitButton.disabled = true;
+      try {
+        const currentScope = taskFormMode === "convert" && host?.sessionId ? await call("session.getScope") : null;
+        const useExistingWorkspace = workspaceSelect.value !== "__new__";
+        const selectedWorkspaceId = useExistingWorkspace ? workspaceSelect.value : undefined;
+        const needsConfirmation = Boolean(
+          currentScope &&
+          currentScope.ownershipState === "bound" &&
+          ((useExistingWorkspace && currentScope.workspaceId !== selectedWorkspaceId) || !useExistingWorkspace)
+        );
+        if (needsConfirmation && !confirm("这会将当前会话切换到新的任务工作区。是否继续？")) return;
+        const created = await api("create", {
+          title,
+          workspaceId: selectedWorkspaceId,
+          workspaceName: workspaceName.value.trim() || title,
+          rebind: taskFormMode === "convert",
+          confirmed: needsConfirmation,
+        });
+        closeTaskPanel();
+        await call("ui.notify", { message: taskFormMode === "convert" ? "本会话已转为任务" : "任务已创建" });
+        await load();
+        const conversation = pickConversation(created);
+        if (conversation?.conversationId) await call("ui.openSession", { sessionId: conversation.conversationId });
+      } catch (error) {
+        setState(error.message || String(error), true);
+      } finally {
+        taskSubmitButton.disabled = false;
+      }
+    });
+
+    scheduleForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!schedulingTaskId) return;
+      scheduleSubmitButton.disabled = true;
+      try {
+        const task = tasks.find((item) => item.id === schedulingTaskId);
+        if (!task) throw new Error("任务不存在");
+        await api("createScheduledConversation", {
+          taskId: task.id,
+          title: scheduleTitle.value.trim() || (task.title + " 定时对话"),
+          message: scheduleMessage.value.trim() || ("请继续处理任务“" + task.title + "”。"),
+          schedule: buildSchedule(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+          policy: {
+            mode: scheduleMode.value === "new" ? "new" : "select",
+            purpose: schedulePurpose.value,
+            assistantId: host?.assistantId || "wuxianpi",
+          },
+        });
+        closeSchedulePanel();
+        await call("ui.notify", { message: "定时对话已保存" });
+        await load();
+      } catch (error) {
+        setState(error.message || String(error), true);
+      } finally {
+        scheduleSubmitButton.disabled = false;
+      }
+    });
+
+    taskList.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-action]");
+      const row = button?.closest("[data-task-id]");
+      if (!button || !row) return;
+      const task = tasks.find((item) => item.id === row.dataset.taskId);
+      if (!task) return;
+      try {
+        if (button.dataset.action === "open") {
+          const conversation = pickConversation(task);
+          if (conversation?.conversationId) await call("ui.openSession", { sessionId: conversation.conversationId });
+          return;
+        }
+        if (button.dataset.action === "schedule") {
+          openSchedulePanel(task);
+          return;
+        }
+        const nextStatus = button.dataset.action === "archive" ? "archived" : (task.status === "paused" ? "active" : "paused");
+        await api("setStatus", { taskId: task.id, status: nextStatus });
+        await load();
+      } catch (error) {
+        setState(error.message || String(error), true);
+      }
+    });
+
+    document.getElementById("newButton").addEventListener("click", () => { closeSchedulePanel(); void openTaskPanel("new"); });
+    convertButton.addEventListener("click", () => { closeSchedulePanel(); void openTaskPanel("convert"); });
+    document.getElementById("taskCancelButton").addEventListener("click", closeTaskPanel);
+    document.getElementById("scheduleCancelButton").addEventListener("click", closeSchedulePanel);
+    workspaceSelect.addEventListener("change", toggleWorkspaceName);
+    scheduleKind.addEventListener("change", updateScheduleValueLabel);
+
+    function statusLabel(status) {
+      return ({ active: "进行中", paused: "已暂停", completed: "已完成", archived: "已归档" })[status] || status;
+    }
+
+    function formatDate(value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character]);
+    }
+  </script>
+</body>
+</html>

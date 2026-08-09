@@ -15,7 +15,7 @@ const COMMIT = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const CONTRIBUTION_TYPES = new Set([
   "pi.extension", "pi.skill", "pi.prompt", "pi.theme", "mcp.server", "wuxianpi.webExtension",
-  "wuxianpi.renderer", "wuxianpi.assistantTemplate", "wuxianpi.context", "wuxianpi.experience",
+  "wuxianpi.renderer", "wuxianpi.assistantTemplate", "wuxianpi.context", "wuxianpi.experience", "wuxianpi.runtime",
   "openhouse.app", "service-manager.service", "artifact",
 ]);
 
@@ -164,7 +164,7 @@ function validateContributionShape(packageId: string, contribution: PackageContr
   if (!CONTRIBUTION_TYPES.has(contribution.type) || !contribution.name?.trim()) {
     throw new RequestError("invalid_contribution", `Contribution ${contribution.id} has invalid type or name`);
   }
-  const requiresPath = ["pi.extension", "pi.skill", "pi.prompt", "pi.theme"].includes(contribution.type);
+  const requiresPath = ["pi.extension", "pi.skill", "pi.prompt", "pi.theme", "wuxianpi.runtime"].includes(contribution.type);
   if (requiresPath && !contribution.path) throw new RequestError("invalid_contribution", `${contribution.type} ${contribution.id} requires path`);
   if (contribution.type === "mcp.server" && !contribution.config) throw new RequestError("invalid_contribution", `MCP ${contribution.id} requires config`);
   if (["wuxianpi.webExtension", "wuxianpi.renderer", "wuxianpi.assistantTemplate", "openhouse.app", "service-manager.service"].includes(contribution.type) && !contribution.manifest) {

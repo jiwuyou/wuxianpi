@@ -193,6 +193,7 @@ export async function listWebExtensions(): Promise<WebExtensionSummary[]> {
       path: String(value.path ?? ""),
       enabled: value.enabled !== false,
       resourceBaseUrl: String(value.resourceBaseUrl ?? ""),
+      builtin: value.builtin === true,
       diagnostics: Array.isArray(value.diagnostics) ? value.diagnostics as WebExtensionSummary["diagnostics"] : [],
       manifest: {
         schemaVersion: 1,
@@ -217,10 +218,10 @@ export function bridgeExtension(_extensionId: string, payload: unknown): Promise
   });
 }
 
-export function issueExtensionNonce(extensionId: string, assistantId?: string): Promise<string> {
-  return request<{ extensionId: string; assistantId?: string; nonce: string }>(extensionsRoute("nonce"), {
+export function issueExtensionNonce(extensionId: string, assistantId?: string, sessionId?: string, approvedPermissions?: string[]): Promise<string> {
+  return request<{ extensionId: string; assistantId?: string; sessionId?: string; nonce: string }>(extensionsRoute("nonce"), {
     method: "POST",
-    body: JSON.stringify({ action: "nonce", extensionId, assistantId }),
+    body: JSON.stringify({ action: "nonce", extensionId, assistantId, sessionId, approvedPermissions }),
   }).then((data) => data.nonce);
 }
 

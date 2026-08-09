@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { ProfileStateStore } from "../dist/profile-state-store.js";
 
@@ -97,4 +98,39 @@ test("two store instances tolerate repeated writes to the same SQLite state", as
   first.createBinding({ sessionId: "session", assistantId: "main", workspaceId: "project", cwd: join(root, "project") });
   second.createBinding({ sessionId: "session", assistantId: "main", workspaceId: "project", cwd: join(root, "project") });
   assert.equal(second.listBindings().length, 1);
+});
+
+test("binding revisions support optimistic rebind and migrate schema v1", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-profile-rebind-"));
+  const path = join(root, "state.sqlite");
+  await mkdir(root, { recursive: true });
+  const database = new DatabaseSync(path);
+  database.exec(`
+    CREATE TABLE workspaces (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, root_cwd TEXT NOT NULL, archived INTEGER NOT NULL,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE session_bindings (
+      session_id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL, workspace_id TEXT,
+      cwd TEXT NOT NULL, inherited_from_session_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    INSERT INTO workspaces VALUES ('one', 'One', '${join(root, "one")}', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO workspaces VALUES ('two', 'Two', '${join(root, "two")}', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO session_bindings VALUES ('session', 'alpha', 'one', '${join(root, "one")}', NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    PRAGMA user_version = 1;
+  `);
+  database.close();
+
+  const store = new ProfileStateStore({ path });
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  assert.equal(store.getBinding("session").bindingRevision, 1);
+  const rebound = store.rebind({
+    sessionId: "session", assistantId: "beta", workspaceId: "two", cwd: join(root, "two"), expectedRevision: 1,
+  });
+  assert.equal(rebound.bindingRevision, 2);
+  assert.equal(rebound.assistantId, "beta");
+  await assert.rejects(async () => store.rebind({
+    sessionId: "session", assistantId: "alpha", workspaceId: "one", cwd: join(root, "one"), expectedRevision: 1,
+  }), (error) => error.code === "session_binding_revision_conflict");
+  assert.equal(store.getBinding("session").bindingRevision, 2);
 });

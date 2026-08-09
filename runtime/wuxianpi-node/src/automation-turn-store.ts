@@ -13,7 +13,7 @@ import type {
   AutomationTurnStatus,
 } from "./automation-turn-types.js";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const ACTIVE_TURN_STATUSES: AutomationTurnStatus[] = ["queued", "running"];
 
 export interface AutomationTurnStoreOptions {
@@ -53,6 +53,7 @@ export class AutomationTurnStore {
     id: string;
     title: string;
     applicantConversationId: string;
+    ownerPackageId?: string | null;
     target: AutomationConversationTarget;
     reason: string;
     projectRoot: string;
@@ -66,13 +67,13 @@ export class AutomationTurnStore {
     try {
       this.database.prepare(`
         INSERT INTO automation_registrations (
-          id, title, status, applicant_conversation_id, target_kind, target_mode, target_conversation_id,
+          id, title, status, applicant_conversation_id, owner_package_id, target_kind, target_mode, target_conversation_id,
           target_assistant_id, target_workspace_id, target_cwd, reason, project_root,
           rate_max_calls, rate_window_seconds, expires_at, token_hash,
           created_at, approved_at, last_triggered_at, paused_at, revoked_at, updated_at
-        ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?)
+        ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?)
       `).run(
-        input.id, input.title, input.applicantConversationId, target.kind, target.mode, target.conversationId,
+        input.id, input.title, input.applicantConversationId, input.ownerPackageId ?? null, target.kind, target.mode, target.conversationId,
         target.assistantId, target.workspaceId, target.cwd, input.reason, input.projectRoot,
         input.maxCalls, input.windowSeconds, input.expiresAt, now, now,
       );
@@ -104,13 +105,13 @@ export class AutomationTurnStore {
     const now = this.timestamp();
     const result = this.database.prepare(`
       UPDATE automation_registrations SET
-        title = ?, status = ?, applicant_conversation_id = ?, target_kind = ?, target_mode = ?,
+        title = ?, status = ?, applicant_conversation_id = ?, owner_package_id = ?, target_kind = ?, target_mode = ?,
         target_conversation_id = ?, target_assistant_id = ?, target_workspace_id = ?, target_cwd = ?,
         reason = ?, project_root = ?, rate_max_calls = ?, rate_window_seconds = ?, expires_at = ?,
         token_hash = ?, approved_at = ?, last_triggered_at = ?, paused_at = ?, revoked_at = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      registration.title, registration.status, registration.applicantConversationId, target.kind, target.mode,
+      registration.title, registration.status, registration.applicantConversationId, registration.ownerPackageId, target.kind, target.mode,
       registration.targetConversationId, target.assistantId, target.workspaceId, target.cwd,
       registration.reason, registration.projectRoot, registration.rateLimit.maxCalls,
       registration.rateLimit.windowSeconds, registration.expiresAt, registration.tokenHash,
@@ -444,10 +445,10 @@ export class AutomationTurnStore {
       throw new RequestError("automation_schema_too_new", `Unsupported automation schema: ${version}`);
     }
     if (version === 0) {
-      this.database.exec(`BEGIN IMMEDIATE; ${CREATE_SCHEMA_SQL} PRAGMA user_version = 3; COMMIT;`);
+      this.database.exec(`BEGIN IMMEDIATE; ${CREATE_SCHEMA_SQL} PRAGMA user_version = 4; COMMIT;`);
       return;
     }
-    if (version < 3) this.replaceDevelopmentSchema();
+    if (version < 4) this.replaceDevelopmentSchema();
   }
 
   private replaceDevelopmentSchema(): void {
@@ -460,7 +461,7 @@ export class AutomationTurnStore {
         DROP TABLE IF EXISTS automation_bindings;
         DROP TABLE IF EXISTS automation_registrations;
         ${CREATE_SCHEMA_SQL}
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 4;
         COMMIT;
       `);
     } finally {
@@ -481,6 +482,7 @@ const CREATE_SCHEMA_SQL = `
     title TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'paused', 'expired', 'revoked')),
     applicant_conversation_id TEXT NOT NULL,
+    owner_package_id TEXT,
     target_kind TEXT NOT NULL CHECK (target_kind IN ('existing', 'new')),
     target_mode TEXT CHECK (target_mode IN ('dedicated', 'per-run')),
     target_conversation_id TEXT,
@@ -537,7 +539,7 @@ const CREATE_SCHEMA_SQL = `
 `;
 
 const REGISTRATION_SELECT = `
-  SELECT id, title, status, applicant_conversation_id, target_kind, target_mode, target_conversation_id,
+  SELECT id, title, status, applicant_conversation_id, owner_package_id, target_kind, target_mode, target_conversation_id,
     target_assistant_id, target_workspace_id, target_cwd, reason, project_root,
     rate_max_calls, rate_window_seconds, expires_at, token_hash,
     created_at, approved_at, last_triggered_at, paused_at, revoked_at, updated_at
@@ -572,6 +574,7 @@ function registrationFromRow(row: Record<string, unknown>): AutomationRegistrati
     title: String(row.title),
     status: String(row.status) as AutomationRegistrationStatus,
     applicantConversationId: String(row.applicant_conversation_id),
+    ownerPackageId: nullableString(row.owner_package_id),
     targetConversationId: nullableString(row.target_conversation_id),
     target,
     reason: String(row.reason),

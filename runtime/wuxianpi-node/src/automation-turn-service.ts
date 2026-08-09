@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { RequestError } from "./protocol.js";
@@ -45,6 +45,7 @@ export interface AutomationRegistrationRequest {
   projectRoot: string;
   rateLimit: AutomationRateLimit;
   expiresAt: string;
+  ownerPackageId?: string | null;
 }
 
 export class AutomationTurnService {
@@ -95,8 +96,9 @@ export class AutomationTurnService {
     const projectRoot = validatePathText(input.projectRoot, "projectRoot");
     const rateLimit = validateRateLimit(input.rateLimit);
     const expiresAt = validateFutureTimestamp(input.expiresAt, "expiresAt");
+    const ownerPackageId = input.ownerPackageId === undefined ? null : validatePackageId(input.ownerPackageId);
     const registration = this.store.createRegistration({
-      id, title, applicantConversationId, target, reason, projectRoot,
+      id, title, applicantConversationId, ownerPackageId, target, reason, projectRoot,
       maxCalls: rateLimit.maxCalls, windowSeconds: rateLimit.windowSeconds, expiresAt,
     });
     return this.view(registration);
@@ -200,6 +202,16 @@ export class AutomationTurnService {
     return this.view(this.store.saveRegistration({ ...current, status: "paused", pausedAt: new Date().toISOString() }));
   }
 
+  pauseRegistrationsForConversation(conversationIdValue: string): AutomationRegistration[] {
+    this.assertAvailable();
+    const conversationId = validateContextId(conversationIdValue, "conversationId");
+    const pausedAt = new Date().toISOString();
+    return this.store.listRegistrations().flatMap((registration) => {
+      if (registration.status !== "active" || registration.targetConversationId !== conversationId) return [];
+      return [this.view(this.store.saveRegistration({ ...registration, status: "paused", pausedAt }))];
+    });
+  }
+
   resumeRegistration(idValue: string): AutomationRegistration {
     this.assertAvailable();
     const current = this.requireRegistration(validateRegistrationId(idValue));
@@ -227,6 +239,50 @@ export class AutomationTurnService {
     }
     await this.removeCredential(id);
     return this.view(saved);
+  }
+
+  async issuePackageGrant(input: AutomationRegistrationRequest & { ownerPackageId: string }): Promise<AutomationRegistration> {
+    const ownerPackageId = validatePackageId(input.ownerPackageId);
+    const existing = this.store.getRegistration(validateRegistrationId(input.id));
+    if (existing) {
+      if (existing.ownerPackageId !== ownerPackageId) {
+        throw new RequestError("automation_grant_owner_mismatch", "Automation grant belongs to another Package", { httpStatus: 403 });
+      }
+      if (existing.status === "active" || existing.status === "paused") return this.view(existing);
+      if (existing.status === "revoked") throw new RequestError("automation_revoked", "Stopped package grant cannot be reused", { httpStatus: 409 });
+      return this.approveRegistration(existing.id);
+    }
+    const requested = await this.requestRegistration({ ...input, ownerPackageId });
+    return this.approveRegistration(requested.id);
+  }
+
+  async triggerPackageTurn(input: {
+    ownerPackageId: string;
+    registrationId: string;
+    runId: string;
+    message: string;
+    artifactRefs?: unknown;
+    idempotencyKey: string;
+  }): Promise<AutomationTurn> {
+    const registration = this.requireRegistration(validateRegistrationId(input.registrationId));
+    if (registration.ownerPackageId !== validatePackageId(input.ownerPackageId)) {
+      throw new RequestError("automation_grant_owner_mismatch", "Automation grant belongs to another Package", { httpStatus: 403 });
+    }
+    const credentialPath = this.credentialPath(registration.id);
+    if (!credentialPath) throw new RequestError("automation_credential_unavailable", "Automation credential storage is unavailable", { httpStatus: 503 });
+    const registrationToken = (await readFile(credentialPath, "utf8")).trim();
+    return this.triggerTurn({ registrationToken, registrationId: registration.id, runId: input.runId, message: input.message,
+      artifactRefs: input.artifactRefs, idempotencyKey: input.idempotencyKey });
+  }
+
+  async getPackageTurn(input: { ownerPackageId: string; registrationId: string; turnId: string; waitMs?: number }): Promise<AutomationTurn> {
+    const registration = this.requireRegistration(validateRegistrationId(input.registrationId));
+    if (registration.ownerPackageId !== validatePackageId(input.ownerPackageId)) {
+      throw new RequestError("automation_grant_owner_mismatch", "Automation grant belongs to another Package", { httpStatus: 403 });
+    }
+    const credentialPath = this.credentialPath(registration.id);
+    if (!credentialPath) throw new RequestError("automation_credential_unavailable", "Automation credential storage is unavailable", { httpStatus: 503 });
+    return this.getTurn(input.turnId, (await readFile(credentialPath, "utf8")).trim(), input.waitMs);
   }
 
   async appendMessage(input: {
@@ -575,6 +631,14 @@ function validateRateLimit(value: AutomationRateLimit): AutomationRateLimit {
 function validateRegistrationId(value: string): string {
   if (typeof value !== "string" || !SAFE_REGISTRATION_ID.test(value)) {
     throw new RequestError("invalid_registration_id", "registrationId must use 1-128 letters, numbers, dots, underscores, or hyphens");
+  }
+  return value;
+}
+
+function validatePackageId(value: string | null | undefined): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || !/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(value)) {
+    throw new RequestError("invalid_package_id", "ownerPackageId must be a Package id");
   }
   return value;
 }
