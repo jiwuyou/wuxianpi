@@ -15,6 +15,7 @@ import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
 import { createAssistant, getAssistant, updateAssistant } from "./api";
 import { assistantAvatarBackground, assistantAvatarUrl, prepareAssistantAvatar } from "@/lib/assistant-avatar";
 import { FunctionalAssistantBindings } from "./FunctionalAssistantBindings";
+import { PackageAssistantCapabilities } from "./PackageAssistantCapabilities";
 
 interface Props {
   assistant?: AssistantSummary | null;
@@ -276,6 +277,7 @@ export function AssistantEditor({ assistant, catalog, config, onClose, onSaved, 
           {!loading && tab === "capabilities" && (
             <div className="capability-picker">
               {!catalog && <div className="wuxianpi-state warning">能力目录暂不可用。保存角色资料不受影响。</div>}
+              {assistant && <PackageAssistantCapabilities assistantId={assistant.id} onOpenMarketplace={onOpenMarketplace} />}
               {grouped.map(([source, items]) => (
                 <section key={source}>
                   <h3>{humanSource(source)}</h3>

@@ -248,7 +248,15 @@ test("assistant bindings resolve one installed Package without copying dependenc
   };
   const repo = await createRepository(join(root, "upstream"), manifest, {
     "skills/ops/SKILL.md": skill("ops"),
-    "extensions/ops.ts": "export default function () {}\n",
+    "extensions/ops.ts": `export default function (pi) {
+      pi.registerTool({
+        name: "ops_package_tool",
+        label: "Ops package tool",
+        description: "Package-bound test tool",
+        parameters: { type: "object", properties: {} },
+        async execute() { return { content: [{ type: "text", text: "ok" }], details: {} }; },
+      });
+    }\n`,
     "mcp/ops.json": `${JSON.stringify({ id: "ops-mcp", name: "Ops MCP", transport: "streamable-http", url: "https://example.com/mcp", auth: false })}\n`,
     "experience/base.md": "Package experience\n",
   });
@@ -275,6 +283,9 @@ test("assistant bindings resolve one installed Package without copying dependenc
     const session = await registry.create(workspace);
     const commands = await registry.commands(session.sessionId);
     assert.equal(commands.commands.some((command) => command.name === "skill:ops"), true);
+    const tools = await registry.tools(session.sessionId);
+    assert.equal(tools.tools.some((tool) => tool.name === "ops_package_tool"), true);
+    assert.equal(tools.activeToolNames.includes("ops_package_tool"), true);
   } finally {
     await registry.dispose();
   }

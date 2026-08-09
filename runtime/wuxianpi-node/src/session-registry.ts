@@ -72,6 +72,11 @@ function visibleToolNames(names: string[]): string[] {
   return names.filter((name) => name !== EXECUTABLE_CARD_TOOL);
 }
 
+function pathIsAtOrInside(root: string, candidate: string): boolean {
+  const nested = relative(resolve(root), resolve(candidate));
+  return nested === "" || (nested !== ".." && !nested.startsWith(`..${sep}`) && !isAbsolute(nested));
+}
+
 export interface RuntimeIdentity {
   sessionId: string; sessionPath?: string; cwd: string; isRunning: boolean; isIdle: boolean;
   assistantId: string | null; workspaceId: string | null; workspaceName?: string;
@@ -1174,9 +1179,14 @@ export class SessionRegistry {
             },
           } : {}),
         });
-        loadedPackageToolNames = [...new Set((packageResources?.customTools ?? [])
-          .map((tool) => tool.name)
-          .filter((name) => name !== EXECUTABLE_CARD_TOOL))];
+        const packageExtensionToolNames = services.resourceLoader.getExtensions().extensions
+          .filter((extension) => (packageResources?.extensionPaths ?? [])
+            .some((path) => pathIsAtOrInside(path, extension.path)))
+          .flatMap((extension) => [...extension.tools.keys()]);
+        loadedPackageToolNames = [...new Set([
+          ...(packageResources?.customTools ?? []).map((tool) => tool.name),
+          ...packageExtensionToolNames,
+        ].filter((name) => name !== EXECUTABLE_CARD_TOOL))];
         const customTools = [createExecutableCardTool(), ...(packageResources?.customTools ?? [])];
         return { ...(await createAgentSessionFromServices({
           services,

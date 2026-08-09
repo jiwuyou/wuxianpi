@@ -9,6 +9,7 @@ import {
   functionalAssistantCandidates,
   updateFunctionalAssistantBinding,
 } from "../src/components/wuxianpi/FunctionalAssistantBindings";
+import { packageCapabilityBindings } from "../src/components/wuxianpi/PackageAssistantCapabilities";
 
 function assistant(id: string): AssistantSummary {
   return {
@@ -114,5 +115,27 @@ describe("Profile and Workspace Web flow", () => {
     });
 
     expect(result.map((item) => item.id)).toEqual(["pkg/functional"]);
+  });
+
+  it("shows Package contributions already bound to an assistant", () => {
+    const packages = packageCapabilityBindings({
+      packages: [{
+        packageId: "io.test.github",
+        name: "GitHub Bug 报告助手",
+        contributions: [
+          { id: "io.test.github/extension", contribution: { name: "GitHub Issue 提交工具" } },
+          { id: "io.test.github/skill", contribution: { name: "GitHub Bug 报告流程" } },
+          { id: "io.test.github/unused", contribution: { name: "未绑定能力" } },
+        ],
+      }],
+    }, {
+      enabledContributionIds: ["io.test.github/extension", "io.test.github/skill"],
+    });
+
+    expect(packages).toEqual([{
+      packageId: "io.test.github",
+      packageName: "GitHub Bug 报告助手",
+      contributionNames: ["GitHub Issue 提交工具", "GitHub Bug 报告流程"],
+    }]);
   });
 });
