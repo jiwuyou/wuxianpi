@@ -35,6 +35,7 @@ function session(input: Partial<SessionInfo> & Pick<SessionInfo, "id">): Session
     messageCount: 1,
     firstMessage: id,
     ...overrides,
+    bindingRevision: overrides.bindingRevision ?? 1,
   };
 }
 

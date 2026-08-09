@@ -512,6 +512,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       cwd: newSessionCwd ?? "",
       assistantId,
       workspaceId: newSessionWorkspaceId ?? null,
+      bindingRevision: 1,
       ownershipState: "bound",
       name: undefined,
       created: now,
