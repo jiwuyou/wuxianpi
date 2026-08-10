@@ -48,6 +48,31 @@ const assistantsRoute = (suffix = "") => webApi.endpoint("assistants", suffix);
 const capabilitiesRoute = (suffix = "") => webApi.endpoint("capabilities", suffix);
 const extensionsRoute = (suffix = "") => webApi.endpoint("extensions", suffix);
 
+export interface PackageSingletonStatus {
+  groupId: string;
+  state: "standby" | "acquiring" | "recovering" | "running" | "quiescing" | "stopping" | "error";
+  owner: boolean;
+  runtimeId: string;
+  generation: string | null;
+  error: string | null;
+  discoveredOwner?: { runtimeId?: string; runtimeUrl?: string; generation?: string } | null;
+  services: Array<{ packageId: string; id: string; name: string; status?: Record<string, unknown> }>;
+}
+
+export function listPackageSingletons(): Promise<PackageSingletonStatus[]> {
+  return request<{ singletons: PackageSingletonStatus[] }>("/singletons").then((data) => data.singletons);
+}
+
+export function acquirePackageSingleton(groupId: string): Promise<PackageSingletonStatus> {
+  return request<{ singleton: PackageSingletonStatus }>(`/singletons/${encodeURIComponent(groupId)}/acquire`, { method: "POST" })
+    .then((data) => data.singleton);
+}
+
+export function releasePackageSingleton(groupId: string): Promise<PackageSingletonStatus> {
+  return request<{ singleton: PackageSingletonStatus }>(`/singletons/${encodeURIComponent(groupId)}/release`, { method: "POST" })
+    .then((data) => data.singleton);
+}
+
 export async function listAssistants(options?: { includeArchived?: boolean }): Promise<AssistantSummary[]> {
   const payload = await webApi.request<AssistantListData | AssistantSummary[]>(assistantsRoute(), {}, options?.includeArchived ? { includeArchived: true } : undefined);
   return Array.isArray(payload) ? payload : payload.assistants;

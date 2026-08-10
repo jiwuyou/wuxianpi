@@ -25,6 +25,51 @@ test("fresh unsaved session supports history, list, and reconnect open", async (
   }
 });
 
+test("active sessions reload external JSONL appends before snapshot and SSE refresh", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-external-session-refresh-"));
+  const agentDir = join(root, "agent");
+  const writer = new SessionRegistry(undefined, { agentDir, idleTimeoutMs: 0 });
+  const reader = new SessionRegistry(undefined, { agentDir, idleTimeoutMs: 0 });
+  try {
+    const created = await writer.create(root);
+    const writerSlot = await writer.getOrOpen(created.sessionId);
+    writerSlot.runtime.session.sessionManager.appendMessage({
+      role: "user", content: "initial message", timestamp: Date.now(),
+    });
+    writerSlot.runtime.session.sessionManager.appendMessage({
+      role: "assistant", content: [{ type: "text", text: "initial answer" }],
+      api: "openai-responses", provider: "openai", model: "fixture",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop", timestamp: Date.now(),
+    });
+    const sessionPath = writerSlot.runtime.session.sessionFile;
+    assert.ok(sessionPath);
+
+    await reader.open(sessionPath);
+    const before = await reader.snapshot(created.sessionId);
+    assert.equal(before.history.at(-1).content[0].text, "initial answer");
+    const initialLeafId = before.leafId;
+
+    writerSlot.runtime.session.sessionManager.appendMessage({
+      role: "user", content: "external message", timestamp: Date.now() + 1,
+    });
+    const refreshed = await reader.snapshot(created.sessionId);
+    assert.notEqual(refreshed.leafId, initialLeafId);
+    assert.equal(refreshed.history.at(-1).content, "external message");
+
+    writerSlot.runtime.session.sessionManager.appendMessage({
+      role: "user", content: "heartbeat message", timestamp: Date.now() + 2,
+    });
+    const heartbeatSnapshot = await reader.refreshExternalSnapshot(created.sessionId);
+    assert.equal(heartbeatSnapshot.history.at(-1).content, "heartbeat message");
+    assert.equal(await reader.refreshExternalSnapshot(created.sessionId), null);
+  } finally {
+    await Promise.all([writer.dispose(), reader.dispose()]);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("active sessions share one service-level ModelRuntime", async () => {
   const root = await mkdtemp(join(tmpdir(), "wuxianpi-model-runtime-"));
   const registry = new SessionRegistry(() => {}, { agentDir: join(root, "agent"), idleTimeoutMs: 0 });

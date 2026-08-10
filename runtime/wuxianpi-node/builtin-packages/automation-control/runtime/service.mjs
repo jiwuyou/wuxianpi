@@ -1,5 +1,6 @@
 const PACKAGE_ID = "com.wuxianpi.builtin.automation";
 const INTERNAL_CALLERS = new Set(["com.wuxianpi.builtin.tasks"]);
+const EXECUTION_GROUP = "com.wuxianpi.background/execution";
 
 export default async function activate(context) {
   const api = async (request) => {
@@ -38,5 +39,14 @@ export default async function activate(context) {
     },
   };
   context.registerApi("automation-control.v1", api);
-  context.registerService("automation-control.v1", service);
+  context.registerService("automation-control.v1", service, { singletonGroupId: EXECUTION_GROUP });
+  context.registerSingleton({
+    id: "executor",
+    groupId: EXECUTION_GROUP,
+    name: "Automation Executor",
+    recover() { context.automation.recoverInterruptedTurns(); },
+    start() { context.automation.setExecutionEnabled(true); },
+    async quiesce() { await context.automation.stopExecutions(); },
+    status() { return { enabled: context.isSingletonOwner(EXECUTION_GROUP) }; },
+  });
 }

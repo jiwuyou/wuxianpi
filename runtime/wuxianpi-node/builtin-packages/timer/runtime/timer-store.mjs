@@ -14,7 +14,7 @@ export class TimerStore {
         id TEXT PRIMARY KEY, title TEXT NOT NULL, schedule_json TEXT NOT NULL,
         timezone TEXT NOT NULL, next_run_at TEXT, status TEXT NOT NULL,
         catch_up TEXT NOT NULL, consumer_id TEXT NOT NULL, handler_id TEXT NOT NULL,
-        payload_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        handler_ref_json TEXT, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS timer_occurrences (
         occurrence_id TEXT PRIMARY KEY, timer_id TEXT NOT NULL REFERENCES timers(id),
@@ -25,6 +25,8 @@ export class TimerStore {
       CREATE INDEX IF NOT EXISTS timer_due ON timers(status, next_run_at);
       CREATE INDEX IF NOT EXISTS timer_occurrence_timer ON timer_occurrences(timer_id, scheduled_at DESC);
     `);
+    const columns = this.db.prepare("PRAGMA table_info(timers)").all().map((column) => String(column.name));
+    if (!columns.includes("handler_ref_json")) this.db.exec("ALTER TABLE timers ADD COLUMN handler_ref_json TEXT");
   }
 
   close() { this.db.close(); }
@@ -33,11 +35,13 @@ export class TimerStore {
   create(input) {
     const id = input.id || `timer-${randomUUID()}`;
     const now = this.now();
+    const handlerRef = normalizeHandlerRef(input);
     this.db.prepare(`INSERT INTO timers
-      (id,title,schedule_json,timezone,next_run_at,status,catch_up,consumer_id,handler_id,payload_json,created_at,updated_at)
-      VALUES (?,?,?,?,?,'active',?,?,?,?,?,?)`).run(
+      (id,title,schedule_json,timezone,next_run_at,status,catch_up,consumer_id,handler_id,handler_ref_json,payload_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,'active',?,?,?,?,?,?,?)`).run(
       id, input.title, JSON.stringify(input.schedule), input.timezone, input.nextRunAt,
-      input.catchUp, input.consumerId, input.handlerId, JSON.stringify(input.payload ?? {}), now, now,
+      input.catchUp, String(input.consumerId ?? handlerRef.packageId), String(input.handlerId ?? handlerRef.serviceId), JSON.stringify(handlerRef),
+      JSON.stringify(input.payload ?? {}), now, now,
     );
     return this.get(id);
   }
@@ -55,9 +59,10 @@ export class TimerStore {
     const current = this.get(id);
     if (!current) throw new Error("timer_not_found");
     const next = { ...current, ...input, updatedAt: this.now() };
-    this.db.prepare(`UPDATE timers SET title=?,schedule_json=?,timezone=?,next_run_at=?,status=?,catch_up=?,consumer_id=?,handler_id=?,payload_json=?,updated_at=? WHERE id=?`).run(
+    const handlerRef = input.handlerRef ? normalizeHandlerRef(input) : current.handlerRef;
+    this.db.prepare(`UPDATE timers SET title=?,schedule_json=?,timezone=?,next_run_at=?,status=?,catch_up=?,consumer_id=?,handler_id=?,handler_ref_json=?,payload_json=?,updated_at=? WHERE id=?`).run(
       next.title, JSON.stringify(next.schedule), next.timezone, next.nextRunAt, next.status, next.catchUp,
-      next.consumerId, next.handlerId, JSON.stringify(next.payload), next.updatedAt, id,
+      handlerRef.packageId, handlerRef.serviceId, JSON.stringify(handlerRef), JSON.stringify(next.payload), next.updatedAt, id,
     );
     return this.get(id);
   }
@@ -74,7 +79,7 @@ export class TimerStore {
       const occurrenceId = `${timer.id}:${scheduledAt}`;
       const existing = this.db.prepare("SELECT * FROM timer_occurrences WHERE occurrence_id=?").get(occurrenceId);
       if (existing) {
-        this.db.prepare("UPDATE timers SET next_run_at = NULL, status = CASE WHEN schedule_json LIKE '%\\\"kind\\\":\\\"once\\\"%' THEN 'completed' ELSE status END, updated_at=? WHERE id=?").run(now, timer.id);
+        this.db.prepare("UPDATE timers SET next_run_at = NULL, status = CASE WHEN schedule_json LIKE '%\"kind\":\"once\"%' THEN 'completed' ELSE status END, updated_at=? WHERE id=?").run(now, timer.id);
         this.db.exec("COMMIT");
         return null;
       }
@@ -112,7 +117,8 @@ export class TimerStore {
   finishOccurrence(id, status, error = null) {
     const now = this.now();
     this.db.prepare("UPDATE timer_occurrences SET status=?, error=?, finished_at=? WHERE occurrence_id=? AND status='running'").run(status, error, now, id);
-    return this.db.prepare("SELECT * FROM timer_occurrences WHERE occurrence_id=?").get(id) ? occurrenceView(this.db.prepare("SELECT * FROM timer_occurrences WHERE occurrence_id=?").get(id)) : null;
+    const row = this.db.prepare("SELECT * FROM timer_occurrences WHERE occurrence_id=?").get(id);
+    return row ? occurrenceView(row) : null;
   }
 
   listOccurrences(timerId) {
@@ -120,12 +126,28 @@ export class TimerStore {
   }
 }
 
+function normalizeHandlerRef(input) {
+  const value = input.handlerRef ?? {
+    packageId: input.consumerId,
+    serviceId: input.handlerId,
+    method: "execute",
+  };
+  const packageId = String(value?.packageId ?? "").trim();
+  const serviceId = String(value?.serviceId ?? "").trim();
+  const method = String(value?.method ?? "execute").trim();
+  if (!packageId || !serviceId || !method) throw new Error("invalid_timer_handler_ref");
+  return { packageId, serviceId, method };
+}
+
 function timerView(row) {
+  const handlerRef = row.handler_ref_json
+    ? JSON.parse(String(row.handler_ref_json))
+    : { packageId: String(row.consumer_id), serviceId: String(row.handler_id), method: "execute" };
   return {
     id: String(row.id), title: String(row.title), schedule: JSON.parse(String(row.schedule_json)), timezone: String(row.timezone),
     nextRunAt: row.next_run_at == null ? null : String(row.next_run_at), status: String(row.status), catchUp: String(row.catch_up),
-    consumerId: String(row.consumer_id), handlerId: String(row.handler_id), payload: JSON.parse(String(row.payload_json)),
-    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    handlerRef, consumerId: handlerRef.packageId, handlerId: handlerRef.serviceId,
+    payload: JSON.parse(String(row.payload_json)), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
 

@@ -10,11 +10,14 @@ const AUTOMATION_PACKAGE_ID = "com.wuxianpi.builtin.automation";
 const INDEX_PATH = ".wuxianpi/tasks/index.json";
 const PURPOSES = new Set(["general", "planning", "execution", "report", "repair"]);
 const TASK_STATUSES = new Set(["active", "paused", "completed", "archived"]);
+const EXECUTION_GROUP = "com.wuxianpi.background/execution";
 
 export default async function activate(context) {
   const store = new TaskStore(join(context.dataDir, "tasks.sqlite"));
   let timer;
   let automation;
+  let acceptingScheduledActions = false;
+  let activeScheduledActions = Promise.resolve();
   const ensureTask = (id) => { const task = store.getTask(String(id)); if (!task) throw new Error("task_not_found"); return task; };
   const ensureAction = (id) => { const action = store.getAction(String(id)); if (!action) throw new Error("task_action_not_found"); return action; };
   const api = async (request) => {
@@ -42,14 +45,34 @@ export default async function activate(context) {
   };
   context.registerApi("task.v1", api);
   context.registerService("task.v1", { executeAction, list: () => listView() });
+  const scheduledActionService = {
+    execute: ({ payload, occurrence }) => {
+      if (!acceptingScheduledActions) throw new Error("task_executor_standby");
+      const result = activeScheduledActions.then(
+        () => executeAction(String(payload.actionId), occurrence.occurrenceId),
+        () => executeAction(String(payload.actionId), occurrence.occurrenceId),
+      );
+      activeScheduledActions = result.then(() => undefined, () => undefined);
+      return result;
+    },
+  };
+  context.registerService("task.scheduled-action.v1", scheduledActionService, { singletonGroupId: EXECUTION_GROUP });
+  context.registerService("task-action", scheduledActionService, { singletonGroupId: EXECUTION_GROUP });
   context.registerService("task.lifecycle", {
     async start() {
       timer = context.getService(TIMER_PACKAGE_ID, "timer.v1");
       automation = context.getService(AUTOMATION_PACKAGE_ID, "automation-control.v1");
-      if (!timer?.registerConsumer) return;
-      timer.registerConsumer({ consumerId: PACKAGE_ID, handlerId: "task-action", handler: ({ payload, occurrence }) => executeAction(String(payload.actionId), occurrence.occurrenceId) });
     },
     async stop() { store.close(); },
+  });
+  context.registerSingleton({
+    id: "executor",
+    groupId: EXECUTION_GROUP,
+    name: "Task Executor",
+    start() { acceptingScheduledActions = true; },
+    quiesce() { acceptingScheduledActions = false; },
+    async stop() { await activeScheduledActions.catch(() => undefined); },
+    status() { return { accepting: acceptingScheduledActions }; },
   });
 
   async function listView() { return { tasks: await Promise.all(store.listTasks().map(taskView)) }; }
@@ -121,7 +144,16 @@ export default async function activate(context) {
     if (!timer?.create) throw new Error("timer_package_unavailable");
     const task = ensureTask(input.taskId); const policy = normalizePolicy(input.policy, request, task);
     const action = store.createAction({ taskId: task.id, title: String(input.title ?? "定时对话"), kind: "scheduled_conversation", policy, message: String(input.message ?? "请继续处理当前任务。") });
-    const scheduled = await timer.create({ title: action.title, schedule: input.schedule, timezone: String(input.timezone ?? "UTC"), catchUp: input.catchUp === "once" ? "once" : "skip", consumerId: PACKAGE_ID, handlerId: "task-action", payload: { taskId: task.id, actionId: action.id } });
+    const scheduled = await timer.create({
+      title: action.title,
+      schedule: input.schedule,
+      timezone: String(input.timezone ?? "UTC"),
+      catchUp: input.catchUp === "once" ? "once" : "skip",
+      handlerRef: { packageId: PACKAGE_ID, serviceId: "task.scheduled-action.v1", method: "execute" },
+      consumerId: PACKAGE_ID,
+      handlerId: "task-action",
+      payload: { taskId: task.id, actionId: action.id },
+    });
     store.setActionTimer(action.id, scheduled.id); return { action: store.getAction(action.id), timer: scheduled };
   }
   function normalizePolicy(value, request, task) {

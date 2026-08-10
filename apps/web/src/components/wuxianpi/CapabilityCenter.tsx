@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Play, RefreshCw, Square } from "lucide-react";
 import type {
   CapabilityCatalog,
   CapabilityDescriptor,
@@ -13,7 +14,17 @@ import type {
   WebExtensionSummary,
 } from "@/lib/wuxianpi/contracts";
 import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
-import { getPermissionState, mutatePermission, performMcpAction, speakText, updateGlobalConfig } from "./api";
+import {
+  acquirePackageSingleton,
+  getPermissionState,
+  listPackageSingletons,
+  mutatePermission,
+  type PackageSingletonStatus,
+  performMcpAction,
+  releasePackageSingleton,
+  speakText,
+  updateGlobalConfig,
+} from "./api";
 import { ExtensionHost } from "./ExtensionHost";
 import { SkillsConfig } from "../SkillsConfig";
 
@@ -72,6 +83,8 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
   const [testingMcp, setTestingMcp] = useState<string | null>(null);
   const [mcpDiagnostics, setMcpDiagnostics] = useState<Record<string, CapabilityDiagnostic[]>>({});
   const [openPanel, setOpenPanel] = useState<{ extension: WebExtensionSummary; title: string; entry: string } | null>(null);
+  const [singletons, setSingletons] = useState<PackageSingletonStatus[]>([]);
+  const [singletonAction, setSingletonAction] = useState<string | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => { if (config) setDraft(config); }, [config]);
@@ -79,6 +92,10 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
     void getPermissionState().then(setPermissionState).catch((reason) => setActionError(reason instanceof Error ? reason.message : String(reason)));
   }, []);
   useEffect(reloadPermissions, [reloadPermissions]);
+  const reloadSingletons = useCallback(() => {
+    void listPackageSingletons().then(setSingletons).catch((reason) => setActionError(reason instanceof Error ? reason.message : String(reason)));
+  }, []);
+  useEffect(reloadSingletons, [reloadSingletons]);
   useEffect(() => () => { previewAudioRef.current?.pause(); if ("speechSynthesis" in window) speechSynthesis.cancel(); }, []);
 
   const grouped = useMemo(() => {
@@ -131,6 +148,18 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
   const decide = async (requestId: string, decision: "once" | "assistant" | "deny") => {
     try { setPermissionState(await mutatePermission({ action: "decide", request: { requestId, decision } })); }
     catch (reason) { setActionError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+
+  const changeSingleton = async (groupId: string, action: "acquire" | "release") => {
+    setSingletonAction(`${groupId}:${action}`); setActionError(null);
+    try {
+      await (action === "acquire" ? acquirePackageSingleton(groupId) : releasePackageSingleton(groupId));
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSingletonAction(null);
+      reloadSingletons();
+    }
   };
 
   const testMcp = async (server: McpServerConfig, listTools = false) => {
@@ -203,7 +232,18 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
 
       {!loading && tab === "permissions" && <div className="settings-stack"><section className="settings-card"><header><div><strong>待确认请求</strong><small>在对应助手聊天中也会弹出确认</small></div><span className="status-pill warning">{permissionState.pending.length}</span></header>{permissionState.pending.map((request) => <div key={request.id} className="permission-row"><span><strong>{request.title}</strong><small>{request.assistantId} · {request.capabilityId}</small></span><div><button onClick={() => void decide(request.id, "deny")}>拒绝</button><button onClick={() => void decide(request.id, "once")}>仅一次</button><button onClick={() => void decide(request.id, "assistant")}>允许助手</button></div></div>)}{permissionState.pending.length === 0 && <p className="muted-copy">没有待确认请求。</p>}</section><section className="settings-card"><header><div><strong>长期授权</strong><small>可以随时撤销 assistant/deny 决策</small></div></header>{permissionState.grants.map((grant) => <div key={`${grant.assistantId}:${grant.capabilityId}`} className="permission-row"><span><strong>{grant.capabilityId}</strong><small>{grant.assistantId} · {grant.decision}</small></span><button className="danger-link" onClick={() => void revoke(grant.assistantId, grant.capabilityId)}>撤销</button></div>)}{permissionState.grants.length === 0 && <p className="muted-copy">尚无长期授权。</p>}</section></div>}
 
-      {!loading && tab === "runtime" && <div className="settings-stack"><section className="settings-card"><header><div><strong>Termux 原生运行时</strong><small>WuxianPi、Pi Runtime 与 Android Bridge</small></div><span className="status-pill success">默认</span></header></section><section className="settings-card"><header><div><strong>Ubuntu Tool Worker</strong><small>只在 glibc、Chromium 或重型 Python 需要时启动</small></div><label className="switch"><input type="checkbox" checked={draft.ubuntu?.enabled ?? false} onChange={(event) => setDraft((current) => ({ ...current, ubuntu: { ...current.ubuntu, enabled: event.target.checked } }))} /><span /></label></header><div className="form-grid compact"><label>发行版<input value={draft.ubuntu?.distro ?? "ubuntu"} onChange={(event) => setDraft((current) => ({ ...current, ubuntu: { enabled: current.ubuntu?.enabled ?? false, ...current.ubuntu, distro: event.target.value } }))} /></label><label>空闲退出（毫秒）<input type="number" value={draft.ubuntu?.idleTimeoutMs ?? 300000} onChange={(event) => setDraft((current) => ({ ...current, ubuntu: { enabled: current.ubuntu?.enabled ?? false, ...current.ubuntu, idleTimeoutMs: Number(event.target.value) } }))} /></label><label>最大活动会话<input type="number" min="1" max="8" value={draft.defaults.maxLiveSessions ?? 2} onChange={(event) => setDraft((current) => ({ ...current, defaults: { ...current.defaults, maxLiveSessions: Number(event.target.value) } }))} /></label><label>会话空闲回收<input type="number" value={draft.defaults.idleSessionMs ?? 120000} onChange={(event) => setDraft((current) => ({ ...current, defaults: { ...current.defaults, idleSessionMs: Number(event.target.value) } }))} /></label></div></section></div>}
+      {!loading && tab === "runtime" && <div className="settings-stack">
+        {singletons.map((singleton) => {
+          const ownerName = singleton.owner ? "当前实例" : singleton.discoveredOwner?.runtimeId ?? "未发现";
+          const busy = singletonAction?.startsWith(`${singleton.groupId}:`) ?? false;
+          return <section className="settings-card" key={singleton.groupId}>
+            <header><div><strong>后台执行器</strong><small>{singleton.services.map((service) => service.name).join(" · ")}</small></div><span className={`status-pill ${singleton.owner ? "success" : "warning"}`}>{singleton.state}</span></header>
+            <div className="permission-row"><span><strong>{ownerName}</strong><small>{singleton.groupId}</small></span><div className="inline-actions"><button type="button" title="刷新后台执行器状态" disabled={busy} onClick={reloadSingletons}><RefreshCw size={14} /></button>{singleton.owner ? <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void changeSingleton(singleton.groupId, "release")}><Square size={14} />释放</button> : <button type="button" className="primary-button" disabled={busy} onClick={() => void changeSingleton(singleton.groupId, "acquire")}><Play size={14} />申请</button>}</div></div>
+          </section>;
+        })}
+        <section className="settings-card"><header><div><strong>Termux 原生运行时</strong><small>WuxianPi、Pi Runtime 与 Android Bridge</small></div><span className="status-pill success">默认</span></header></section>
+        <section className="settings-card"><header><div><strong>Ubuntu Tool Worker</strong><small>只在 glibc、Chromium 或重型 Python 需要时启动</small></div><label className="switch"><input type="checkbox" checked={draft.ubuntu?.enabled ?? false} onChange={(event) => setDraft((current) => ({ ...current, ubuntu: { ...current.ubuntu, enabled: event.target.checked } }))} /><span /></label></header><div className="form-grid compact"><label>发行版<input value={draft.ubuntu?.distro ?? "ubuntu"} onChange={(event) => setDraft((current) => ({ ...current, ubuntu: { enabled: current.ubuntu?.enabled ?? false, ...current.ubuntu, distro: event.target.value } }))} /></label><label>空闲退出（毫秒）<input type="number" value={draft.ubuntu?.idleTimeoutMs ?? 300000} onChange={(event) => setDraft((current) => ({ ...current, ubuntu: { enabled: current.ubuntu?.enabled ?? false, ...current.ubuntu, idleTimeoutMs: Number(event.target.value) } }))} /></label><label>最大活动会话<input type="number" min="1" max="8" value={draft.defaults.maxLiveSessions ?? 2} onChange={(event) => setDraft((current) => ({ ...current, defaults: { ...current.defaults, maxLiveSessions: Number(event.target.value) } }))} /></label><label>会话空闲回收<input type="number" value={draft.defaults.idleSessionMs ?? 120000} onChange={(event) => setDraft((current) => ({ ...current, defaults: { ...current.defaults, idleSessionMs: Number(event.target.value) } }))} /></label></div></section>
+      </div>}
 
       {showSave && <div className="sticky-save-bar"><span>保存后应用于新会话。</span><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "保存中…" : "保存全局配置"}</button></div>}
       {openPanel && <div className="wuxianpi-modal-backdrop"><div className="extension-modal"><ExtensionHost extension={openPanel.extension} entry={openPanel.entry} assistantId={hostAssistantId} title={openPanel.title} onClose={() => setOpenPanel(null)} fallback={<p>扩展的通用工具仍可使用。</p>} /></div></div>}

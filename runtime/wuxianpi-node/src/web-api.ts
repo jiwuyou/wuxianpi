@@ -12,6 +12,7 @@ import type { HubAuth } from "./hub-auth.js";
 import type { WorkspaceContext } from "./profile-types.js";
 import type { AutomationConversationTarget, AutomationRateLimit } from "./automation-turn-types.js";
 import { AutomationTurnService } from "./automation-turn-service.js";
+import type { PackageRuntimeHostV1 } from "./package-runtime-host.js";
 
 const API_ROOT = "/api/web/v1";
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
@@ -21,6 +22,7 @@ export interface WebApiOptions {
   registry: SessionRegistry;
   services: WebServices;
   automationService: AutomationTurnService;
+  packageRuntimeHost: PackageRuntimeHostV1;
   packageManager?: WuxianPiPackageManager;
   hubAuth?: HubAuth;
   trustedOrigins?: string[];
@@ -87,6 +89,31 @@ export class WebApi {
     }
     if (path === "/browser/hosts" && method === "GET") {
       json(response, 200, { ok: true, data: this.options.browserHosts.describe() }); return;
+    }
+    if (path === "/singletons" && method === "GET") {
+      const singletons = await Promise.all(this.options.packageRuntimeHost.singletons().map(async (singleton) => ({
+        ...singleton,
+        discoveredOwner: singleton.owner === true ? null : await this.options.packageRuntimeHost.discoverSingletonOwner(String(singleton.groupId)),
+      })));
+      json(response, 200, { ok: true, data: { singletons } }); return;
+    }
+    const singletonRoute = /^\/singletons\/(.+?)(?:\/(acquire|release))?$/.exec(path);
+    if (singletonRoute) {
+      const groupId = decodeURIComponent(singletonRoute[1]!);
+      const action = singletonRoute[2];
+      if (!action && method === "GET") {
+        const singleton = this.options.packageRuntimeHost.singletons().find((item) => item.groupId === groupId);
+        if (!singleton) throw new RequestError("singleton_not_found", `Package singleton group not found: ${groupId}`);
+        const discoveredOwner = singleton.owner === true ? null : await this.options.packageRuntimeHost.discoverSingletonOwner(groupId);
+        json(response, 200, { ok: true, data: { singleton: { ...singleton, discoveredOwner } } });
+      } else if (action === "acquire" && method === "POST") {
+        const singleton = await this.options.packageRuntimeHost.acquireSingleton(groupId);
+        const owner = singleton.owner === true ? null : await this.options.packageRuntimeHost.discoverSingletonOwner(groupId);
+        json(response, singleton.owner === true ? 200 : 409, { ok: singleton.owner === true, data: { singleton, owner } });
+      } else if (action === "release" && method === "POST") {
+        json(response, 200, { ok: true, data: { singleton: await this.options.packageRuntimeHost.releaseSingleton(groupId) } });
+      } else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
+      return;
     }
     if (path === "/browser/invoke" && method === "POST") {
       const body = await readJsonBody(request);
@@ -708,8 +735,20 @@ export class WebApi {
       writeSse(response, envelopeFor(event));
     };
     let subscription: Awaited<ReturnType<SessionRegistry["snapshotAndSubscribe"]>> | undefined;
+    let checkingExternalChanges = false;
     const heartbeat = setInterval(() => {
-      if (!closed) writeSse(response, { type: "heartbeat", at: new Date().toISOString() });
+      if (closed || checkingExternalChanges) return;
+      checkingExternalChanges = true;
+      void this.options.registry.refreshExternalSnapshot(sessionId).then((snapshot) => {
+        if (closed) return;
+        if (snapshot) writeSse(response, snapshot);
+        writeSse(response, { type: "heartbeat", at: new Date().toISOString() });
+      }).catch((error) => {
+        if (!closed) writeSse(response, {
+          type: "runtime-error", sessionId,
+          error: { code: "external_session_refresh_failed", message: errorMessage(error) },
+        });
+      }).finally(() => { checkingExternalChanges = false; });
     }, SSE_HEARTBEAT_MS);
     heartbeat.unref();
     const cleanup = () => {

@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "id": "wuxianpi-beta",
+  "service": {
+    "name": "wuxianpi-beta",
+    "description": "WuxianPi Beta from an independent local source checkout",
+    "provider": "termux-process",
+    "command": [
+      "node",
+      "runtime/wuxianpi-node/dist/index.js",
+      "--listen",
+      "127.0.0.1:{{port:web}}",
+      "--web-root",
+      "apps/web/dist",
+      "--preferred-web-ui-url",
+      "http://127.0.0.1:{{port:web}}"
+    ],
+    "working_dir": "/data/data/com.termux/files/home/.pi/assistants/wuxianpi/workspace/wuxianpi-beta",
+    "env": {
+      "HOME": "/data/data/com.termux/files/home",
+      "PATH": "/data/data/com.termux/files/home/.local/bin:/data/data/com.termux/files/usr/bin:/system/bin:/system/xbin",
+      "PI_CODING_AGENT_DIR": "/data/data/com.termux/files/home/.pi",
+      "PREFIX": "/data/data/com.termux/files/usr",
+      "WUXIANPI_RUNTIME_ID": "wuxianpi-beta",
+      "WUXIANPI_RUNTIME_URL": "http://127.0.0.1:23130"
+    },
+    "runtime": {
+      "strategy": "termux-process",
+      "runtime": "termux",
+      "platform": "android-arm64"
+    },
+    "restart": {
+      "mode": "always",
+      "max_retries": 0
+    },
+    "health": [
+      {
+        "type": "http",
+        "url": "http://127.0.0.1:{{port:web}}/health",
+        "interval": "15s",
+        "timeout": "5s"
+      }
+    ],
+    "ports": [
+      {
+        "name": "web",
+        "host": "127.0.0.1",
+        "preferred": 23130,
+        "dynamic": false,
+        "protocol": "tcp",
+        "envVar": "WUXIANPI_BETA_PORT",
+        "endpoint": {
+          "scheme": "http",
+          "path": "/"
+        }
+      }
+    ],
+    "enabled": true,
+    "residentByDefault": false,
+    "tags": [
+      "group:local-stack",
+      "openhouseai",
+      "pi",
+      "wuxianpi",
+      "beta",
+      "openhouse-component:wuxianpi-beta"
+    ]
+  }
+}
