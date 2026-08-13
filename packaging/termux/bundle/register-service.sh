@@ -4,9 +4,42 @@ set -eu
 : "${HOME:?HOME is required}"
 product_root=${WUXIANPI_INSTALL_ROOT:-$HOME/.local/share/wuxianpi}
 service_dir=${OPENHOUSEAI_CONFIG_DIR:-$HOME/.config/openhouseai}/service-manager/services.d
-spec=$service_dir/yuanshengwuxianpi.json
 mkdir -p "$service_dir" "$HOME/workspace" "$HOME/.pi/agent/sessions"
-tmp=$(mktemp "${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}/yuanshengwuxianpi.json.XXXXXX")
+
+if [ "$#" -gt 0 ]; then
+  [ "$#" -eq 2 ] && [ "$1" = "--spec" ] || {
+    printf 'Usage: %s [--spec FILE|-]\n' "$0" >&2
+    exit 2
+  }
+  input=$2
+  incoming=$(mktemp "$service_dir/.wuxianpi-service.XXXXXX")
+  trap 'rm -f "$incoming"' EXIT HUP INT TERM
+  if [ "$input" = "-" ]; then
+    cat >"$incoming"
+  else
+    [ -f "$input" ] || { printf 'Service spec not found: %s\n' "$input" >&2; exit 2; }
+    cp "$input" "$incoming"
+  fi
+  service_name=$(node - "$incoming" <<'NODE'
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("service spec must be an object");
+if (typeof value.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.name) || value.name.includes("..")) throw new Error("invalid service name");
+if (typeof value.provider !== "string" || !value.provider) throw new Error("service provider is required");
+if (!(typeof value.command === "string" && value.command) && !(Array.isArray(value.command) && value.command.length && value.command.every(item => typeof item === "string" && item))) throw new Error("service command is required");
+process.stdout.write(value.name);
+NODE
+  ) || { printf 'Invalid service spec\n' >&2; exit 3; }
+  spec=$service_dir/$service_name.json
+  chmod 600 "$incoming"
+  mv "$incoming" "$spec"
+  trap - EXIT HUP INT TERM
+  printf 'Registered service-manager service from spec: %s\n' "$spec"
+  exit 0
+fi
+
+spec=$service_dir/yuanshengwuxianpi.json
+tmp=$(mktemp "$service_dir/.yuanshengwuxianpi.json.XXXXXX")
 
 cat > "$tmp" <<JSON
 {
@@ -34,5 +67,6 @@ cat > "$tmp" <<JSON
 JSON
 
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$tmp"
+chmod 600 "$tmp"
 mv "$tmp" "$spec"
 printf 'Registered on-demand service-manager service (not started): %s\n' "$spec"

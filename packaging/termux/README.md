@@ -29,6 +29,17 @@ packaging/termux/build-release.sh \
   --output release/dist
 ```
 
+For a complete source build, run the ARM64 Termux entry point instead:
+
+```bash
+packaging/termux/build-source-release.sh --output release/dist
+```
+
+It builds Web and Runtime in clean temporary directories, runs
+`npm prune --omit=dev` against the Runtime lock file, and places only that
+production dependency closure in the Base layer. It must run on ARM64 so
+platform-specific optional dependencies are selected for the target device.
+
 The full ARM64 archive contains all three layers and a Termux installer. A Web
 only update can publish just a new Web layer plus a new manifest while keeping
 the Runtime and base versions unchanged.
@@ -54,3 +65,15 @@ start it through service-manager when the UI, model API, or agent is needed.
 Only service-manager itself is expected to be kept alive by termux-services.
 tmux is reserved for installation and repair commands and is not a production
 service supervisor.
+
+OpenHouse and other hosts may provide the complete service-manager definition
+without changing the WuxianPi installer:
+
+```bash
+scripts/register-service.sh --spec /path/to/service.json
+# or: generate-service-spec | scripts/register-service.sh --spec -
+```
+
+The script validates the service identity and required fields, then atomically
+writes `services.d/<name>.json`. It only registers the definition; it does not
+start the service or call service-manager APIs.
