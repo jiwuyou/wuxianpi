@@ -451,12 +451,11 @@ export function ModelsConfig({ onClose, onModelsChanged }: ModelsConfigProps) {
 
         {!loading && mode === "easy" && <div className="model-setup-easy">
           {setup?.presets.length ? <>
-            <section className="model-provider-picker" aria-label="供应商">
-              {setup.presets.map((preset) => <button key={preset.id} type="button" className={preset.id === selectedPresetId ? "active" : ""} onClick={() => { invalidateDraftRequests(); setSelectedPresetId(preset.id); }}>
-                <strong>{preset.label}</strong>
-                <small>{preset.description ?? preset.category ?? preset.providerId}</small>
-              </button>)}
-            </section>
+            <label className="model-provider-picker">提供商
+              <select value={selectedPresetId} onChange={(event) => { invalidateDraftRequests(); setSelectedPresetId(event.target.value); }}>
+                {setup.presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}{preset.category === "official" ? " — 官方" : preset.category === "aggregator" ? " — 兼容" : preset.description ? ` — ${preset.description}` : preset.category ? ` — ${preset.category}` : ""}</option>)}
+              </select>
+            </label>
             <section className="model-setup-panel">
               <div className="form-grid compact">
                 <label className="span-2">API Key

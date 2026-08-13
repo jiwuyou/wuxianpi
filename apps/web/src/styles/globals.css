@@ -945,11 +945,9 @@ button:disabled { cursor: not-allowed !important; opacity: .48; transform: none 
 .models-mode-switch { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 4px; margin: 0 20px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); }
 .models-mode-switch button { min-height: 34px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 12px; }
 .models-mode-switch button.active { background: var(--bg); color: var(--text); box-shadow: 0 1px 5px rgba(0,0,0,.08); font-weight: 700; }
-.model-setup-easy { display: grid; grid-template-columns: minmax(180px, .7fr) minmax(0, 1.3fr); gap: 16px; }
-.model-provider-picker { display: grid; align-content: start; gap: 6px; }
-.model-provider-picker button { display: flex; flex-direction: column; gap: 3px; min-height: 54px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
-.model-provider-picker button.active { border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
-.model-provider-picker small { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.model-setup-easy { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.model-provider-picker { display: flex; flex-direction: column; gap: 6px; color: var(--text-muted); font-size: 11px; font-weight: 650; }
+.model-provider-picker select { padding: 9px 11px; border: 1px solid var(--border); border-radius: 11px; outline: 0; background: var(--bg-panel); color: var(--text); font-size: 13px; }
 .model-setup-panel { align-self: start; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
 .model-setup-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .model-setup-actions > button { min-height: 36px; padding: 7px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-panel); color: var(--text); cursor: pointer; }
@@ -991,9 +989,7 @@ button:disabled { cursor: not-allowed !important; opacity: .48; transform: none 
   .models-page-body { padding: 18px 20px 24px; }
   .models-page-footer { justify-content: flex-end; padding: 12px 20px max(12px, env(safe-area-inset-bottom)); }
   .models-page-footer > button { flex: 0 0 auto; }
-  .model-setup-easy { grid-template-columns: 1fr; }
-  .model-provider-picker { display: flex; overflow-x: auto; }
-  .model-provider-picker button { flex: 0 0 150px; }
+
   .models-mode-switch { margin-left: 14px; margin-right: 14px; }
 }
 
