@@ -11,7 +11,7 @@ script="$root/bundle/register-service.sh"
 service_dir="$HOME/.config/openhouseai/service-manager/services.d"
 
 sh "$script"
-node -e 'const x=require(process.argv[1]);if(x.name!=="yuanshengwuxianpi")process.exit(1)' \
+node -e 'const x=require(process.argv[1]);if(x.name!=="yuanshengwuxianpi"||x.ports?.[0]?.name!=="runtime"||x.health?.[0]?.url!=="http://127.0.0.1:{{port:runtime}}/health"||x.runtime?.home!==process.env.HOME)process.exit(1)' \
   "$service_dir/yuanshengwuxianpi.json"
 
 cat >"$work/custom.json" <<'JSON'
