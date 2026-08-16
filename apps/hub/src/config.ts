@@ -15,6 +15,8 @@ export interface HubConfig {
   githubClientId: string;
   sessionDays: number;
   maxDownloadBytes: number;
+  mirrorServiceUrl: string;
+  mirrorServiceToken: string;
 }
 
 function parsePublisherCredentials(raw: string | undefined): Map<string, PublisherCredential> {
@@ -52,5 +54,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
     githubClientId: env.HUB_GITHUB_CLIENT_ID?.trim() ?? "",
     sessionDays,
     maxDownloadBytes,
+    mirrorServiceUrl: env.HUB_MIRROR_SERVICE_URL?.trim().replace(/\/$/, "") ?? "",
+    mirrorServiceToken: env.HUB_MIRROR_SERVICE_TOKEN?.trim() ?? "",
   };
 }

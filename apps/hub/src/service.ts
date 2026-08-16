@@ -24,6 +24,7 @@ import type {
 } from "./types.js";
 import { CONTRIBUTION_TYPES, PACKAGE_CATEGORIES } from "./types.js";
 import { validatePublisherMetadata } from "./metadata.js";
+import type { HubMirrorClient } from "./mirror-client.js";
 
 const FULL_COMMIT = /^[a-f0-9]{40}$/;
 const HTTPS_URL = /^https:\/\/[^\s]+$/;
@@ -180,6 +181,7 @@ export interface HubServiceOptions {
   git: GitGateway;
   validator: PackageValidator;
   publicUrl: string;
+  mirror?: HubMirrorClient;
 }
 
 export class HubService {
@@ -586,6 +588,16 @@ export class HubService {
       id: id("audit"), actor, action: "approve", targetType: "submission", targetId: submissionId,
       detail: { notes, releaseId: release.releaseId, approvedCommit: release.approvedCommit }, createdAt: timestamp,
     });
+    if (this.options.mirror) {
+      try {
+        await this.options.mirror.registerRelease(release);
+      } catch (error) {
+        this.options.database.addAudit({
+          id: id("audit"), actor: "mirror-adapter", action: "enqueue_failed", targetType: "release", targetId: release.releaseId,
+          detail: { error: asErrorMessage(error) }, createdAt: now(),
+        });
+      }
+    }
     return { releaseId: release.releaseId, packageId: release.packageId, approvedCommit: release.approvedCommit };
   }
 
@@ -926,7 +938,7 @@ export class HubService {
     return { packageId, releases, nextCursor: nextCursor(offset, limit, count) };
   }
 
-  getInstallPlan(packageId: string, query: URLSearchParams) {
+  async getInstallPlan(packageId: string, query: URLSearchParams) {
     const releaseId = query.get("releaseId");
     const advertised = query.getAll("hostCapability");
     const approved = releaseId ? [] : this.options.database.listApprovedReleases(packageId);
@@ -943,6 +955,14 @@ export class HubService {
       const missing = this.missingCapabilities(release, advertised);
       throw new HubError(409, "incompatible_host", `Host is missing capabilities: ${missing.join(", ")}`);
     }
+    let officialMirror: GitSource | null = null;
+    if (this.options.mirror) {
+      try { officialMirror = await this.options.mirror.findSource(release.repositoryUrl, release.approvedCommit); }
+      catch { officialMirror = null; }
+    }
+    const declaredMirrors = release.mirrorUrls
+      .filter((url) => url !== officialMirror?.url)
+      .map((url, index) => ({ kind: "mirror" as const, url, priority: Math.max(0, 80 - index) }));
     return {
       schemaVersion: 1,
       packageId: release.packageId,
@@ -953,7 +973,8 @@ export class HubService {
       manifestDigest: release.manifestDigest,
       gitSources: [
         { kind: "github", url: release.repositoryUrl, priority: 100 },
-        ...release.mirrorUrls.map((url, index) => ({ kind: "mirror", url, priority: Math.max(0, 80 - index) })),
+        ...(officialMirror ? [officialMirror] : []),
+        ...declaredMirrors,
       ],
       artifacts: release.manifest.artifacts,
       compatibility: release.manifest.requires,

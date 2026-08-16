@@ -23,6 +23,8 @@ HUB_SESSION_DAYS         Hub session lifetime, default 30 days
 HUB_PACKAGE_SCHEMA       Path to wuxianpi-package.schema.json
 HUB_PUBLIC_DIR           Static marketplace assets
 HUB_VERIFY_MAX_BYTES     Maximum downloaded verification object size
+HUB_MIRROR_SERVICE_URL   Optional OpenHouse Git Mirror service origin
+HUB_MIRROR_SERVICE_TOKEN Bearer token shared with the mirror service
 ```
 
 `HUB_PUBLISHER_TOKENS` accepts either token strings or records:

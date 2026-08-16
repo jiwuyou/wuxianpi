@@ -52,6 +52,12 @@ screenshot cache are captured consistently. Docker logs are bounded to five
 10 MiB files. Package verification uses a bounded temporary filesystem and
 never executes Package build commands.
 
+To enable the optional OpenHouse Git Mirror adapter, set
+`HUB_MIRROR_SERVICE_URL` in `runtime.env` and set
+`HUB_MIRROR_SERVICE_TOKEN` to the mirror service's `MIRROR_API_TOKEN` in
+`secrets.env`. Mirror failures never block Package publication or GitHub
+installation.
+
 ## Smoke Test
 
 Public checks need no credentials:

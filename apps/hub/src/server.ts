@@ -289,7 +289,7 @@ async function routeApi(
       return;
     }
     if (method === "GET" && parts.length === 3 && parts[2] === "install-plan") {
-      sendJson(response, 200, service.getInstallPlan(packageId, query), { "cache-control": "public, max-age=300, immutable" });
+      sendJson(response, 200, await service.getInstallPlan(packageId, query), { "cache-control": "public, max-age=300, immutable" });
       return;
     }
   }

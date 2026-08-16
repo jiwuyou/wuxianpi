@@ -7,6 +7,7 @@ import { HubAuthService } from "./auth-service.js";
 import { createHubServer } from "./server.js";
 import { HubService } from "./service.js";
 import { PackageValidator } from "./validator.js";
+import { HttpHubMirrorClient } from "./mirror-client.js";
 
 const config = loadConfig();
 const database = new HubDatabase(config.dbPath);
@@ -17,11 +18,15 @@ const validator = new PackageValidator({
   assetStore,
   maxDownloadBytes: config.maxDownloadBytes,
 });
+const mirror = config.mirrorServiceUrl && config.mirrorServiceToken
+  ? new HttpHubMirrorClient(config.mirrorServiceUrl, config.mirrorServiceToken)
+  : null;
 const service = new HubService({
   database,
   git: new RealGitGateway(),
   validator,
   publicUrl: config.publicUrl,
+  ...(mirror ? { mirror } : {}),
 });
 const authService = new HubAuthService({
   database,
