@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "com.wuxianpi.builtin.marketplace",
+  "name": "WuxianPi 市场",
+  "version": "1.0.0",
+  "summary": "让助手了解并正确使用 WuxianPi 在线 Package 市场。",
+  "description": "提供市场入口、适用场景、Package 能力和安全规则。",
+  "categories": ["knowledge-experience"],
+  "requires": {
+    "hostCapabilities": [],
+    "packages": []
+  },
+  "build": {
+    "mode": "none"
+  },
+  "artifacts": [],
+  "contributions": [
+    {
+      "id": "com.wuxianpi.builtin.marketplace/context.marketplace",
+      "type": "wuxianpi.context",
+      "name": "市场提示",
+      "description": "让所有助手知道 WuxianPi 在线市场的存在和入口。",
+      "path": "context",
+      "format": "directory",
+      "assistantSelectable": false
+    },
+    {
+      "id": "com.wuxianpi.builtin.marketplace/skill.marketplace",
+      "type": "pi.skill",
+      "name": "WuxianPi 市场使用指南",
+      "description": "当用户需要发现、安装、更新、卸载或绑定 Package，或者当前助手缺少工具、Skill、MCP、小 App、Web Extension 或自动化能力时，读取本指南。",
+      "path": "skills/marketplace",
+      "assistantSelectable": false
+    }
+  ]
+}
