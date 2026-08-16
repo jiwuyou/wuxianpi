@@ -9,6 +9,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useBrowserNavigation } from "@/lib/browser-navigation";
 import { webApi } from "@/lib/web-api-client";
 import { assistantAvatarBackground, assistantAvatarUrl } from "@/lib/assistant-avatar";
+import { resolveStarterPrompt } from "@/lib/starter-prompts";
 import { ChatWindow } from "./ChatWindow";
 import type { ChatInputHandle } from "./ChatInput";
 import { ExtensionHost } from "./wuxianpi/ExtensionHost";
@@ -906,7 +907,13 @@ function AssistantsPanel({
             {(assistant.manifest.starterPrompts ?? []).length > 0 && (
               <div className="starter-chip-row">
                 {assistant.manifest.starterPrompts?.slice(0, 3).map((prompt) => (
-                  <button key={prompt} type="button" onClick={() => onOpenChat(assistant, prompt)}>{prompt}</button>
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => onOpenChat(assistant, resolveStarterPrompt(prompt, assistant.id === "wuxianpi").prompt)}
+                  >
+                    {prompt}
+                  </button>
                 ))}
               </div>
             )}

@@ -29,7 +29,7 @@ const DEFAULT_ASSISTANT_MANIFEST: AssistantManifestV1 = {
   name: "WuxianPi",
   description: "默认个人助手",
   greeting: "你好，我是 WuxianPi。今天想聊些什么？",
-  starterPrompts: ["帮我整理今天的待办", "解释一个概念", "帮我写一段文字"],
+  starterPrompts: ["帮我整理今天的任务", "帮我安装一个 AI 工具", "我想用 OpenHouse 实现一个想法", "帮我完成一个复杂任务"],
   model: "inherit",
   thinkingLevel: "inherit",
   tools: "inherit",

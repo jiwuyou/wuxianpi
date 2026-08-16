@@ -9,7 +9,7 @@ import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAg
 import { useAudio } from "@/hooks/useAudio";
 import { useTts } from "@/hooks/useTts";
 import { useDragDrop } from "@/hooks/useDragDrop";
-import { STARTER_PROMPTS } from "@/lib/starter-prompts";
+import { STARTER_PROMPTS, resolveStarterPrompt } from "@/lib/starter-prompts";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { FloatingExtensionLayer } from "./extensions/FloatingExtensionLayer";
 
@@ -238,7 +238,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
   const quickPrompts = assistant?.manifest.starterPrompts?.length
-    ? assistant.manifest.starterPrompts.map((prompt) => ({ title: prompt, prompt, description: "开始这个话题" }))
+    ? assistant.manifest.starterPrompts.map((prompt) => resolveStarterPrompt(prompt, assistant.id === "wuxianpi"))
     : STARTER_PROMPTS;
   const handleQuickStartPrompt = useCallback((prompt: string) => {
     chatInputRef?.current?.insertIfEmpty(prompt);
