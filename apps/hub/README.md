@@ -27,6 +27,27 @@ HUB_MIRROR_SERVICE_URL   Optional OpenHouse Git Mirror service origin
 HUB_MIRROR_SERVICE_TOKEN Bearer token shared with the mirror service
 ```
 
+When both mirror settings are configured, Hub administrators can manage
+tracking mirrors from the **Git 镜像** tab in the market management workspace.
+The browser calls Hub only; `HUB_MIRROR_SERVICE_TOKEN` remains server-side.
+GitHub-authenticated users must have the Hub `admin` role, while
+`HUB_ADMIN_TOKEN` continues to work for administrative API clients.
+
+```text
+GET    /api/v1/admin/mirrors/targets
+POST   /api/v1/admin/mirrors/targets
+PATCH  /api/v1/admin/mirrors/targets/:id
+GET    /api/v1/admin/mirrors/targets/:id/jobs
+POST   /api/v1/admin/mirrors/targets/:id/sync
+POST   /api/v1/admin/mirrors/targets/:id/pause
+POST   /api/v1/admin/mirrors/targets/:id/resume
+```
+
+Hub authorizes and audits these operations but does not copy Mirror Target or
+Job state into its own database. If the optional Mirror service is unavailable,
+these routes return `mirror_service_unavailable`; catalog and submission routes
+continue to operate normally.
+
 `HUB_PUBLISHER_TOKENS` accepts either token strings or records:
 
 ```json

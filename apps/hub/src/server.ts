@@ -429,6 +429,39 @@ async function routeApi(
 
   if (parts[0] === "admin") {
     const admin = authenticateAdminActor(options, bearer(request));
+    const actorId = adminActorId(admin);
+    if (parts[1] === "mirrors" && parts[2] === "targets") {
+      if (method === "GET" && parts.length === 3) {
+        sendJson(response, 200, await service.listMirrorTargets(), { "cache-control": "no-store" });
+        return;
+      }
+      if (method === "POST" && parts.length === 3) {
+        sendJson(response, 202, await service.createMirrorTarget(actorId, await readJson(request)), { "cache-control": "no-store" });
+        return;
+      }
+      if (parts[3] && method === "PATCH" && parts.length === 4) {
+        sendJson(response, 200, await service.updateMirrorTarget(actorId, parts[3], await readJson(request)), { "cache-control": "no-store" });
+        return;
+      }
+      if (parts[3] && parts[4] === "jobs" && method === "GET" && parts.length === 5) {
+        sendJson(response, 200, await service.listMirrorJobs(parts[3]), { "cache-control": "no-store" });
+        return;
+      }
+      if (parts[3] && method === "POST" && parts.length === 5) {
+        if (parts[4] === "sync") {
+          sendJson(response, 202, await service.syncMirrorTarget(actorId, parts[3]), { "cache-control": "no-store" });
+          return;
+        }
+        if (parts[4] === "pause") {
+          sendJson(response, 200, await service.pauseMirrorTarget(actorId, parts[3]), { "cache-control": "no-store" });
+          return;
+        }
+        if (parts[4] === "resume") {
+          sendJson(response, 200, await service.resumeMirrorTarget(actorId, parts[3]), { "cache-control": "no-store" });
+          return;
+        }
+      }
+    }
     if (method === "PATCH" && parts[1] === "users" && parts[2] && parts[3] === "role") {
       const body = asObject(await readJson(request));
       sendJson(response, 200, { user: options.authService.updateUserRole(admin, parts[2]!, requireGlobalRole(body.role)) }, { "cache-control": "no-store" });
@@ -438,18 +471,18 @@ async function routeApi(
       const body = await readJson(request);
       const notes = body && typeof body === "object" && !Array.isArray(body) && typeof (body as Record<string, unknown>).notes === "string"
         ? (body as Record<string, string>).notes! : null;
-      sendJson(response, 201, await service.approveSubmission(parts[2]!, notes, adminActorId(admin)), { "cache-control": "no-store" });
+      sendJson(response, 201, await service.approveSubmission(parts[2]!, notes, actorId), { "cache-control": "no-store" });
       return;
     }
     if (method === "POST" && parts[1] === "submissions" && parts[2] && parts[3] === "reject") {
       const body = await readJson(request);
-      service.rejectSubmission(parts[2]!, requireText(body, "reason"), adminActorId(admin));
+      service.rejectSubmission(parts[2]!, requireText(body, "reason"), actorId);
       sendJson(response, 200, { submissionId: parts[2], status: "rejected" }, { "cache-control": "no-store" });
       return;
     }
     if (method === "POST" && parts[1] === "releases" && parts[2] && parts[3] === "revoke") {
       const body = await readJson(request);
-      service.revokeRelease(parts[2]!, requireText(body, "reason"), adminActorId(admin));
+      service.revokeRelease(parts[2]!, requireText(body, "reason"), actorId);
       sendJson(response, 200, { releaseId: parts[2], status: "revoked" }, { "cache-control": "no-store" });
       return;
     }

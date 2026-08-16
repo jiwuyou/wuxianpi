@@ -14,6 +14,7 @@ const state = {
   identity: null,
   deviceAuthorization: null,
   managementTab: "submissions",
+  mirrorPollTimer: null,
 };
 
 const elements = {
@@ -68,6 +69,8 @@ const elements = {
   manageButton: document.querySelector("#manageButton"),
   managementDialog: document.querySelector("#managementDialog"),
   managementTabs: document.querySelector("#managementTabs"),
+  managementMirrorTab: document.querySelector("#managementMirrorTab"),
+  managementPackageField: document.querySelector("#managementPackageField"),
   managementPackageId: document.querySelector("#managementPackageId"),
   managementRefreshButton: document.querySelector("#managementRefreshButton"),
   managementContent: document.querySelector("#managementContent"),
@@ -410,6 +413,8 @@ function renderAccount() {
   elements.signedOutPanel.classList.toggle("hidden", Boolean(user));
   elements.signedInPanel.classList.toggle("hidden", !user);
   elements.manageButton.classList.toggle("hidden", !user);
+  elements.managementMirrorTab.classList.toggle("hidden", user?.role !== "admin");
+  if (user?.role !== "admin" && state.managementTab === "mirrors") state.managementTab = "submissions";
   elements.accountLabel.textContent = user?.login || "登录";
   elements.accountAvatar.textContent = (user?.login || "G").slice(0, 1).toUpperCase();
   if (!user) return;
@@ -515,9 +520,19 @@ function proposalCard(item) {
 }
 
 async function loadManagement() {
+  clearTimeout(state.mirrorPollTimer);
+  state.mirrorPollTimer = null;
   managementMessage("正在读取市场管理数据");
   const packageId = elements.managementPackageId.value.trim();
+  elements.managementPackageField.classList.toggle("hidden", state.managementTab === "mirrors");
   try {
+    if (state.managementTab === "mirrors") {
+      const body = await authenticatedApi("/api/v1/admin/mirrors/targets");
+      const targets = rows(body, "targets");
+      elements.managementContent.innerHTML = `${mirrorCreateForm()}${targets.length ? targets.map(mirrorTargetCard).join("") : '<p class="management-message">还没有持续跟踪仓库。</p>'}`;
+      scheduleMirrorRefresh();
+      return;
+    }
     if (state.managementTab === "submissions") {
       const body = await authenticatedApi("/api/v1/publisher/submissions");
       const submissions = rows(body, "submissions");
@@ -545,7 +560,73 @@ async function loadManagement() {
     elements.managementContent.innerHTML = `${memberCreateForm(packageId)}<div class="member-list">${members.length ? members.map((member) => memberRow(member)).join("") : '<p class="management-message">暂无成员信息。</p>'}</div>`;
   } catch (error) {
     managementMessage(error.message, "error");
+    if (state.managementTab === "mirrors") scheduleMirrorRefresh();
   }
+}
+
+function mirrorCreateForm() {
+  return `<form class="management-create-form mirror-create-form">
+    <header><div><strong>新增持续跟踪</strong><small>只接受公开 GitHub 仓库；完整镜像不得超过 30 MiB。</small></div></header>
+    <label><span>GitHub 仓库</span><input name="repositoryUrl" type="url" required placeholder="https://github.com/owner/repository"></label>
+    <div class="form-grid">
+      <label><span>分支</span><input name="branch" value="main" required></label>
+      <label><span>同步间隔</span><select name="intervalSeconds"><option value="900">15 分钟</option><option value="3600" selected>1 小时</option><option value="21600">6 小时</option><option value="86400">24 小时</option></select></label>
+    </div>
+    <label><span>最大镜像大小（MiB）</span><input name="maxSizeMiB" type="number" min="1" max="30" step="1" value="30" required></label>
+    <div class="item-actions"><button class="command-button primary" type="submit">新增跟踪</button></div><p class="form-status" role="status"></p>
+  </form>`;
+}
+
+function mirrorTargetCard(target) {
+  const labels = { active: "同步中", ready: "正常", paused: "已暂停", oversized: "超限", failed: "失败" };
+  const tone = target.status === "ready" ? "success" : target.status === "failed" ? "error" : target.status === "oversized" ? "warning" : "pending";
+  const commit = target.lastSyncedCommit ? target.lastSyncedCommit.slice(0, 12) : "尚未同步";
+  const nextSync = target.status === "paused" ? "已暂停" : formatMirrorTime(target.nextSyncAt);
+  const pauseAction = target.status === "paused"
+    ? '<button class="command-button" type="button" data-mirror-action="resume">恢复更新</button>'
+    : '<button class="command-button" type="button" data-mirror-action="pause">暂停更新</button>';
+  return `<article class="management-item mirror-target" data-mirror-target-id="${escapeHtml(target.id)}">
+    <header><div><strong>${escapeHtml(target.repositoryUrl)}</strong><small>${escapeHtml(target.id)}</small></div><span class="status-badge ${tone}">${escapeHtml(labels[target.status] || target.status)}</span></header>
+    <dl><dt>跟踪分支</dt><dd>${escapeHtml(target.branch || "-")}</dd><dt>当前大小</dt><dd>${formatMirrorBytes(target.currentSizeBytes)}</dd><dt>最近 Commit</dt><dd><code>${escapeHtml(commit)}</code></dd><dt>下次同步</dt><dd>${escapeHtml(nextSync)}</dd><dt>镜像仓库</dt><dd><a href="${escapeHtml(target.mirrorUrl.replace(/\.git$/, ""))}" target="_blank" rel="noreferrer">打开 Forgejo</a></dd></dl>
+    ${target.lastError ? `<div class="diagnostic-list"><p>${escapeHtml(target.lastError)}</p></div>` : ""}
+    <details><summary>调整跟踪</summary><form class="mirror-update-form">
+      <div class="form-grid"><label><span>分支</span><input name="branch" value="${escapeHtml(target.branch || "main")}" required></label><label><span>同步间隔（秒）</span><input name="intervalSeconds" type="number" min="60" max="31536000" value="${Number(target.intervalSeconds)}" required></label></div>
+      <label><span>最大镜像大小（MiB）</span><input name="maxSizeMiB" type="number" min="1" max="30" step="1" value="${Math.max(1, Math.round(Number(target.maxSizeBytes) / 1048576))}" required></label>
+      <div class="item-actions"><button class="command-button" type="submit">保存调整</button></div><p class="form-status" role="status"></p>
+    </form></details>
+    <div class="mirror-jobs hidden" data-mirror-jobs></div>
+    <div class="item-actions"><button class="command-button" type="button" data-mirror-action="jobs">运行记录</button><button class="command-button" type="button" data-mirror-action="sync"${target.status === "paused" ? " disabled" : ""}>立即同步</button>${pauseAction}</div><p class="form-status" data-mirror-action-status role="status"></p>
+  </article>`;
+}
+
+function mirrorJobs(items) {
+  if (!items.length) return '<p class="form-note">还没有运行记录。</p>';
+  const labels = { pending: "等待", running: "运行中", succeeded: "成功", failed: "失败", oversized: "超限" };
+  return `<div class="mirror-job-list">${items.slice(0, 20).map((job) => `<div><span class="status-badge ${job.status === "succeeded" ? "success" : ["failed", "oversized"].includes(job.status) ? "error" : "pending"}">${escapeHtml(labels[job.status] || job.status)}</span><code>${escapeHtml(job.id.slice(0, 16))}</code><time>${escapeHtml(formatMirrorTime(job.updatedAt))}</time>${job.lastError ? `<p>${escapeHtml(job.lastError)}</p>` : ""}</div>`).join("")}</div>`;
+}
+
+function formatMirrorBytes(value) {
+  if (!Number.isFinite(value)) return "尚未同步";
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KiB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function formatMirrorTime(value) {
+  if (!value) return "尚未安排";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function scheduleMirrorRefresh() {
+  clearTimeout(state.mirrorPollTimer);
+  state.mirrorPollTimer = setTimeout(() => {
+    if (!elements.managementDialog.open || state.managementTab !== "mirrors") return;
+    if (elements.managementContent.contains(document.activeElement) && ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) {
+      scheduleMirrorRefresh();
+      return;
+    }
+    void loadManagement();
+  }, 5000);
 }
 
 function proposalCreateForm(packageId) {
@@ -806,6 +887,10 @@ elements.managementTabs.addEventListener("click", (event) => {
   elements.managementTabs.querySelectorAll("[data-management-tab]").forEach((item) => item.classList.toggle("active", item === button));
   void loadManagement();
 });
+elements.managementDialog.addEventListener("close", () => {
+  clearTimeout(state.mirrorPollTimer);
+  state.mirrorPollTimer = null;
+});
 elements.managementRefreshButton.addEventListener("click", () => void loadManagement());
 elements.managementPackageId.addEventListener("change", () => {
   if (["proposals", "members"].includes(state.managementTab)) void loadManagement();
@@ -815,14 +900,31 @@ elements.managementContent.addEventListener("submit", async (event) => {
   const form = event.target.closest("form");
   if (!form) return;
   event.preventDefault();
-  const item = form.closest("[data-submission-id], [data-proposal-id]");
+  const item = form.closest("[data-submission-id], [data-proposal-id], [data-mirror-target-id]");
   const status = form.querySelector("[role=status]");
   const submitter = event.submitter;
   const data = new FormData(form);
   if (submitter) submitter.disabled = true;
   if (status) status.textContent = "正在提交";
   try {
-    if (form.classList.contains("submission-edit-form")) {
+    if (form.classList.contains("mirror-create-form")) {
+      await authenticatedApi("/api/v1/admin/mirrors/targets", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+          repositoryUrl: String(data.get("repositoryUrl") || "").trim(),
+          branch: String(data.get("branch") || "main").trim(),
+          intervalSeconds: Number(data.get("intervalSeconds")),
+          maxSizeBytes: Number(data.get("maxSizeMiB")) * 1048576,
+        }),
+      });
+    } else if (form.classList.contains("mirror-update-form")) {
+      await authenticatedApi(`/api/v1/admin/mirrors/targets/${encodeURIComponent(item.dataset.mirrorTargetId)}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({
+          branch: String(data.get("branch") || "main").trim(),
+          intervalSeconds: Number(data.get("intervalSeconds")),
+          maxSizeBytes: Number(data.get("maxSizeMiB")) * 1048576,
+        }),
+      });
+    } else if (form.classList.contains("submission-edit-form")) {
       await authenticatedApi(`/api/v1/publisher/submissions/${encodeURIComponent(item.dataset.submissionId)}`, {
         method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({
           repositoryUrl: String(data.get("repositoryUrl") || "").trim(),
@@ -866,13 +968,32 @@ elements.managementContent.addEventListener("click", async (event) => {
   const withdraw = event.target.closest("[data-action=withdraw-submission]");
   const proposalButton = event.target.closest("[data-proposal-action]");
   const removeMember = event.target.closest("[data-action=remove-member]");
-  const button = withdraw || proposalButton || removeMember;
+  const mirrorButton = event.target.closest("[data-mirror-action]");
+  const button = withdraw || proposalButton || removeMember || mirrorButton;
   if (!button) return;
   button.disabled = true;
-  const container = button.closest("[data-submission-id], [data-proposal-id], [data-user-id]");
-  const status = container.querySelector("[role=status]");
+  const container = button.closest("[data-submission-id], [data-proposal-id], [data-user-id], [data-mirror-target-id]");
+  const status = mirrorButton ? container.querySelector("[data-mirror-action-status]") : container.querySelector("[role=status]");
+  let reload = true;
   try {
-    if (withdraw) {
+    if (mirrorButton) {
+      const targetId = container.dataset.mirrorTargetId;
+      const action = mirrorButton.dataset.mirrorAction;
+      if (action === "jobs") {
+        const jobsContainer = container.querySelector("[data-mirror-jobs]");
+        if (!jobsContainer.classList.contains("hidden")) {
+          jobsContainer.classList.add("hidden");
+        } else {
+          const body = await authenticatedApi(`/api/v1/admin/mirrors/targets/${encodeURIComponent(targetId)}/jobs`);
+          jobsContainer.innerHTML = mirrorJobs(rows(body, "jobs"));
+          jobsContainer.classList.remove("hidden");
+        }
+        reload = false;
+      } else {
+        if (status) status.textContent = action === "sync" ? "已提交同步" : "正在更新状态";
+        await authenticatedApi(`/api/v1/admin/mirrors/targets/${encodeURIComponent(targetId)}/${action}`, { method: "POST" });
+      }
+    } else if (withdraw) {
       await authenticatedApi(`/api/v1/submissions/${encodeURIComponent(container.dataset.submissionId)}/withdraw`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     } else if (proposalButton) {
       const action = proposalButton.dataset.proposalAction;
@@ -891,7 +1012,7 @@ elements.managementContent.addEventListener("click", async (event) => {
       const packageId = elements.managementPackageId.value.trim();
       await authenticatedApi(`/api/v1/packages/${encodeURIComponent(packageId)}/members/${encodeURIComponent(container.dataset.userId)}`, { method: "DELETE" });
     }
-    await loadManagement();
+    if (reload) await loadManagement();
   } catch (error) {
     if (status) status.textContent = error.message;
     else managementMessage(error.message, "error");

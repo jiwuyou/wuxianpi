@@ -10,6 +10,13 @@ import type { GitHubAuthGateway, GitHubDeviceAuthorization, GitHubIdentity } fro
 import { HubDatabase } from "../src/database.js";
 import type { CheckoutResult, GitGateway } from "../src/git.js";
 import { VerifiedAssetStore, type DownloadVerifier } from "../src/metadata.js";
+import type {
+  CreateMirrorTargetInput,
+  HubMirrorClient,
+  MirrorJob,
+  MirrorTarget,
+  UpdateMirrorTargetInput,
+} from "../src/mirror-client.js";
 import { createHubServer } from "../src/server.js";
 import { HubService } from "../src/service.js";
 import type { GitSource, PackageManifest, SourceHealth } from "../src/types.js";
@@ -73,6 +80,63 @@ class FakeGitHub implements GitHubAuthGateway {
   }
 }
 
+class FakeMirror implements HubMirrorClient {
+  readonly targets: MirrorTarget[] = [];
+  readonly jobs: MirrorJob[] = [];
+
+  async registerRelease(): Promise<void> {}
+  async findSource(): Promise<null> { return null; }
+  async listTargets(): Promise<MirrorTarget[]> { return this.targets; }
+  async createTarget(input: CreateMirrorTargetInput): Promise<MirrorTarget> {
+    const timestamp = new Date().toISOString();
+    const target: MirrorTarget = {
+      id: `mirror_${this.targets.length + 1}`,
+      repositoryUrl: input.repositoryUrl,
+      mode: "tracking",
+      branch: input.branch,
+      approvedCommit: null,
+      mirrorUrl: `https://git.example.com/openhouse/mirror-${this.targets.length + 1}.git`,
+      maxSizeBytes: input.maxSizeBytes,
+      intervalSeconds: input.intervalSeconds,
+      status: "active",
+      currentSizeBytes: null,
+      lastSyncedCommit: null,
+      lastError: null,
+      nextSyncAt: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    this.targets.push(target);
+    return target;
+  }
+  async updateTarget(targetId: string, input: UpdateMirrorTargetInput): Promise<MirrorTarget> {
+    const target = this.requireTarget(targetId);
+    Object.assign(target, input, { updatedAt: new Date().toISOString() });
+    return target;
+  }
+  async listJobs(targetId: string): Promise<MirrorJob[]> { return this.jobs.filter((job) => job.targetId === targetId); }
+  async sync(targetId: string): Promise<MirrorJob> {
+    const existing = this.jobs.find((job) => job.targetId === targetId && ["pending", "running"].includes(job.status));
+    if (existing) return existing;
+    const timestamp = new Date().toISOString();
+    const job: MirrorJob = {
+      id: `job_${this.jobs.length + 1}`, targetId, releaseId: null, packageId: null,
+      requestedCommit: null, status: "pending", attempts: 0, availableAt: timestamp,
+      leaseUntil: null, lastError: null, createdAt: timestamp, updatedAt: timestamp,
+    };
+    this.jobs.push(job);
+    return job;
+  }
+  async pause(targetId: string): Promise<MirrorTarget> { return Object.assign(this.requireTarget(targetId), { status: "paused" as const }); }
+  async resume(targetId: string): Promise<MirrorTarget> { return Object.assign(this.requireTarget(targetId), { status: "ready" as const }); }
+
+  private requireTarget(targetId: string): MirrorTarget {
+    const target = this.targets.find((item) => item.id === targetId);
+    if (!target) throw new Error("target_not_found");
+    return target;
+  }
+}
+
 async function createFixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "wuxianpi-management-fixture-"));
   cleanupPaths.push(root);
@@ -100,7 +164,7 @@ async function createFixture(): Promise<string> {
   return root;
 }
 
-async function createHarness() {
+async function createHarness(mirror?: HubMirrorClient) {
   const fixture = await createFixture();
   const db = new HubDatabase(":memory:");
   const schema = JSON.parse(await readFile(resolve("contracts/wuxianpi-package.schema.json"), "utf8")) as object;
@@ -108,7 +172,7 @@ async function createHarness() {
   cleanupPaths.push(assetDir);
   const assetStore = new VerifiedAssetStore(assetDir);
   const validator = new PackageValidator({ schema, downloader: new EmptyDownloader(), assetStore, maxDownloadBytes: 1024 * 1024 });
-  const service = new HubService({ database: db, git: new FakeGit(fixture), validator, publicUrl: "http://hub.test" });
+  const service = new HubService({ database: db, git: new FakeGit(fixture), validator, publicUrl: "http://hub.test", ...(mirror ? { mirror } : {}) });
   const authService = new HubAuthService({ database: db, github: new FakeGitHub(), githubClientId: "fixture-client-id", sessionDays: 30 });
   const server = createHubServer({
     service,
@@ -168,6 +232,73 @@ test("Hub account routes issue sessions and protect publisher operations", async
 
   const anonymousCatalog = await request(harness.baseUrl, "/api/v1/packages");
   assert.equal(anonymousCatalog.response.status, 200);
+  harness.db.close();
+});
+
+test("only Hub administrators can manage Git mirrors through the server-side adapter", async () => {
+  const mirror = new FakeMirror();
+  const harness = await createHarness(mirror);
+  const exchanged = await request(harness.baseUrl, "/api/v1/auth/github/token-exchange", json(undefined, { githubToken: "gho_fixture" }));
+  const token = exchanged.body.token as string;
+
+  const denied = await request(harness.baseUrl, "/api/v1/admin/mirrors/targets", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(denied.response.status, 403);
+  assert.equal(denied.body.error.code, "admin_required");
+
+  harness.authService.updateUserRole(
+    { kind: "admin", id: "admin", name: "Test Admin" },
+    exchanged.body.user.userId,
+    "admin",
+  );
+  const created = await request(harness.baseUrl, "/api/v1/admin/mirrors/targets", json(token, {
+    repositoryUrl: "https://github.com/example/public-repository",
+    branch: "main",
+    intervalSeconds: 3600,
+    maxSizeBytes: 30 * 1024 * 1024,
+  }));
+  assert.equal(created.response.status, 202);
+  assert.equal(created.body.target.repositoryUrl, "https://github.com/example/public-repository.git");
+  assert.doesNotMatch(JSON.stringify(created.body), /token/i);
+  const targetId = created.body.target.id as string;
+
+  const updated = await request(harness.baseUrl, `/api/v1/admin/mirrors/targets/${targetId}`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ branch: "stable", intervalSeconds: 7200 }),
+  });
+  assert.equal(updated.response.status, 200);
+  assert.equal(updated.body.target.branch, "stable");
+
+  const firstSync = await request(harness.baseUrl, `/api/v1/admin/mirrors/targets/${targetId}/sync`, json(token, {}));
+  const secondSync = await request(harness.baseUrl, `/api/v1/admin/mirrors/targets/${targetId}/sync`, json(token, {}));
+  assert.equal(firstSync.response.status, 202);
+  assert.equal(secondSync.body.job.id, firstSync.body.job.id);
+
+  const paused = await request(harness.baseUrl, `/api/v1/admin/mirrors/targets/${targetId}/pause`, json(token, {}));
+  assert.equal(paused.body.target.status, "paused");
+  const resumed = await request(harness.baseUrl, `/api/v1/admin/mirrors/targets/${targetId}/resume`, json(token, {}));
+  assert.equal(resumed.body.target.status, "ready");
+  const jobs = await request(harness.baseUrl, `/api/v1/admin/mirrors/targets/${targetId}/jobs`, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(jobs.body.jobs.length, 1);
+
+  const actions = (harness.db.sqlite.prepare("SELECT action FROM audit_events WHERE target_type = 'mirror_target' ORDER BY rowid")
+    .all() as unknown as Array<{ action: string }>).map((item) => item.action);
+  assert.deepEqual(actions, [
+    "mirror_target.create", "mirror_target.update", "mirror_target.sync", "mirror_target.sync",
+    "mirror_target.pause", "mirror_target.resume",
+  ]);
+  harness.db.close();
+});
+
+test("mirror administration fails closed without affecting the rest of Hub", async () => {
+  const harness = await createHarness();
+  const unavailable = await request(harness.baseUrl, "/api/v1/admin/mirrors/targets", {
+    headers: { authorization: "Bearer admin-token" },
+  });
+  assert.equal(unavailable.response.status, 503);
+  assert.equal(unavailable.body.error.code, "mirror_service_unavailable");
+  const packages = await request(harness.baseUrl, "/api/v1/packages");
+  assert.equal(packages.response.status, 200);
   harness.db.close();
 });
 

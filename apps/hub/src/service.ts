@@ -24,7 +24,14 @@ import type {
 } from "./types.js";
 import { CONTRIBUTION_TYPES, PACKAGE_CATEGORIES } from "./types.js";
 import { validatePublisherMetadata } from "./metadata.js";
-import type { HubMirrorClient } from "./mirror-client.js";
+import {
+  HubMirrorRequestError,
+  type CreateMirrorTargetInput,
+  type HubMirrorClient,
+  type MirrorJob,
+  type MirrorTarget,
+  type UpdateMirrorTargetInput,
+} from "./mirror-client.js";
 
 const FULL_COMMIT = /^[a-f0-9]{40}$/;
 const HTTPS_URL = /^https:\/\/[^\s]+$/;
@@ -38,6 +45,7 @@ const PROPOSAL_MUTABLE_STATUSES = new Set<ProposalStatus>([
   "queued", "verifying", "awaiting_owner", "changes_requested", "failed",
 ]);
 const REVIEWABLE_SUBMISSION_STATUSES = new Set<SubmissionStatus>(["awaiting_review"]);
+const MAX_MIRROR_BYTES = 30 * 1024 * 1024;
 
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${randomUUID().replaceAll("-", "")}`;
@@ -87,6 +95,46 @@ function pageLimit(value: string | null): number {
   const limit = Number.parseInt(value, 10);
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new HubError(400, "invalid_limit", "limit must be between 1 and 100");
   return limit;
+}
+
+function mirrorCreateInput(body: unknown): CreateMirrorTargetInput {
+  const input = mirrorObject(body);
+  return {
+    repositoryUrl: parseRepositoryUrl(input.repositoryUrl),
+    branch: input.branch === undefined ? "main" : parseRef(input.branch),
+    intervalSeconds: input.intervalSeconds === undefined
+      ? 3600
+      : mirrorInteger(input.intervalSeconds, "intervalSeconds", 60, 31_536_000),
+    maxSizeBytes: input.maxSizeBytes === undefined
+      ? MAX_MIRROR_BYTES
+      : mirrorInteger(input.maxSizeBytes, "maxSizeBytes", 1024, MAX_MIRROR_BYTES),
+  };
+}
+
+function mirrorUpdateInput(body: unknown): UpdateMirrorTargetInput {
+  const input = mirrorObject(body);
+  const result: UpdateMirrorTargetInput = {};
+  if (Object.hasOwn(input, "branch")) result.branch = parseRef(input.branch);
+  if (Object.hasOwn(input, "intervalSeconds")) {
+    result.intervalSeconds = mirrorInteger(input.intervalSeconds, "intervalSeconds", 60, 31_536_000);
+  }
+  if (Object.hasOwn(input, "maxSizeBytes")) {
+    result.maxSizeBytes = mirrorInteger(input.maxSizeBytes, "maxSizeBytes", 1024, MAX_MIRROR_BYTES);
+  }
+  if (Object.keys(result).length === 0) throw new HubError(400, "invalid_request", "At least one tracking field is required");
+  return result;
+}
+
+function mirrorObject(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new HubError(400, "invalid_request", "A JSON object is required");
+  return body as Record<string, unknown>;
+}
+
+function mirrorInteger(value: unknown, field: string, minimum: number, maximum: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new HubError(400, "invalid_request", `${field} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value;
 }
 
 function optionalText(value: unknown, field: string, maxLength: number): string | null {
@@ -189,11 +237,75 @@ export class HubService {
 
   constructor(private readonly options: HubServiceOptions) {}
 
+  async listMirrorTargets(): Promise<{ targets: MirrorTarget[] }> {
+    return { targets: await this.mirrorRequest((mirror) => mirror.listTargets()) };
+  }
+
+  async createMirrorTarget(actor: string, body: unknown): Promise<{ target: MirrorTarget }> {
+    const input = mirrorCreateInput(body);
+    const target = await this.mirrorRequest((mirror) => mirror.createTarget(input));
+    this.addMirrorAudit(actor, "mirror_target.create", target, { ...input });
+    return { target };
+  }
+
+  async updateMirrorTarget(actor: string, targetId: string, body: unknown): Promise<{ target: MirrorTarget }> {
+    const input = mirrorUpdateInput(body);
+    const target = await this.mirrorRequest((mirror) => mirror.updateTarget(targetId, input));
+    this.addMirrorAudit(actor, "mirror_target.update", target, { changes: input });
+    return { target };
+  }
+
+  async listMirrorJobs(targetId: string): Promise<{ jobs: MirrorJob[] }> {
+    return { jobs: await this.mirrorRequest((mirror) => mirror.listJobs(targetId)) };
+  }
+
+  async syncMirrorTarget(actor: string, targetId: string): Promise<{ job: MirrorJob }> {
+    const job = await this.mirrorRequest((mirror) => mirror.sync(targetId));
+    this.addMirrorAudit(actor, "mirror_target.sync", { id: targetId, repositoryUrl: null }, { jobId: job.id });
+    return { job };
+  }
+
+  async pauseMirrorTarget(actor: string, targetId: string): Promise<{ target: MirrorTarget }> {
+    const target = await this.mirrorRequest((mirror) => mirror.pause(targetId));
+    this.addMirrorAudit(actor, "mirror_target.pause", target, {});
+    return { target };
+  }
+
+  async resumeMirrorTarget(actor: string, targetId: string): Promise<{ target: MirrorTarget }> {
+    const target = await this.mirrorRequest((mirror) => mirror.resume(targetId));
+    this.addMirrorAudit(actor, "mirror_target.resume", target, {});
+    return { target };
+  }
+
   resumePendingSubmissions(): void {
     for (const submissionId of this.options.database.listPendingSubmissionIds()) {
       this.options.database.updateSubmission(submissionId, { status: "queued", updatedAt: now() });
       this.enqueueVerification(submissionId);
     }
+  }
+
+  private async mirrorRequest<T>(operation: (mirror: HubMirrorClient) => Promise<T>): Promise<T> {
+    if (!this.options.mirror) throw new HubError(503, "mirror_service_unavailable", "镜像服务暂时不可用");
+    try {
+      return await operation(this.options.mirror);
+    } catch (error) {
+      if (error instanceof HubMirrorRequestError && error.status >= 400 && error.status < 500 && ![401, 403].includes(error.status)) {
+        throw new HubError(error.status, error.code, error.message);
+      }
+      throw new HubError(503, "mirror_service_unavailable", "镜像服务暂时不可用");
+    }
+  }
+
+  private addMirrorAudit(
+    actor: string,
+    action: string,
+    target: Pick<MirrorTarget, "id" | "repositoryUrl"> | { id: string; repositoryUrl: null },
+    detail: Record<string, unknown>,
+  ): void {
+    this.options.database.addAudit({
+      id: id("audit"), actor, action, targetType: "mirror_target", targetId: target.id,
+      detail: { repositoryUrl: target.repositoryUrl, ...detail }, createdAt: now(),
+    });
   }
 
   async createSubmission(publisher: PublisherIdentity, body: unknown): Promise<ReturnType<typeof publicSubmission>> {

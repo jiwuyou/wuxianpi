@@ -206,9 +206,10 @@
         <button type="button" data-management-tab="proposals">贡献提案</button>
         <button type="button" data-management-tab="reviewer">审核队列</button>
         <button type="button" data-management-tab="members">成员</button>
+        <button class="hidden" id="managementMirrorTab" type="button" data-management-tab="mirrors">Git 镜像</button>
       </nav>
       <div class="management-toolbar">
-        <label><span>Package ID</span><input id="managementPackageId" placeholder="例如 com.example.package"></label>
+        <label id="managementPackageField"><span>Package ID</span><input id="managementPackageId" placeholder="例如 com.example.package"></label>
         <button class="command-button" id="managementRefreshButton" type="button">刷新</button>
       </div>
       <div class="management-content" id="managementContent" aria-live="polite"></div>
