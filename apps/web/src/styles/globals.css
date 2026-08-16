@@ -1055,6 +1055,14 @@ button:disabled { cursor: not-allowed !important; opacity: .48; transform: none 
 .market-metadata-grid dt { color: var(--text-muted); font-size: 9px; }
 .market-metadata-grid dd { margin: 5px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .market-metadata-grid code, .market-commit-grid code { font-size: 10px; }
+.market-location-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; margin: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--border); }
+.market-location-grid > div { min-width: 0; padding: 10px 11px; background: var(--bg); }
+.market-location-grid dt { color: var(--text-muted); font-size: 9px; }
+.market-location-grid dd { margin: 5px 0 0; }
+.market-path { display: block; overflow-wrap: anywhere; color: var(--text-muted); font-size: 10px; white-space: normal; }
+.market-location-prompt { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-top: 10px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); }
+.market-location-prompt p { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
+.market-location-prompt button { flex: 0 0 auto; }
 .market-verification { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; }
 .market-verification.passed { color: #15803d; }
 .market-verification.pending { color: #b45309; }

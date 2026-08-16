@@ -202,6 +202,7 @@ export class WuxianPiPackageManager {
     if (!installed) throw new RequestError("package_not_found", `Package is not installed: ${packageId}`);
     return this.localPackageView(state, installed, {
       ...packageSummary(installed),
+      location: this.packageLocation(installed),
       manifest: installed.manifest,
       installPlan: installed.installPlan,
       ...(installed.sourceKind === "bundled" ? { bundled: true } : { git: {
@@ -1008,6 +1009,19 @@ export class WuxianPiPackageManager {
       artifacts: join(root, "artifacts"),
       data: join(root, "data"),
       logs: join(root, "logs"),
+    };
+  }
+
+  private packageLocation(installed: InstalledPackageState): Record<string, string | null> {
+    const paths = this.paths(installed.packageId);
+    return {
+      packageRoot: installed.sourceKind === "bundled" ? null : paths.root,
+      sourcePath: installed.sourcePath,
+      activeRevisionPath: installed.activeRevisionId
+        ? join(paths.revisions, installed.activeRevisionId)
+        : installed.sourcePath,
+      dataPath: installed.dataPath,
+      logsPath: paths.logs,
     };
   }
 

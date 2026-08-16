@@ -6,9 +6,11 @@ import {
   ChevronRight,
   CircleCheck,
   CircleX,
+  Copy,
   Download,
   ExternalLink,
   FileText,
+  FolderOpen,
   GitCommitHorizontal,
   Github,
   GitMerge,
@@ -532,6 +534,19 @@ function PackageDetail({
 }) {
   const market = detail?.package ?? null;
   const packageId = market?.id ?? local?.packageId;
+  const [locationCopied, setLocationCopied] = useState(false);
+  const locationPrompt = local?.location ? buildLocationPrompt(local.name, local.location) : null;
+
+  const copyLocationPrompt = useCallback(async () => {
+    if (!locationPrompt) return;
+    try {
+      await copyText(locationPrompt);
+      setLocationCopied(true);
+      window.setTimeout(() => setLocationCopied(false), 1800);
+    } catch {
+      setLocationCopied(false);
+    }
+  }, [locationPrompt]);
   if (!packageId) return <MarketEmpty title="Package 信息不可用" detail="刷新后重试。" />;
   const release = market?.latestRelease ?? null;
   const revokedRelease = detail?.releases.find((item) => item.status === "revoked") ?? null;
@@ -619,6 +634,28 @@ function PackageDetail({
         </section>
       )}
 
+      {local?.location && (
+        <section className="market-detail-section">
+          <header><h3>本地位置</h3><FolderOpen size={15} aria-hidden="true" /></header>
+          <dl className="market-location-grid">
+            <LocationCell label="解决方案目录" value={local.location.packageRoot ?? local.location.sourcePath} />
+            <LocationCell label="源码目录" value={local.location.sourcePath} />
+            <LocationCell label="当前活动版本" value={local.location.activeRevisionPath} />
+            <LocationCell label="Package 数据" value={local.location.dataPath} />
+            <LocationCell label="运行日志" value={local.location.logsPath} />
+          </dl>
+          {locationPrompt && (
+            <div className="market-location-prompt">
+              <p>{locationPrompt}</p>
+              <button type="button" className="secondary-button" onClick={() => void copyLocationPrompt()}>
+                {locationCopied ? <Check size={15} /> : <Copy size={15} />}
+                {locationCopied ? "已复制" : "复制给 AI"}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
       {detail?.installPlan && (
         <section className="market-detail-section">
           <header><h3>版本与检验</h3><VerificationBadge status={detail.installPlan.verification.status} /></header>
@@ -676,6 +713,39 @@ function PackageDetail({
       )}
     </article>
   );
+}
+
+function LocationCell({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value ? <code className="market-path" title={value}>{value}</code> : "-"}</dd>
+    </div>
+  );
+}
+
+function buildLocationPrompt(name: string, location: NonNullable<LocalPackage["location"]>): string {
+  const solutionPath = location.packageRoot ?? location.sourcePath;
+  const sourcePath = location.sourcePath ?? solutionPath;
+  const activePath = location.activeRevisionPath ?? sourcePath;
+  return `请在本地解决方案目录“${solutionPath ?? "未提供"}”中查看“${name}”；需要修改时请使用源码目录“${sourcePath ?? "未提供"}”，当前运行版本位于“${activePath ?? "未提供"}”。`;
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "true");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand("copy");
+  input.remove();
+  if (!copied) throw new Error("copy_failed");
 }
 
 function MarketSources({ market, detail, offline }: { market: HubPackageDetail; detail: MarketPackageDetailPayload; offline: boolean }) {

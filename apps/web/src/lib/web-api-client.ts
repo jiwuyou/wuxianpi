@@ -16,6 +16,7 @@ import type {
   FunctionalAssistantSharingMode,
   InstalledPackageListResponse,
   LocalContribution,
+  LocalPackageLocation,
   LocalPackage,
   MarketCategory,
   MarketPackageDetailPayload,
@@ -283,6 +284,15 @@ export function normalizeLocalPackage(value: unknown, update?: unknown): LocalPa
   const errorMessage = optionalText(lastError.message);
   const stage = status === "merge_conflict" ? "merge" : status === "test_failed" ? "test" : status === "activation_failed" ? "activate" : "build";
   const gitStatus = stringArray(git.status);
+  const rawLocation = record(row.location);
+  const location = {
+    packageRoot: rawLocation.packageRoot === null ? null : optionalText(rawLocation.packageRoot) ?? null,
+    sourcePath: rawLocation.sourcePath === null ? null : optionalText(rawLocation.sourcePath) ?? null,
+    activeRevisionPath: rawLocation.activeRevisionPath === null ? null : optionalText(rawLocation.activeRevisionPath) ?? null,
+    dataPath: rawLocation.dataPath === null ? null : optionalText(rawLocation.dataPath) ?? null,
+    logsPath: rawLocation.logsPath === null ? null : optionalText(rawLocation.logsPath) ?? null,
+  } satisfies LocalPackageLocation;
+  const hasLocation = Object.values(location).some((path) => path !== null);
   return {
     packageId: text(row.packageId),
     name: text(row.name, text(row.packageId)),
@@ -300,6 +310,7 @@ export function normalizeLocalPackage(value: unknown, update?: unknown): LocalPa
     currentActivePreserved: status === "merge_conflict" || status === "build_failed" || status === "test_failed" || status === "activation_failed" ? true : undefined,
     ...(row.selfRelated === true ? { selfRelated: true } : {}),
     ...(optionalText(row.maintenanceRecordPath) ? { maintenanceRecordPath: optionalText(row.maintenanceRecordPath) } : {}),
+    ...(hasLocation ? { location } : {}),
     contributions,
     assistantBindings: bindings,
     failure: errorMessage ? {

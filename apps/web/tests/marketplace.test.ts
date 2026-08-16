@@ -179,6 +179,26 @@ describe("WuxianPi Marketplace", () => {
     expect(merged?.hasLocalChanges).toBe(true);
   });
 
+  it("normalizes local Package locations without inventing paths for older Runtimes", () => {
+    const located = normalizeLocalPackage({
+      packageId: "io.example",
+      name: "Example",
+      version: "1.0.0",
+      contributions: [],
+      location: {
+        packageRoot: "/home/user/.wuxianpi/package-manager/packages/io.example",
+        sourcePath: "/home/user/.wuxianpi/package-manager/packages/io.example/source",
+        activeRevisionPath: "/home/user/.wuxianpi/package-manager/packages/io.example/revisions/rev-1",
+        dataPath: "/home/user/.wuxianpi/package-manager/packages/io.example/data",
+        logsPath: "/home/user/.wuxianpi/package-manager/packages/io.example/logs",
+      },
+    });
+    const legacy = normalizeLocalPackage({ packageId: "io.legacy", name: "Legacy", version: "1.0.0", contributions: [] });
+    expect(located.location?.sourcePath).toContain("/io.example/source");
+    expect(located.location?.activeRevisionPath).toContain("/revisions/rev-1");
+    expect(legacy.location).toBeUndefined();
+  });
+
   it("preserves assistantSelectable and only offers Runtime-bindable contributions", () => {
     const pkg = normalizeLocalPackage({
       packageId: "io.example",
@@ -363,6 +383,9 @@ describe("WuxianPi Marketplace", () => {
     expect(source).toContain("共享经验");
     expect(source).toContain("独立经验");
     expect(source).toContain("提交本地修改");
+    expect(source).toContain("解决方案目录");
+    expect(source).toContain("复制给 AI");
+    expect(source).toContain("需要修改时请使用源码目录");
     expect(source).toContain("GitHub 原站");
     expect(source).toContain("Hub 暂时不可用；本地已安装 Package 仍可管理");
     expect(source).toContain("优先级数值越大越先尝试");

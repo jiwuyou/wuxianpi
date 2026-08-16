@@ -172,6 +172,14 @@ export interface FunctionalAssistantBinding {
   sharingMode: FunctionalAssistantSharingMode;
 }
 
+export interface LocalPackageLocation {
+  packageRoot: string | null;
+  sourcePath: string | null;
+  activeRevisionPath: string | null;
+  dataPath: string | null;
+  logsPath: string | null;
+}
+
 export interface LocalPackage {
   packageId: string;
   name: string;
@@ -189,6 +197,7 @@ export interface LocalPackage {
   currentActivePreserved?: boolean;
   selfRelated?: boolean;
   maintenanceRecordPath?: string | null;
+  location?: LocalPackageLocation;
   contributions: LocalContribution[];
   assistantBindings: PackageAssistantBinding[];
   failure?: {

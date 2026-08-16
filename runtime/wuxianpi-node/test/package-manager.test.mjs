@@ -29,6 +29,14 @@ test("Package Manager falls back from GitHub to a true mirror and fetches only t
   assert.equal(installed.sourceUrl, repo.path);
   assert.equal(installed.package.baseCommit, repo.commit);
   assert.equal(exec(repoSource(manager, plan.packageId), ["rev-parse", "HEAD"]), repo.commit);
+  const detail = await manager.detail(plan.packageId);
+  assert.deepEqual(detail.location, {
+    packageRoot: join(root, "manager", "packages", plan.packageId),
+    sourcePath: join(root, "manager", "packages", plan.packageId, "source"),
+    activeRevisionPath: join(root, "manager", "packages", plan.packageId, "revisions", detail.activeRevisionId),
+    dataPath: join(root, "manager", "packages", plan.packageId, "data"),
+    logsPath: join(root, "manager", "packages", plan.packageId, "logs"),
+  });
 });
 
 test("exact dependencies select an older immutable Hub release instead of the default plan", async () => {
