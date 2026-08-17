@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.jiwuyou.wuxianpi-hub-mirror-admin",
+  "name": "WuxianPi Hub 镜像管理助手",
+  "version": "1.0.0",
+  "summary": "通过 GitHub 身份安全管理 WuxianPi Hub 的 OpenHouse Git Mirror。",
+  "description": "提供 Hub Session 换取、管理员身份验证、镜像目标管理、同步控制和凭据清理流程。",
+  "license": "MIT",
+  "categories": ["capability", "skill"],
+  "requires": {
+    "hostCapabilities": [
+      { "id": "wuxianpi.package", "contractVersion": 1 },
+      { "id": "pi.skill", "contractVersion": 1 }
+    ],
+    "packages": []
+  },
+  "build": {
+    "mode": "none"
+  },
+  "artifacts": [],
+  "contributions": [
+    {
+      "id": "io.github.jiwuyou.wuxianpi-hub-mirror-admin/skill.mirror-admin",
+      "type": "pi.skill",
+      "name": "Hub Git Mirror 管理流程",
+      "description": "当用户需要管理 WuxianPi Hub 的 Git Mirror、同步公开 GitHub 仓库或查看镜像任务时，使用 GitHub Token 换取 Hub Session 并执行安全的管理员流程。",
+      "path": "skills/mirror-admin",
+      "assistantSelectable": true
+    }
+  ]
+}
