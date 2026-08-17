@@ -42,6 +42,7 @@ export async function prepareDistributionPackages({ lockPath, outputPath, fetchI
       const sourceRoot = join(packageRoot, "source");
       await mkdir(sourceRoot, { recursive: true });
       await fetchExactCommit(sourceRoot, plan.gitSources, plan.approvedCommit);
+      await normalizeRepository(sourceRoot);
       const manifestPath = safeRelativePath(sourceRoot, plan.manifestPath);
       const manifestBytes = await readFile(manifestPath);
       const manifestDigest = createHash("sha256").update(manifestBytes).digest("hex");
@@ -134,6 +135,18 @@ async function fetchExactCommit(sourceRoot, sources, commit) {
     }
   }
   throw new Error(`Unable to fetch ${commit}: ${failures.join("; ")}`);
+}
+
+async function normalizeRepository(sourceRoot) {
+  const gitRoot = join(sourceRoot, ".git");
+  await rm(join(gitRoot, "logs"), { recursive: true, force: true });
+  for (const name of ["FETCH_HEAD", "ORIG_HEAD", "index"]) {
+    await rm(join(gitRoot, name), { force: true });
+  }
+  await git(sourceRoot, ["read-tree", "HEAD"]);
+  if ((await git(sourceRoot, ["status", "--porcelain"])).trim()) {
+    throw new Error("Normalized distribution Package repository is dirty");
+  }
 }
 
 function validateLock(lock) {
