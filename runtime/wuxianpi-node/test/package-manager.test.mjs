@@ -150,6 +150,41 @@ test("artifact SHA mismatch rejects activation", async () => {
   assert.equal(detail.sourceStatus, "build_failed");
 });
 
+test("distribution reconcile installs a Package with a local verified Artifact", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-package-distribution-"));
+  const packageId = "io.test.distribution";
+  const bytes = Buffer.from("offline artifact\n");
+  const artifact = {
+    id: `${packageId}/artifact.offline`, fileName: "offline.txt", sha256: sha(bytes), sizeBytes: bytes.length,
+    archive: "none", platforms: [{ os: "any", arch: "any" }],
+    sources: [{ kind: "mirror", url: "https://example.invalid/offline.txt", priority: 100 }],
+  };
+  const manifest = {
+    ...basicManifest(packageId),
+    build: { mode: "artifact", artifactIds: [artifact.id] },
+    artifacts: [artifact],
+  };
+  const repo = await createRepository(join(root, "upstream"), manifest, { "skills/basic/SKILL.md": skill("distribution") });
+  const plan = installPlan(repo);
+  const distribution = join(root, "distribution");
+  const packageRoot = join(distribution, packageId);
+  await mkdir(join(packageRoot, "artifacts"), { recursive: true });
+  await cp(repo.path, join(packageRoot, "source"), { recursive: true });
+  await writeFile(join(packageRoot, "install-plan.json"), `${JSON.stringify(plan, null, 2)}\n`);
+  await writeFile(join(packageRoot, "artifacts", artifact.fileName), bytes);
+  await writeFile(join(distribution, "index.json"), `${JSON.stringify({
+    schemaVersion: 1, distributionId: "openhouse", packages: [{ packageId, initialBindings: [] }],
+  }, null, 2)}\n`);
+  const artifacts = new PackageArtifactManager({ fetchImpl: async () => { throw new Error("network must not be used"); } });
+  const manager = createManager(root, new FakeMarket({ [packageId]: plan }), { artifacts });
+  const result = await manager.reconcilePreinstalledPackages(distribution);
+  assert.equal(result.count, 1);
+  const detail = await manager.detail(packageId);
+  assert.equal(detail.sourceKind, "preinstalled");
+  assert.equal(detail.sourceStatus, "ready");
+  assert.equal(await readFile(join(detail.location.activeRevisionPath, artifact.fileName), "utf8"), bytes.toString("utf8"));
+});
+
 test("failed update build preserves the previous active revision", async () => {
   const root = await mkdtemp(join(tmpdir(), "wuxianpi-package-build-"));
   const packageId = "io.test.build";

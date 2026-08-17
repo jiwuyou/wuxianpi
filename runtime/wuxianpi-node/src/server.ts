@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse as HttpResponse } from "node:http";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { WebSocket, WebSocketServer } from "ws";
@@ -29,7 +30,6 @@ import { WebServices } from "./web-services.js";
 import { HubAuth } from "./hub-auth.js";
 import { DEFAULT_HUB_URL, MarketClient } from "./market-client.js";
 import { WuxianPiPackageManager } from "./package-manager.js";
-import type { InstallPlan, PreinstalledPackageIndex } from "./package-types.js";
 import {
   BROWSER_HOST_PROTOCOL,
   BROWSER_HOST_PROTOCOL_VERSION,
@@ -124,6 +124,9 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   const inFlightRequests = new Map<WebSocket, number>();
   let webServices: WebServices | undefined;
   const packageManagerRoot = options.packageManagerRoot ?? join(agentDir, "wuxianpi", "package-manager");
+  const preinstalledPackagesRoot = options.preinstalledPackagesRoot === false
+    ? false
+    : options.preinstalledPackagesRoot ?? join(homedir(), ".local", "share", "openhouseai", "distribution-packages");
   const hubUrl = options.hubUrl ?? process.env.WUXIANPI_HUB_URL ?? DEFAULT_HUB_URL;
   const hubAuth = new HubAuth({
     baseUrl: hubUrl,
@@ -211,6 +214,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     services: webServices,
     automationService,
     packageManager,
+    preinstalledPackagesRoot,
     packageRuntimeHost,
     hubAuth,
     trustedOrigins: [
@@ -787,25 +791,10 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
           if (entry.isDirectory()) await packageManager.ensureBundledPackage(join(builtinRoot, entry.name));
         }
       }
-      if (options.preinstalledPackagesRoot !== false) {
-        const preinstalledRoot = options.preinstalledPackagesRoot ?? join(dirname(fileURLToPath(import.meta.url)), "..", "preinstalled-packages");
+      if (preinstalledPackagesRoot !== false) {
+        const preinstalledRoot = preinstalledPackagesRoot;
         try {
-          const index = JSON.parse(await readFile(join(preinstalledRoot, "index.json"), "utf8")) as PreinstalledPackageIndex;
-          if (index.schemaVersion !== 1 || !Array.isArray(index.packages)) throw new Error("Unsupported preinstalled Package index");
-          for (const entry of index.packages) {
-            try {
-              if (!/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(entry.packageId)) throw new Error("Invalid preinstalled Package id");
-              const packageRoot = join(preinstalledRoot, entry.packageId);
-              const installPlan = JSON.parse(await readFile(join(packageRoot, "install-plan.json"), "utf8")) as InstallPlan;
-              if (installPlan.packageId !== entry.packageId) throw new Error("Preinstalled Package index and Install Plan do not match");
-              await packageManager.ensurePreinstalledPackage(join(packageRoot, "source"), installPlan, entry.initialBindings, index.distributionId);
-            } catch (error) {
-              diagnostics.record("package.preinstall.failed", {
-                packageId: entry?.packageId,
-                message: error instanceof Error ? error.message : String(error),
-              });
-            }
-          }
+          await packageManager.reconcilePreinstalledPackages(preinstalledRoot);
         } catch (error) {
           const missing = !!error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT";
           if (!missing) diagnostics.record("package.preinstall.index_failed", { message: error instanceof Error ? error.message : String(error) });

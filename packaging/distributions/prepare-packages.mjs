@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -18,10 +18,25 @@ export async function prepareDistributionPackages({ lockPath, outputPath, fetchI
   try {
     const index = { schemaVersion: 1, distributionId: lock.distributionId, packages: [] };
     for (const entry of lock.packages) {
-      const plan = await fetchInstallPlan(lock.hubUrl, entry, fetchImpl);
+      const plan = entry.gitSources
+        ? {
+          schemaVersion: 1,
+          packageId: entry.packageId,
+          releaseId: entry.releaseId,
+          version: entry.version,
+          approvedCommit: entry.approvedCommit,
+          manifestPath: "wuxianpi-package.json",
+          manifestDigest: entry.manifestDigest,
+          gitSources: entry.gitSources,
+          artifacts: entry.artifacts ?? [],
+          compatibility: entry.compatibility ?? { hostCapabilities: [], packages: [] },
+          verification: { status: "passed", checks: ["distribution-lock"] },
+          revoked: false,
+        }
+        : await fetchInstallPlan(lock.hubUrl, entry, fetchImpl);
       validatePlanAgainstLock(plan, entry);
-      if (plan.artifacts.length > 0 || plan.compatibility.packages.length > 0) {
-        throw new Error(`${entry.packageId}: preinstalled Package v1 does not support artifacts or Package dependencies`);
+      if (plan.compatibility.packages.length > 0) {
+        throw new Error(`${entry.packageId}: distribution Package cannot include Package dependencies`);
       }
       const packageRoot = join(staging, entry.packageId);
       const sourceRoot = join(packageRoot, "source");
@@ -33,9 +48,10 @@ export async function prepareDistributionPackages({ lockPath, outputPath, fetchI
       if (manifestDigest !== plan.manifestDigest) throw new Error(`${entry.packageId}: manifest digest mismatch`);
       const manifest = JSON.parse(manifestBytes.toString("utf8"));
       if (manifest.id !== entry.packageId || manifest.version !== plan.version) throw new Error(`${entry.packageId}: manifest identity mismatch`);
-      if (manifest.build?.mode !== "none" || manifest.artifacts?.length !== 0 || manifest.requires?.packages?.length !== 0) {
-        throw new Error(`${entry.packageId}: preinstalled Package must use build.mode=none without artifacts or Package dependencies`);
+      if (manifest.build?.mode === "local" || manifest.requires?.packages?.length !== 0) {
+        throw new Error(`${entry.packageId}: distribution Package cannot use local builds or Package dependencies`);
       }
+      await prepareArtifacts(packageRoot, plan.artifacts, fetchImpl, entry.packageId);
       const contributions = new Map((manifest.contributions ?? []).map((item) => [item.id, item]));
       for (const binding of entry.initialBindings) {
         for (const contributionId of binding.contributionIds) {
@@ -56,6 +72,34 @@ export async function prepareDistributionPackages({ lockPath, outputPath, fetchI
     throw error;
   }
   return output;
+}
+
+async function prepareArtifacts(packageRoot, artifacts, fetchImpl, packageId) {
+  const artifactRoot = join(packageRoot, "artifacts");
+  await mkdir(artifactRoot, { recursive: true });
+  for (const artifact of artifacts) {
+    if (!artifact?.fileName || basename(artifact.fileName) !== artifact.fileName ||
+        !/^[a-f0-9]{64}$/.test(artifact.sha256 ?? "") || !Number.isInteger(artifact.sizeBytes) || artifact.sizeBytes < 1) {
+      throw new Error(`${packageId}: invalid distribution Artifact ${artifact?.id ?? "(missing)"}`);
+    }
+    const failures = [];
+    let bytes;
+    for (const source of sortSources(artifact.sources ?? [])) {
+      try {
+        const response = await fetchImpl(source.url, { headers: { accept: "application/octet-stream" } });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const candidate = Buffer.from(await response.arrayBuffer());
+        if (candidate.length !== artifact.sizeBytes) throw new Error(`size ${candidate.length} != ${artifact.sizeBytes}`);
+        if (createHash("sha256").update(candidate).digest("hex") !== artifact.sha256) throw new Error("SHA-256 mismatch");
+        bytes = candidate;
+        break;
+      } catch (error) {
+        failures.push(`${source.url}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (!bytes) throw new Error(`${packageId}: unable to prepare Artifact ${artifact.id}: ${failures.join("; ")}`);
+    await writeFile(join(artifactRoot, artifact.fileName), bytes, { mode: 0o600 });
+  }
 }
 
 async function fetchInstallPlan(hubUrl, entry, fetchImpl) {

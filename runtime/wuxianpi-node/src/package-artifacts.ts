@@ -24,20 +24,27 @@ export class PackageArtifactManager {
     this.timeoutMs = options.timeoutMs ?? 10 * 60_000;
   }
 
-  async materialize(artifacts: PackageArtifact[], ids: string[], candidateRoot: string, cacheRoot: string, logRoot: string): Promise<void> {
+  async materialize(artifacts: PackageArtifact[], ids: string[], candidateRoot: string, cacheRoot: string, logRoot: string, localRoot?: string): Promise<void> {
     const byId = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
     for (const id of ids) {
       const artifact = byId.get(id);
       if (!artifact) throw new RequestError("artifact_not_found", `Package artifact is missing: ${id}`);
       const cached = join(cacheRoot, artifact.sha256, basename(artifact.fileName));
-      await this.ensureCached(artifact, cached);
+      await this.ensureCached(artifact, cached, localRoot);
       await this.unpack(artifact, cached, candidateRoot, logRoot);
     }
   }
 
-  private async ensureCached(artifact: PackageArtifact, path: string): Promise<void> {
+  private async ensureCached(artifact: PackageArtifact, path: string, localRoot?: string): Promise<void> {
     if (await matchesArtifact(path, artifact)) return;
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    if (localRoot) {
+      const localPath = join(localRoot, basename(artifact.fileName));
+      if (await matchesArtifact(localPath, artifact)) {
+        await writeFile(path, await readFile(localPath), { mode: 0o600 });
+        return;
+      }
+    }
     const failures: Array<{ url: string; message: string }> = [];
     for (const source of [...artifact.sources].sort((left, right) => {
       const kind = (left.kind === "github-release" ? 0 : 1) - (right.kind === "github-release" ? 0 : 1);

@@ -318,20 +318,25 @@ export class WuxianPiPackageManager {
     installPlan: InstallPlan,
     initialBindings: InitialAssistantBinding[],
     distributionId: string,
+    artifactRootValue?: string,
   ): Promise<Record<string, unknown>> {
     return this.mutate(() => this.runOperation("preinstall", installPlan.packageId, async (operationId) => {
       assertDistributionId(distributionId);
       validateInstallPlan(installPlan, installPlan.packageId);
       const existing = (await this.store.read()).packages[installPlan.packageId];
-      if (existing && !(existing.sourceKind === "preinstalled" && !existing.activeRevisionId)) {
-        if (existing.sourceKind === "preinstalled" && existing.activeRevisionId && !existing.preinstalled?.initialBindingsAppliedAt) {
+      if (existing && existing.sourceKind !== "preinstalled") {
+        const state = await this.store.read();
+        return this.localPackageView(state, requireInstalled(state, installPlan.packageId));
+      }
+      if (existing?.sourceKind === "preinstalled" && existing.activeRevisionId && existing.sourceStatus === "ready" && existing.baseCommit === installPlan.approvedCommit) {
+        if (!existing.preinstalled?.initialBindingsAppliedAt) {
           await this.applyInitialPreinstalledBindings(existing.packageId, initialBindings);
         }
         const state = await this.store.read();
         return this.localPackageView(state, requireInstalled(state, installPlan.packageId));
       }
-      if (installPlan.artifacts.length > 0 || installPlan.compatibility.packages.length > 0) {
-        throw new RequestError("invalid_preinstalled_package", "Preinstalled Package v1 does not support artifacts or Package dependencies");
+      if (installPlan.compatibility.packages.length > 0) {
+        throw new RequestError("invalid_preinstalled_package", "Preinstalled Package distribution cannot include Package dependencies");
       }
       const sourceRoot = resolve(sourceRootValue);
       const head = await this.git.revParse(sourceRoot, "HEAD").catch(() => "");
@@ -344,8 +349,8 @@ export class WuxianPiPackageManager {
       }
       const { manifest } = await readAndValidatePackageManifest(sourceRoot, installPlan);
       this.validateHostCapabilities(manifest);
-      if (manifest.build.mode !== "none") {
-        throw new RequestError("invalid_preinstalled_package", "Preinstalled Package v1 requires build.mode=none");
+      if (manifest.build.mode === "local") {
+        throw new RequestError("invalid_preinstalled_package", "Preinstalled Package distribution cannot use local builds");
       }
       validateInitialBindings(manifest, initialBindings);
       const paths = this.paths(manifest.id);
@@ -360,6 +365,7 @@ export class WuxianPiPackageManager {
       await readAndValidatePackageManifest(paths.source, installPlan);
       const now = new Date().toISOString();
       await this.store.update((state) => {
+        const previous = state.packages[manifest.id];
         state.packages[manifest.id] = {
           packageId: manifest.id,
           name: manifest.name,
@@ -369,26 +375,55 @@ export class WuxianPiPackageManager {
           baseCommit: installPlan.approvedCommit,
           localHead: copiedHead,
           targetCommit: installPlan.approvedCommit,
+          ...(previous?.activeRevisionId ? { activeRevisionId: previous.activeRevisionId } : {}),
+          ...(previous?.knownGoodRevisionId ? { knownGoodRevisionId: previous.knownGoodRevisionId } : {}),
           sourceStatus: "candidate_ready",
           manifest,
           installPlan,
-          enabledContributionIds: [],
-          installedAt: now,
+          enabledContributionIds: previous?.enabledContributionIds ?? [],
+          installedAt: previous?.installedAt ?? now,
           updatedAt: now,
           sourceKind: "preinstalled",
           preinstalled: {
             distributionId,
             seedReleaseId: installPlan.releaseId,
             seedCommit: installPlan.approvedCommit,
-            importedAt: now,
+            importedAt: previous?.preinstalled?.importedAt ?? now,
+            ...(previous?.preinstalled?.initialBindingsAppliedAt
+              ? { initialBindingsAppliedAt: previous.preinstalled.initialBindingsAppliedAt }
+              : {}),
           },
         };
       });
-      await this.activateSource(requireInstalled(await this.store.read(), manifest.id), installPlan, operationId, "Import preinstalled Package");
+      await this.activateSource(requireInstalled(await this.store.read(), manifest.id), installPlan, operationId, "Import preinstalled Package", artifactRootValue);
       await this.applyInitialPreinstalledBindings(manifest.id, initialBindings);
       const state = await this.store.read();
       return this.localPackageView(state, requireInstalled(state, manifest.id));
     }));
+  }
+
+  async reconcilePreinstalledPackages(preinstalledRoot: string, distributionId = "openhouse"): Promise<Record<string, unknown>> {
+    const index = JSON.parse(await readFile(join(preinstalledRoot, "index.json"), "utf8")) as {
+      schemaVersion?: number;
+      distributionId?: string;
+      packages?: Array<{ packageId: string; initialBindings?: InitialAssistantBinding[] }>;
+    };
+    if (index.schemaVersion !== 1 || index.distributionId !== distributionId || !Array.isArray(index.packages)) {
+      throw new RequestError("invalid_preinstalled_index", "Unsupported preinstalled Package index");
+    }
+    const results: Array<Record<string, unknown>> = [];
+    for (const entry of index.packages) {
+      if (!/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(entry.packageId)) {
+        throw new RequestError("invalid_preinstalled_package", `Invalid preinstalled Package id: ${entry.packageId}`);
+      }
+      const packageRoot = join(preinstalledRoot, entry.packageId);
+      const plan = JSON.parse(await readFile(join(packageRoot, "install-plan.json"), "utf8")) as InstallPlan;
+      if (plan.packageId !== entry.packageId) throw new RequestError("invalid_preinstalled_package", "Preinstalled Package index and Install Plan do not match");
+      results.push(await this.ensurePreinstalledPackage(
+        join(packageRoot, "source"), plan, entry.initialBindings ?? [], distributionId, join(packageRoot, "artifacts"),
+      ));
+    }
+    return { distributionId, count: results.length, packages: results };
   }
 
   install(packageId: string, releaseId?: string): Promise<Record<string, unknown>> {
@@ -788,7 +823,7 @@ export class WuxianPiPackageManager {
     }
   }
 
-  private async activateSource(installed: InstalledPackageState, plan: InstallPlan, operationId: string, intent: string): Promise<InstalledPackageState> {
+  private async activateSource(installed: InstalledPackageState, plan: InstallPlan, operationId: string, intent: string, artifactRoot?: string): Promise<InstalledPackageState> {
     const paths = this.paths(installed.packageId);
     const candidate = join(paths.candidates, operationId);
     const logs = join(paths.logs, operationId);
@@ -804,7 +839,7 @@ export class WuxianPiPackageManager {
       ({ manifest } = await readAndValidatePackageManifest(candidate, plan, false));
       const artifactIds = new Set<string>(manifest.build.mode === "artifact" ? manifest.build.artifactIds : []);
       for (const contribution of manifest.contributions) if (contribution.type === "artifact" && contribution.artifactId) artifactIds.add(contribution.artifactId);
-      await this.artifacts.materialize(plan.artifacts, [...artifactIds], candidate, paths.artifacts, logs);
+      await this.artifacts.materialize(plan.artifacts, [...artifactIds], candidate, paths.artifacts, logs, artifactRoot);
       await this.buildRunner.run(manifest, candidate, logs);
       await validatePackageManifest(candidate, manifest, plan);
     } catch (error) {

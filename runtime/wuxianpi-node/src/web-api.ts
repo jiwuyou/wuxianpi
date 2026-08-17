@@ -24,6 +24,7 @@ export interface WebApiOptions {
   automationService: AutomationTurnService;
   packageRuntimeHost: PackageRuntimeHostV1;
   packageManager?: WuxianPiPackageManager;
+  preinstalledPackagesRoot?: string | false;
   hubAuth?: HubAuth;
   trustedOrigins?: string[];
   browserHosts: BrowserHostRegistry;
@@ -512,6 +513,11 @@ export class WebApi {
     }
     if (path === "/packages" && method === "GET") {
       json(response, 200, { ok: true, data: { packages: await this.requirePackageManager().listInstalled() } }); return;
+    }
+    if (path === "/packages/reconcile-preinstalled" && method === "POST") {
+      const root = this.options.preinstalledPackagesRoot;
+      if (!root) throw new RequestError("preinstalled_packages_disabled", "Preinstalled Package reconciliation is disabled");
+      json(response, 200, { ok: true, data: await this.requirePackageManager().reconcilePreinstalledPackages(root) }); return;
     }
     if (path === "/packages" && method === "POST") {
       const body = await readJsonBody(request);

@@ -23,6 +23,52 @@
       "approvedCommit": "9ec6bd3a1c87faf4480659b627ed0b526b497f59",
       "manifestDigest": "ea72634fcc9ea9cee7c31fb5415ed77f3f43d812b2c5b78285c02eb35fe0e510",
       "initialBindings": []
+    },
+    {
+      "packageId": "io.openhouse.pi-mcp-adapter",
+      "releaseId": "rel_2.26.0-termux.2",
+      "version": "2.26.0-termux.2",
+      "approvedCommit": "4752c59bdc11ebbd9f45179fb0d5c576f7d9a2a9",
+      "manifestDigest": "9af0f38eb9551c69b73db95d707bf1009e2cb86c280ed00801f82e8da5f7b582",
+      "gitSources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/jiwuyou/pi-mcp-adapter.git",
+          "priority": 100
+        }
+      ],
+      "compatibility": {
+        "hostCapabilities": [
+          { "id": "wuxianpi.package", "contractVersion": 1 },
+          { "id": "wuxianpi.mcp", "contractVersion": 1 }
+        ],
+        "packages": []
+      },
+      "artifacts": [
+        {
+          "id": "io.openhouse.pi-mcp-adapter/artifact.node-modules-arm64",
+          "fileName": "pi-mcp-adapter-node-modules-arm64.tar.zst",
+          "sha256": "6e32a6aba56316cd608207dc3a865ff2244e4b26d21553a484b7b4c63e46f4d7",
+          "sizeBytes": 25948383,
+          "archive": "tar.zst",
+          "platforms": [{ "os": "android", "arch": "arm64" }],
+          "sources": [{
+            "kind": "github-release",
+            "url": "https://github.com/jiwuyou/pi-mcp-adapter/releases/download/v2.26.0-termux.2/pi-mcp-adapter-node-modules-arm64.tar.zst",
+            "priority": 100
+          }]
+        }
+      ],
+      "initialBindings": [
+        {
+          "assistantId": "wuxianpi",
+          "contributionIds": [
+            "io.openhouse.pi-mcp-adapter/extension.adapter",
+            "io.openhouse.pi-mcp-adapter/skill.mcp-scripting",
+            "io.openhouse.pi-mcp-adapter/mcp.cloudflare-api"
+          ]
+        }
+      ]
     }
   ]
 }
