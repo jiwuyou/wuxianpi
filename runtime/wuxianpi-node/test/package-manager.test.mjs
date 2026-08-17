@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +13,7 @@ import { MarketClient } from "../dist/market-client.js";
 import { validatePackageManifest } from "../dist/package-validator.js";
 import { SessionRegistry } from "../dist/session-registry.js";
 import { ServiceManagerClient } from "../dist/service-manager-client.js";
+import { createRuntimeServer } from "../dist/server.js";
 import { WebServices } from "../dist/web-services.js";
 
 test("Package Manager falls back from GitHub to a true mirror and fetches only the approved commit", async () => {
@@ -296,6 +297,109 @@ test("assistant bindings resolve one installed Package without copying dependenc
     assert.equal(tools.activeToolNames.includes("ops_package_tool"), true);
   } finally {
     await registry.dispose();
+  }
+});
+
+test("preinstalled Packages import offline once, preserve user bindings, and update through the market", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-preinstalled-package-"));
+  const packageId = "io.test.preinstalled";
+  const skillId = `${packageId}/skill.support`;
+  const extensionId = `${packageId}/extension.support`;
+  const assistantId = `${packageId}/assistant.support`;
+  const manifest = {
+    ...basicManifest(packageId),
+    categories: ["assistant", "skill"],
+    contributions: [
+      { id: skillId, type: "pi.skill", name: "Support", path: "skills/support", assistantSelectable: true },
+      { id: extensionId, type: "pi.extension", name: "Support tools", path: "extensions/support.js", assistantSelectable: true },
+      { id: assistantId, type: "wuxianpi.assistantTemplate", name: "Support assistant", manifest: "assistants/support.json", kind: "functional", defaultBindings: [extensionId, skillId] },
+    ],
+  };
+  const repo = await createRepository(join(root, "upstream"), manifest, {
+    "skills/support/SKILL.md": skill("support"),
+    "extensions/support.js": "export default function support() {}\n",
+    "assistants/support.json": `${JSON.stringify({ schemaVersion: 1, name: "Support assistant", description: "Support", greeting: "Hello", model: "inherit", thinkingLevel: "inherit" })}\n`,
+  });
+  const firstPlan = installPlan(repo);
+  const market = new FakeMarket({ [packageId]: firstPlan });
+  const manager = createManager(root, market);
+  const initialBindings = [{ assistantId: "wuxianpi", contributionIds: [assistantId] }];
+
+  await manager.ensurePreinstalledPackage(repo.path, firstPlan, initialBindings, "openhouse");
+  let detail = await manager.detail(packageId);
+  assert.equal(detail.sourceKind, "preinstalled");
+  assert.equal(detail.preinstalled.distributionId, "openhouse");
+  assert.equal(detail.preinstalled.seedReleaseId, firstPlan.releaseId);
+  assert.ok(detail.preinstalled.initialBindingsAppliedAt);
+  assert.equal(detail.location.packageRoot, join(manager.rootDir, "packages", packageId));
+  const resources = await manager.resolveAssistantResources("wuxianpi");
+  assert.equal(resources.extensionPaths.length, 1);
+  assert.equal(resources.skillPaths.length, 1);
+  assert.deepEqual(resources.functionalAssistants.map((item) => item.functionId), [assistantId]);
+  const unrelated = await manager.resolveAssistantResources("other");
+  assert.deepEqual(unrelated.extensionPaths, []);
+  assert.deepEqual(unrelated.skillPaths, []);
+  await assert.rejects(() => manager.uninstall(packageId), (error) => error.code === "package_managed_by_distribution");
+
+  await manager.setAssistantBinding("wuxianpi", { enabledContributionIds: [], experienceSpaces: {} });
+  const restarted = createManager(root, market);
+  await restarted.ensurePreinstalledPackage(repo.path, firstPlan, initialBindings, "openhouse");
+  assert.deepEqual((await restarted.assistantBinding("wuxianpi")).enabledContributionIds, []);
+
+  const badDigest = { ...firstPlan, manifestDigest: "0".repeat(64) };
+  await assert.rejects(
+    () => createManager(join(root, "bad-digest"), market).ensurePreinstalledPackage(repo.path, badDigest, initialBindings, "openhouse"),
+    (error) => error.code === "manifest_digest_mismatch",
+  );
+
+  const secondManifest = { ...manifest, version: "2.0.0" };
+  await writeFile(join(repo.path, "wuxianpi-package.json"), `${JSON.stringify(secondManifest, null, 2)}\n`);
+  const second = await commitRepository(repo.path, "Version 2");
+  const secondPlan = installPlan({ ...repo, ...second });
+  market.plans[packageId] = secondPlan;
+  await assert.rejects(
+    () => createManager(join(root, "bad-head"), market).ensurePreinstalledPackage(repo.path, firstPlan, initialBindings, "openhouse"),
+    (error) => error.code === "preinstalled_commit_mismatch",
+  );
+  await restarted.update(packageId);
+  detail = await restarted.detail(packageId);
+  assert.equal(detail.version, "2.0.0");
+  assert.equal(detail.sourceKind, "preinstalled");
+  assert.equal(detail.preinstalled.seedCommit, firstPlan.approvedCommit);
+
+  const marketRoot = join(root, "market-installed");
+  const ordinary = createManager(marketRoot, market);
+  await ordinary.install(packageId);
+  await ordinary.ensurePreinstalledPackage(repo.path, secondPlan, initialBindings, "openhouse");
+  assert.equal((await ordinary.detail(packageId)).sourceKind, "market");
+  assert.deepEqual((await ordinary.assistantBinding("wuxianpi")).enabledContributionIds, []);
+
+  const preinstalledRoot = join(root, "runtime-preinstalled");
+  await mkdir(join(preinstalledRoot, packageId), { recursive: true });
+  await cp(repo.path, join(preinstalledRoot, packageId, "source"), { recursive: true });
+  await writeFile(join(preinstalledRoot, packageId, "install-plan.json"), `${JSON.stringify(secondPlan, null, 2)}\n`);
+  await writeFile(join(preinstalledRoot, "index.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    distributionId: "openhouse",
+    packages: [{ packageId, initialBindings }],
+  }, null, 2)}\n`);
+  const server = createRuntimeServer({
+    host: "127.0.0.1",
+    port: 0,
+    agentDir: join(root, "runtime-agent"),
+    packageManagerRoot: join(root, "runtime-manager"),
+    builtinPackagesRoot: false,
+    preinstalledPackagesRoot: preinstalledRoot,
+    idleTimeoutMs: 0,
+  });
+  try {
+    const address = await server.start();
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/web/v1/packages`);
+    const body = await response.json();
+    assert.equal(response.ok, true, JSON.stringify(body));
+    assert.equal(body.data.packages.some((item) => item.packageId === packageId && item.sourceKind === "preinstalled"), true);
+  } finally {
+    await server.stop().catch(() => undefined);
   }
 });
 

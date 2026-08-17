@@ -29,6 +29,7 @@ test("local Package API proxies Hub discovery and exposes installed state", asyn
     host: "127.0.0.1", port: 0, agentDir: join(root, "agent"), idleTimeoutMs: 0,
     hubUrl: `http://127.0.0.1:${hubAddress.port}`,
     packageManagerRoot: join(root, "packages"), maintenanceRoot: join(root, "maintenance"),
+    builtinPackagesRoot: false, preinstalledPackagesRoot: false,
   });
   try {
     const address = await server.start();

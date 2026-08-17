@@ -89,6 +89,9 @@ NODE
 mkdir -p "$runtime_release" "$base_release"
 cp -a "$runtime_build/package.json" "$runtime_build/package-lock.json" \
   "$runtime_build/dist" "$runtime_build/builtin-packages" "$runtime_release/"
+node "$repo_dir/packaging/distributions/prepare-packages.mjs" \
+  --lock "$repo_dir/packaging/distributions/openhouse/packages.lock.json" \
+  --output "$runtime_release/preinstalled-packages"
 cp -a "$runtime_build/node_modules" "$base_release/"
 
 mkdir -p "$output_dir"

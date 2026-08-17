@@ -285,6 +285,12 @@ export function normalizeLocalPackage(value: unknown, update?: unknown): LocalPa
   const stage = status === "merge_conflict" ? "merge" : status === "test_failed" ? "test" : status === "activation_failed" ? "activate" : "build";
   const gitStatus = stringArray(git.status);
   const rawLocation = record(row.location);
+  const sourceKind = row.sourceKind === "bundled" || row.sourceKind === "preinstalled" ? row.sourceKind : "market";
+  const rawPreinstalled = record(row.preinstalled);
+  const distributionId = optionalText(rawPreinstalled.distributionId);
+  const seedReleaseId = optionalText(rawPreinstalled.seedReleaseId);
+  const seedCommit = optionalText(rawPreinstalled.seedCommit);
+  const importedAt = optionalText(rawPreinstalled.importedAt);
   const location = {
     packageRoot: rawLocation.packageRoot === null ? null : optionalText(rawLocation.packageRoot) ?? null,
     sourcePath: rawLocation.sourcePath === null ? null : optionalText(rawLocation.sourcePath) ?? null,
@@ -321,6 +327,14 @@ export function normalizeLocalPackage(value: unknown, update?: unknown): LocalPa
     } : null,
     ...(optionalText(row.installedAt) ? { installedAt: optionalText(row.installedAt) } : {}),
     ...(optionalText(row.updatedAt) ? { updatedAt: optionalText(row.updatedAt) } : {}),
+    sourceKind,
+    ...(sourceKind === "preinstalled" && distributionId && seedReleaseId && seedCommit && importedAt ? { preinstalled: {
+      distributionId,
+      seedReleaseId,
+      seedCommit,
+      importedAt,
+      ...(optionalText(rawPreinstalled.initialBindingsAppliedAt) ? { initialBindingsAppliedAt: optionalText(rawPreinstalled.initialBindingsAppliedAt) } : {}),
+    } } : {}),
   };
 }
 

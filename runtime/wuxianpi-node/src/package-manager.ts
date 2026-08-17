@@ -6,7 +6,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { FunctionalAssistantStorage } from "./functional-assistant-storage.js";
 import { createFunctionalAssistantStateTool } from "./functional-assistant-tool.js";
 import { StandardMcpConfigStore, type McpServerConfig } from "./mcp-config.js";
-import { MarketClient } from "./market-client.js";
+import { MarketClient, validateInstallPlan } from "./market-client.js";
 import { createMarketplaceTools } from "./marketplace-tool.js";
 import { PackageArtifactManager } from "./package-artifacts.js";
 import { PackageBuildRunner } from "./package-build.js";
@@ -16,7 +16,7 @@ import { AtomicPackageStateStore, PackageOperationLog, removeIfExists, writeAtom
 import type {
   ActiveContributionRecord, AssistantPackageBinding, InstallPlan, InstalledPackageState,
   FunctionalAssistantBindingSettings, FunctionalAssistantSharingMode, PackageContribution, PackageExecutionContext,
-  PackageManagerState, PackageOperationEvent, ResolvedAssistantPackageResources, ResolvedFunctionalAssistant,
+  InitialAssistantBinding, PackageManagerState, PackageOperationEvent, ResolvedAssistantPackageResources, ResolvedFunctionalAssistant,
   WuxianPiPackageManifest,
 } from "./package-types.js";
 import {
@@ -313,6 +313,84 @@ export class WuxianPiPackageManager {
     return this.localPackageView(state, requireInstalled(state, manifest.id));
   }
 
+  ensurePreinstalledPackage(
+    sourceRootValue: string,
+    installPlan: InstallPlan,
+    initialBindings: InitialAssistantBinding[],
+    distributionId: string,
+  ): Promise<Record<string, unknown>> {
+    return this.mutate(() => this.runOperation("preinstall", installPlan.packageId, async (operationId) => {
+      assertDistributionId(distributionId);
+      validateInstallPlan(installPlan, installPlan.packageId);
+      const existing = (await this.store.read()).packages[installPlan.packageId];
+      if (existing && !(existing.sourceKind === "preinstalled" && !existing.activeRevisionId)) {
+        if (existing.sourceKind === "preinstalled" && existing.activeRevisionId && !existing.preinstalled?.initialBindingsAppliedAt) {
+          await this.applyInitialPreinstalledBindings(existing.packageId, initialBindings);
+        }
+        const state = await this.store.read();
+        return this.localPackageView(state, requireInstalled(state, installPlan.packageId));
+      }
+      if (installPlan.artifacts.length > 0 || installPlan.compatibility.packages.length > 0) {
+        throw new RequestError("invalid_preinstalled_package", "Preinstalled Package v1 does not support artifacts or Package dependencies");
+      }
+      const sourceRoot = resolve(sourceRootValue);
+      const head = await this.git.revParse(sourceRoot, "HEAD").catch(() => "");
+      if (head !== installPlan.approvedCommit) {
+        throw new RequestError("preinstalled_commit_mismatch", `Preinstalled Package HEAD does not match ${installPlan.approvedCommit}`);
+      }
+      const dirty = await this.git.status(sourceRoot).catch(() => ["invalid Git worktree"]);
+      if (dirty.length > 0) {
+        throw new RequestError("preinstalled_source_dirty", "Preinstalled Package source must be a clean Git worktree", { status: dirty });
+      }
+      const { manifest } = await readAndValidatePackageManifest(sourceRoot, installPlan);
+      this.validateHostCapabilities(manifest);
+      if (manifest.build.mode !== "none") {
+        throw new RequestError("invalid_preinstalled_package", "Preinstalled Package v1 requires build.mode=none");
+      }
+      validateInitialBindings(manifest, initialBindings);
+      const paths = this.paths(manifest.id);
+      await removeIfExists(paths.source);
+      await mkdir(dirname(paths.source), { recursive: true, mode: 0o700 });
+      await cp(sourceRoot, paths.source, { recursive: true, force: true });
+      const copiedHead = await this.git.revParse(paths.source, "HEAD").catch(() => "");
+      if (copiedHead !== installPlan.approvedCommit || (await this.git.status(paths.source)).length > 0) {
+        await removeIfExists(paths.source);
+        throw new RequestError("preinstalled_copy_invalid", "Copied preinstalled Package did not preserve its verified Git state");
+      }
+      await readAndValidatePackageManifest(paths.source, installPlan);
+      const now = new Date().toISOString();
+      await this.store.update((state) => {
+        state.packages[manifest.id] = {
+          packageId: manifest.id,
+          name: manifest.name,
+          version: manifest.version,
+          sourcePath: paths.source,
+          dataPath: paths.data,
+          baseCommit: installPlan.approvedCommit,
+          localHead: copiedHead,
+          targetCommit: installPlan.approvedCommit,
+          sourceStatus: "candidate_ready",
+          manifest,
+          installPlan,
+          enabledContributionIds: [],
+          installedAt: now,
+          updatedAt: now,
+          sourceKind: "preinstalled",
+          preinstalled: {
+            distributionId,
+            seedReleaseId: installPlan.releaseId,
+            seedCommit: installPlan.approvedCommit,
+            importedAt: now,
+          },
+        };
+      });
+      await this.activateSource(requireInstalled(await this.store.read(), manifest.id), installPlan, operationId, "Import preinstalled Package");
+      await this.applyInitialPreinstalledBindings(manifest.id, initialBindings);
+      const state = await this.store.read();
+      return this.localPackageView(state, requireInstalled(state, manifest.id));
+    }));
+  }
+
   install(packageId: string, releaseId?: string): Promise<Record<string, unknown>> {
     return this.mutate(() => this.runOperation("install", packageId, (operationId) => this.installInternal(packageId, releaseId, operationId, new Set())));
   }
@@ -348,6 +426,7 @@ export class WuxianPiPackageManager {
       const current = await this.store.read();
       const installed = requireInstalled(current, packageId);
       if (installed.sourceKind === "bundled") throw new RequestError("package_managed_by_runtime", "Bundled Packages can be disabled but not uninstalled");
+      if (installed.sourceKind === "preinstalled") throw new RequestError("package_managed_by_distribution", "Preinstalled Packages can be disabled but not uninstalled");
       const functionalAssistantIds = Object.values(current.contributions)
         .filter((record) => record.packageId === packageId && isFunctionalAssistant(record.contribution))
         .map((record) => record.id);
@@ -796,6 +875,42 @@ export class WuxianPiPackageManager {
     }
   }
 
+  private async applyInitialPreinstalledBindings(packageId: string, requested: InitialAssistantBinding[]): Promise<void> {
+    const appliedAt = new Date().toISOString();
+    await this.store.update((state) => {
+      const installed = requireInstalled(state, packageId);
+      if (installed.sourceKind !== "preinstalled" || !installed.preinstalled || installed.preinstalled.initialBindingsAppliedAt) return;
+      validateInitialBindings(installed.manifest, requested);
+      for (const requestedBinding of requested) {
+        assertAssistantId(requestedBinding.assistantId);
+        const current = normalizeAssistantBinding(state, requestedBinding.assistantId, state.assistantBindings[requestedBinding.assistantId]);
+        const ids = [...new Set([...current.enabledContributionIds, ...requestedBinding.contributionIds])];
+        for (const id of requestedBinding.contributionIds) {
+          const record = state.contributions[id];
+          if (!record?.enabled || record.packageId !== packageId) {
+            throw new RequestError("preinstalled_binding_unavailable", `Preinstalled contribution is unavailable: ${id}`);
+          }
+          if (record.contribution.assistantSelectable !== true && !isFunctionalAssistant(record.contribution)) {
+            throw new RequestError("preinstalled_binding_not_selectable", `Preinstalled contribution cannot be bound to an assistant: ${id}`);
+          }
+        }
+        const selection = resolveAssistantSelection(state, {
+          ...current,
+          enabledContributionIds: ids,
+        });
+        state.assistantBindings[requestedBinding.assistantId] = {
+          ...current,
+          enabledContributionIds: ids,
+          functionalAssistants: normalizeFunctionalAssistantSettings(selection.functionalAssistants, current.functionalAssistants, false),
+          updatedAt: appliedAt,
+        };
+      }
+      installed.preinstalled.initialBindingsAppliedAt = appliedAt;
+      installed.updatedAt = appliedAt;
+    });
+    await this.writeActiveRegistry(await this.store.read());
+  }
+
   private validateActivation(state: PackageManagerState): void {
     const ids = new Set<string>();
     for (const record of Object.values(state.contributions)) {
@@ -1115,6 +1230,7 @@ function packageSummary(item: InstalledPackageState): Record<string, unknown> {
     updatedAt: item.updatedAt,
     lastError: item.lastError ?? null,
     sourceKind: item.sourceKind ?? "market",
+    ...(item.preinstalled ? { preinstalled: item.preinstalled } : {}),
   };
 }
 
@@ -1275,6 +1391,31 @@ function assertPackageId(id: string): void {
 
 function assertAssistantId(id: string): void {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new RequestError("invalid_assistant_id", `Invalid assistant id: ${id}`);
+}
+
+function assertDistributionId(id: string): void {
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new RequestError("invalid_distribution_id", `Invalid distribution id: ${id}`);
+}
+
+function validateInitialBindings(manifest: WuxianPiPackageManifest, bindings: InitialAssistantBinding[]): void {
+  if (!Array.isArray(bindings)) throw new RequestError("invalid_preinstalled_bindings", "initialBindings must be an array");
+  const contributions = new Map(manifest.contributions.map((item) => [item.id, item]));
+  const assistantIds = new Set<string>();
+  for (const binding of bindings) {
+    assertAssistantId(binding.assistantId);
+    if (assistantIds.has(binding.assistantId)) throw new RequestError("invalid_preinstalled_bindings", `Duplicate initial binding for ${binding.assistantId}`);
+    assistantIds.add(binding.assistantId);
+    if (!Array.isArray(binding.contributionIds) || binding.contributionIds.length === 0) {
+      throw new RequestError("invalid_preinstalled_bindings", `Initial binding for ${binding.assistantId} has no contributions`);
+    }
+    for (const id of binding.contributionIds) {
+      const contribution = contributions.get(id);
+      if (!contribution) throw new RequestError("invalid_preinstalled_bindings", `Initial binding references a missing contribution: ${id}`);
+      if (contribution.assistantSelectable !== true && !isFunctionalAssistant(contribution)) {
+        throw new RequestError("invalid_preinstalled_bindings", `Initial binding references a non-selectable contribution: ${id}`);
+      }
+    }
+  }
 }
 
 function assertExperienceSpaceId(id: string): void {

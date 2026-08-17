@@ -14,6 +14,8 @@ import type {
   WebExtensionSummary,
 } from "@/lib/wuxianpi/contracts";
 import { WUXIANPI_SCHEMA_VERSION } from "@/lib/wuxianpi/contracts";
+import type { LocalPackage } from "@/lib/package-market";
+import { webApi } from "@/lib/web-api-client";
 import {
   acquirePackageSingleton,
   getPermissionState,
@@ -85,6 +87,7 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
   const [openPanel, setOpenPanel] = useState<{ extension: WebExtensionSummary; title: string; entry: string } | null>(null);
   const [singletons, setSingletons] = useState<PackageSingletonStatus[]>([]);
   const [singletonAction, setSingletonAction] = useState<string | null>(null);
+  const [preinstalledPackages, setPreinstalledPackages] = useState<LocalPackage[]>([]);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => { if (config) setDraft(config); }, [config]);
@@ -96,6 +99,11 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
     void listPackageSingletons().then(setSingletons).catch((reason) => setActionError(reason instanceof Error ? reason.message : String(reason)));
   }, []);
   useEffect(reloadSingletons, [reloadSingletons]);
+  useEffect(() => {
+    void webApi.installedPackages()
+      .then((result) => setPreinstalledPackages(result.packages.filter((item) => item.sourceKind === "preinstalled")))
+      .catch(() => setPreinstalledPackages([]));
+  }, [catalog]);
   useEffect(() => () => { previewAudioRef.current?.pause(); if ("speechSynthesis" in window) speechSynthesis.cancel(); }, []);
 
   const grouped = useMemo(() => {
@@ -207,7 +215,7 @@ export function CapabilityCenter({ catalog, config, extensions, loading, error, 
         <section className="settings-card"><header><div><strong>默认思考等级</strong><small>助手选择“继承”时使用</small></div></header><select className="wide-select" value={draft.defaults.thinkingLevel ?? ""} onChange={(event) => setDraft((current) => ({ ...current, defaults: { ...current.defaults, thinkingLevel: event.target.value || undefined } }))}><option value="">跟随 Pi</option><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option></select></section>
       </div>}
 
-      {!loading && tab === "packages" && <><SkillsConfig cwd={hostAssistantPath} onChanged={onReload} /><section className="settings-card"><header><div><strong>已发现 Package 能力</strong><small>工具、MCP、浏览器、记忆和增强 Web UI 都由 Pi package 提供。</small></div></header><div className="default-picker-grid">{(catalog?.capabilities ?? []).filter((item) => item.source !== "pi-builtin").map((item) => <div key={item.id} className={item.status !== "available" ? "unavailable" : ""}><span><strong>{item.name}</strong><small>{labelForSource(item.source)} · {item.description ?? item.id}</small></span><em className={`status-pill ${item.status === "available" ? "success" : "warning"}`}>{item.status}</em></div>)}</div></section></>}
+      {!loading && tab === "packages" && <><SkillsConfig cwd={hostAssistantPath} onChanged={onReload} />{preinstalledPackages.length > 0 && <section className="settings-card"><header><div><strong>随 OpenHouse 提供</strong><small>官方预装，可更新、可停用，并由 Package Manager 独立管理。</small></div></header><div className="default-picker-grid">{preinstalledPackages.map((item) => <div key={item.packageId}><span><strong>{item.name}</strong><small>v{item.version} · {item.packageId}</small></span><em className="status-pill success">官方预装</em></div>)}</div></section>}<section className="settings-card"><header><div><strong>已发现 Package 能力</strong><small>工具、MCP、浏览器、记忆和增强 Web UI 都由 Pi package 提供。</small></div></header><div className="default-picker-grid">{(catalog?.capabilities ?? []).filter((item) => item.source !== "pi-builtin").map((item) => <div key={item.id} className={item.status !== "available" ? "unavailable" : ""}><span><strong>{item.name}</strong><small>{labelForSource(item.source)} · {item.description ?? item.id}</small></span><em className={`status-pill ${item.status === "available" ? "success" : "warning"}`}>{item.status}</em></div>)}</div></section></>}
 
       {!loading && tab === "mcp" && <div className="settings-stack">
         <section className="settings-card"><header><div><strong>标准 MCP 配置</strong><small>服务定义与 Pi CLI 共用；助手只保存所选服务 ID。</small></div><span className={`status-pill ${mcpAdapterInstalled ? "success" : "warning"}`}>{mcpAdapterInstalled ? "adapter 已安装" : "需安装 pi-mcp-adapter"}</span></header></section>

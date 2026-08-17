@@ -499,6 +499,8 @@ function InstalledPackageRow({ item, selected, onOpen }: { item: LocalPackage; s
         <small>v{item.version} · {shortCommit(item.activeCommit)}</small>
         <span className="market-chip-row">
           <em className={failed ? "danger" : "installed"}>{localStatusLabel(item.status)}</em>
+          {item.sourceKind === "preinstalled" && <em className="installed">随 OpenHouse 提供</em>}
+          {item.sourceKind === "bundled" && <em>Runtime 内置</em>}
           {item.hasLocalChanges && <em>有本地修改</em>}
         </span>
       </span>
@@ -582,13 +584,20 @@ function PackageDetail({
               助手绑定
             </button>
           )}
-          {local && (
+          {local && local.sourceKind === "market" && (
             <button type="button" className="icon-button danger" disabled={isBusy} onClick={() => onUninstall(packageId)} aria-label="卸载 Package" title="卸载">
               <Trash2 size={17} />
             </button>
           )}
         </div>
       </header>
+
+      {local?.sourceKind === "preinstalled" && (
+        <div className="market-banner">
+          <ShieldCheck size={18} />
+          <span>官方 · 随 OpenHouse 提供。可以更新或停用，不随 Runtime 内置代码更新。</span>
+        </div>
+      )}
 
       {revoked && (
         <div className="market-banner error">

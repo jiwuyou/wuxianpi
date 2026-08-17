@@ -164,7 +164,7 @@ export class MarketClient {
   }
 }
 
-function validateInstallPlan(plan: InstallPlan, requestedPackageId: string): void {
+export function validateInstallPlan(plan: InstallPlan, requestedPackageId: string): void {
   if (!plan || plan.schemaVersion !== 1 || plan.packageId !== requestedPackageId) {
     throw new RequestError("invalid_install_plan", "Install plan identity is invalid");
   }

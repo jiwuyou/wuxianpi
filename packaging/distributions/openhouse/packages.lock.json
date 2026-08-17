@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "distributionId": "openhouse",
+  "hubUrl": "https://wuxianpihub.webefficacy.com",
+  "packages": [
+    {
+      "packageId": "io.github.jiwuyou.github-bug-reporter",
+      "releaseId": "rel_49ba251cdb5644929c7f87b3ebe17554",
+      "approvedCommit": "bb8983c1703853b5d4b0046d10fea75d4521e514",
+      "manifestDigest": "b99b12b4c174eb98f7abbea612ca5f8dfd3b7ca7a6a509e3097fdbd657dea5b2",
+      "initialBindings": [
+        {
+          "assistantId": "wuxianpi",
+          "contributionIds": [
+            "io.github.jiwuyou.github-bug-reporter/assistant.bug-reporter"
+          ]
+        }
+      ]
+    },
+    {
+      "packageId": "io.openhouse.small-app-guide",
+      "releaseId": "rel_a424c7f31ffc47cd988c143c95a3ee32",
+      "approvedCommit": "9ec6bd3a1c87faf4480659b627ed0b526b497f59",
+      "manifestDigest": "ea72634fcc9ea9cee7c31fb5415ed77f3f43d812b2c5b78285c02eb35fe0e510",
+      "initialBindings": []
+    }
+  ]
+}

@@ -10,6 +10,10 @@ wuxianpi-install-arm64-<version>.tar.zst
 runtime-manifest.json
 ```
 
+The official OpenHouse Runtime layer also carries the exact, Hub-approved Git
+worktrees listed in `packaging/distributions/openhouse/packages.lock.json`.
+They are imported as updateable `preinstalled` Packages on first Runtime start.
+
 Expected prepared input layouts:
 
 - Web: static build with `index.html` at its root.

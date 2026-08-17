@@ -178,7 +178,30 @@ export interface InstalledPackageState {
   installedAt: string;
   updatedAt: string;
   lastError?: { code: string; message: string; logPath?: string };
-  sourceKind?: "market" | "bundled";
+  sourceKind?: "market" | "bundled" | "preinstalled";
+  preinstalled?: PreinstalledPackageReceipt;
+}
+
+export interface InitialAssistantBinding {
+  assistantId: string;
+  contributionIds: string[];
+}
+
+export interface PreinstalledPackageReceipt {
+  distributionId: string;
+  seedReleaseId: string;
+  seedCommit: string;
+  importedAt: string;
+  initialBindingsAppliedAt?: string;
+}
+
+export interface PreinstalledPackageIndex {
+  schemaVersion: 1;
+  distributionId: string;
+  packages: Array<{
+    packageId: string;
+    initialBindings: InitialAssistantBinding[];
+  }>;
 }
 
 export interface ActiveContributionRecord {

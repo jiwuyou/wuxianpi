@@ -199,6 +199,24 @@ describe("WuxianPi Marketplace", () => {
     expect(legacy.location).toBeUndefined();
   });
 
+  it("preserves official preinstalled Package provenance", () => {
+    const pkg = normalizeLocalPackage({
+      packageId: "io.openhouse.guide",
+      name: "Guide",
+      version: "1.0.0",
+      sourceKind: "preinstalled",
+      contributions: [],
+      preinstalled: {
+        distributionId: "openhouse",
+        seedReleaseId: "rel_1",
+        seedCommit: "a".repeat(40),
+        importedAt: "2026-08-17T00:00:00Z",
+      },
+    });
+    expect(pkg.sourceKind).toBe("preinstalled");
+    expect(pkg.preinstalled?.distributionId).toBe("openhouse");
+  });
+
   it("preserves assistantSelectable and only offers Runtime-bindable contributions", () => {
     const pkg = normalizeLocalPackage({
       packageId: "io.example",

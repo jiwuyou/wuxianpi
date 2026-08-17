@@ -29,6 +29,7 @@ import { WebServices } from "./web-services.js";
 import { HubAuth } from "./hub-auth.js";
 import { DEFAULT_HUB_URL, MarketClient } from "./market-client.js";
 import { WuxianPiPackageManager } from "./package-manager.js";
+import type { InstallPlan, PreinstalledPackageIndex } from "./package-types.js";
 import {
   BROWSER_HOST_PROTOCOL,
   BROWSER_HOST_PROTOCOL_VERSION,
@@ -64,6 +65,7 @@ export interface RuntimeServerOptions {
   automationDatabasePath?: string;
   automationOwnerTokenPath?: string;
   builtinPackagesRoot?: string | false;
+  preinstalledPackagesRoot?: string | false;
   runtimeId?: string;
   runtimeUrl?: string;
   singletonGuardDirectory?: string;
@@ -783,6 +785,30 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         const builtinRoot = options.builtinPackagesRoot ?? join(dirname(fileURLToPath(import.meta.url)), "..", "builtin-packages");
         for (const entry of await readdir(builtinRoot, { withFileTypes: true }).catch(() => [])) {
           if (entry.isDirectory()) await packageManager.ensureBundledPackage(join(builtinRoot, entry.name));
+        }
+      }
+      if (options.preinstalledPackagesRoot !== false) {
+        const preinstalledRoot = options.preinstalledPackagesRoot ?? join(dirname(fileURLToPath(import.meta.url)), "..", "preinstalled-packages");
+        try {
+          const index = JSON.parse(await readFile(join(preinstalledRoot, "index.json"), "utf8")) as PreinstalledPackageIndex;
+          if (index.schemaVersion !== 1 || !Array.isArray(index.packages)) throw new Error("Unsupported preinstalled Package index");
+          for (const entry of index.packages) {
+            try {
+              if (!/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(entry.packageId)) throw new Error("Invalid preinstalled Package id");
+              const packageRoot = join(preinstalledRoot, entry.packageId);
+              const installPlan = JSON.parse(await readFile(join(packageRoot, "install-plan.json"), "utf8")) as InstallPlan;
+              if (installPlan.packageId !== entry.packageId) throw new Error("Preinstalled Package index and Install Plan do not match");
+              await packageManager.ensurePreinstalledPackage(join(packageRoot, "source"), installPlan, entry.initialBindings, index.distributionId);
+            } catch (error) {
+              diagnostics.record("package.preinstall.failed", {
+                packageId: entry?.packageId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+        } catch (error) {
+          const missing = !!error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT";
+          if (!missing) diagnostics.record("package.preinstall.index_failed", { message: error instanceof Error ? error.message : String(error) });
         }
       }
       await packageRuntimeHost.start();

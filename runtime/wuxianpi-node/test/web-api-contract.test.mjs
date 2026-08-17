@@ -242,7 +242,10 @@ async function startFixture(t, name) {
   const root = await mkdtemp(join(tmpdir(), `wuxianpi-${name}-`));
   const agentDir = join(root, "agent");
   const mcpConfigPath = join(root, "mcp", "mcp.json");
-  const server = createRuntimeServer({ host: "127.0.0.1", port: 0, agentDir, mcpConfigPath, idleTimeoutMs: 0 });
+  const server = createRuntimeServer({
+    host: "127.0.0.1", port: 0, agentDir, mcpConfigPath, idleTimeoutMs: 0,
+    builtinPackagesRoot: false, preinstalledPackagesRoot: false,
+  });
   const address = await server.start();
   t.after(async () => {
     await server.stop().catch(() => undefined);

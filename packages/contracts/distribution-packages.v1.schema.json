@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wuxianpi.openhouse.local/contracts/distribution-packages.v1.schema.json",
+  "title": "WuxianPi Distribution Packages Lock v1",
+  "type": "object",
+  "required": ["schemaVersion", "distributionId", "hubUrl", "packages"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "distributionId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+    "hubUrl": { "type": "string", "pattern": "^https://" },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["packageId", "releaseId", "approvedCommit", "manifestDigest", "initialBindings"],
+        "properties": {
+          "packageId": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$" },
+          "releaseId": { "type": "string", "minLength": 1 },
+          "approvedCommit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+          "manifestDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "initialBindings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["assistantId", "contributionIds"],
+              "properties": {
+                "assistantId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+                "contributionIds": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+/[a-z][a-z0-9]*(?:[._/-][a-z0-9]+)*$" }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

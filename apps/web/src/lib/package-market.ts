@@ -208,6 +208,14 @@ export interface LocalPackage {
   } | null;
   installedAt?: string;
   updatedAt?: string;
+  sourceKind: "market" | "bundled" | "preinstalled";
+  preinstalled?: {
+    distributionId: string;
+    seedReleaseId: string;
+    seedCommit: string;
+    importedAt: string;
+    initialBindingsAppliedAt?: string;
+  };
 }
 
 export function mergeLocalPackage(summary: LocalPackage | null, detail: LocalPackage | null): LocalPackage | null {
@@ -258,7 +266,7 @@ export async function runMutationWithRefresh<T>(
   return { result, refreshError: failed?.status === "rejected" ? failed.reason : null };
 }
 
-export type PackageOperationType = "install" | "update" | "uninstall" | "enable" | "disable" | "commit" | "bind";
+export type PackageOperationType = "install" | "preinstall" | "update" | "uninstall" | "enable" | "disable" | "commit" | "bind";
 export type PackageOperationStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 
 export interface PackageOperation {
