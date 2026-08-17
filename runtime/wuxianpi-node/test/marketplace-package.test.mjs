@@ -29,6 +29,15 @@ test("bundled Marketplace Package makes market knowledge available to every assi
   assert.match(resources.skillPaths[0], /skills\/marketplace$/);
   assert.match(resources.appendSystemPrompt.join("\n"), /wuxianpihub\.webefficacy\.com/);
   assert.match(resources.appendSystemPrompt.join("\n"), /主菜单 → WuxianPi 市场/);
+  assert.deepEqual(resources.customTools.map((tool) => tool.name).sort(), [
+    "inspect_marketplace_package",
+    "install_marketplace_package",
+    "search_marketplace",
+  ]);
+
+  await manager.setContributionEnabled(SKILL_ID, false);
+  const disabledResources = await manager.resolveAssistantResources("fresh-assistant");
+  assert.deepEqual(disabledResources.customTools, []);
 
   const skill = await readFile(join(PACKAGE_ROOT, "skills", "marketplace", "SKILL.md"), "utf8");
   assert.match(skill, /name: wuxianpi-marketplace/);

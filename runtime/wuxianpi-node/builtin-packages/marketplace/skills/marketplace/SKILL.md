@@ -40,6 +40,24 @@ https://wuxianpihub.webefficacy.com
 
 Package 代码全局只安装一份，助手绑定决定哪些助手使用可选择的 Contributions。从助手会话发起安装时，通常应绑定当前助手。
 
+## Agent 工具
+
+- 使用 `search_marketplace` 查询实时市场，不要猜测 Package。
+- 使用 `inspect_marketplace_package` 查看来源、Release、安装计划和已安装位置。
+- 使用 `install_marketplace_package` 请求用户确认并安装 Package。
+
+## 解决方案 Package
+
+当 Package 分类包含 `solution` 时，它通常是供 AI 执行的本地方案仓库，不代表最终应用已经安装。
+
+安装后：
+
+1. 从工具结果读取 `location.sourcePath`。
+2. 读取 `<sourcePath>/README.md`。
+3. 按 README 引用继续读取 `docs`、`scripts` 和配置模板。
+4. 不要把“方案已下载”误报为“最终应用已安装”。
+5. 执行依赖安装、脚本、服务注册或权限变更前再次取得用户确认。
+
 ## 安全规则
 
 - 不得静默安装、更新、卸载、绑定或授予权限。

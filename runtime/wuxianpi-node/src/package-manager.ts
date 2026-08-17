@@ -7,6 +7,7 @@ import { FunctionalAssistantStorage } from "./functional-assistant-storage.js";
 import { createFunctionalAssistantStateTool } from "./functional-assistant-tool.js";
 import { StandardMcpConfigStore, type McpServerConfig } from "./mcp-config.js";
 import { MarketClient } from "./market-client.js";
+import { createMarketplaceTools } from "./marketplace-tool.js";
 import { PackageArtifactManager } from "./package-artifacts.js";
 import { PackageBuildRunner } from "./package-build.js";
 import { PackageExperienceManager } from "./package-experience.js";
@@ -488,6 +489,18 @@ export class WuxianPiPackageManager {
         assistantId,
         storage: this.functionalAssistantStorage,
         bindings: functionalAssistants.map(({ functionId, sharingMode }) => ({ functionId, sharingMode })),
+      }));
+    }
+    const marketplaceEnabled = state.contributions["com.wuxianpi.builtin.marketplace/context.marketplace"]?.enabled === true &&
+      state.contributions["com.wuxianpi.builtin.marketplace/skill.marketplace"]?.enabled === true;
+    if (marketplaceEnabled) {
+      result.customTools.push(...createMarketplaceTools({
+        search: (query) => this.marketPackages(query),
+        packageDetail: (packageId) => this.marketPackage(packageId),
+        releases: (packageId) => this.marketReleases(packageId),
+        installPlan: (packageId, releaseId) => this.marketInstallPlan(packageId, releaseId),
+        install: (packageId, releaseId) => this.install(packageId, releaseId),
+        installedDetail: (packageId) => this.detail(packageId),
       }));
     }
     for (const record of Object.values(state.contributions)) {

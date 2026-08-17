@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "com.wuxianpi.builtin.marketplace",
   "name": "WuxianPi 市场",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "summary": "让助手了解并正确使用 WuxianPi 在线 Package 市场。",
   "description": "提供市场入口、适用场景、Package 能力和安全规则。",
   "categories": ["knowledge-experience"],
