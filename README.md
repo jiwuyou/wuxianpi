@@ -23,6 +23,17 @@ npm run dev
 Open [http://localhost:30141](http://localhost:30141). The CLI attempts to open
 the browser after the server is ready.
 
+The root Next.js application is a legacy development surface. Its `npm run
+build` command remains available for compatibility but is deprecated and must
+not be used to build OpenHouse Desktop. The production desktop build is:
+
+```bash
+npm run desktop:runtime -- --output release/desktop-runtime
+```
+
+This builds `apps/web` and `runtime/wuxianpi-node`, then creates the normal and
+repair runtime directories consumed by OpenHouse Desktop.
+
 ```bash
 wuxianpi --port 8080
 wuxianpi --hostname 127.0.0.1

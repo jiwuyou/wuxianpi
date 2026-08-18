@@ -56,7 +56,7 @@ const url = `http://${hostname ?? "localhost"}:${port}`;
 child.stdout.on("data", (chunk) => {
   const text = chunk.toString();
   process.stdout.write(text);
-  if (!browserOpened && text.includes("Ready")) {
+  if (!browserOpened && text.includes("Ready") && process.env.OPENHOUSE_DISABLE_BROWSER_OPEN !== "1") {
     browserOpened = true;
     const isWindows = process.platform === "win32";
     const isMac = process.platform === "darwin";
