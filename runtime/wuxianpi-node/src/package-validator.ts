@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import yaml from "js-yaml";
 import { validateCanonicalChildManifest } from "./child-manifest-validator.js";
 import { RequestError } from "./protocol.js";
@@ -89,7 +89,10 @@ export function safePackagePath(root: string, relativePath: string): string {
   }
   const rootPath = resolve(root);
   const target = resolve(rootPath, relativePath);
-  if (target !== rootPath && !target.startsWith(`${rootPath}/`)) throw new RequestError("invalid_package_path", `Package path escapes root: ${relativePath}`);
+  const nested = relative(rootPath, target);
+  if (nested !== "" && (nested === ".." || nested.startsWith(`..${sep}`) || isAbsolute(nested))) {
+    throw new RequestError("invalid_package_path", `Package path escapes root: ${relativePath}`);
+  }
   return target;
 }
 
@@ -126,7 +129,8 @@ async function validateContributionFiles(root: string, contribution: PackageCont
     const info = await lstat(target).catch(() => undefined);
     if (!info) throw new RequestError("package_file_missing", `Contribution file does not exist: ${path}`);
     const [rootReal, targetReal] = await Promise.all([realpath(root), realpath(target)]);
-    if (targetReal !== rootReal && !targetReal.startsWith(`${rootReal}/`)) {
+    const nested = relative(rootReal, targetReal);
+    if (nested !== "" && (nested === ".." || nested.startsWith(`..${sep}`) || isAbsolute(nested))) {
       throw new RequestError("invalid_package_path", `Contribution path resolves outside Package: ${path}`);
     }
   }
