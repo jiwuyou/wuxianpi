@@ -38,6 +38,24 @@ test("Profile state persists explicit bindings and permits the same cwd for diff
   assert.equal(reopened.getWorkspace("shared-project").name, "Shared project");
 });
 
+test("session presentation archives arbitrary Pi session ids without changing bindings", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-profile-presentation-"));
+  let tick = 0;
+  const store = new ProfileStateStore({ path: join(root, "state.sqlite"), now: () => new Date(1_000 + tick++ * 1_000) });
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+
+  assert.deepEqual(store.getSessionPresentation("unbound-pi-session"), {
+    sessionId: "unbound-pi-session", archived: false, archivedAt: null, updatedAt: "",
+  });
+  const archived = store.setSessionArchived("unbound-pi-session", true);
+  assert.equal(archived.archived, true);
+  assert.equal(archived.archivedAt, "1970-01-01T00:00:01.000Z");
+  assert.equal(store.getBinding("unbound-pi-session"), undefined);
+  const restored = store.setSessionArchived("unbound-pi-session", false);
+  assert.equal(restored.archived, false);
+  assert.equal(restored.archivedAt, null);
+});
+
 test("binding inheritance is explicit and reconciliation cannot rewrite authoritative ownership", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "wuxianpi-profile-inherit-"));
   const store = new ProfileStateStore({ path: join(root, "state.sqlite") });
@@ -133,4 +151,5 @@ test("binding revisions support optimistic rebind and migrate schema v1", async 
     sessionId: "session", assistantId: "alpha", workspaceId: "one", cwd: join(root, "one"), expectedRevision: 1,
   }), (error) => error.code === "session_binding_revision_conflict");
   assert.equal(store.getBinding("session").bindingRevision, 2);
+  assert.equal(store.getSessionPresentation("session").archived, false);
 });

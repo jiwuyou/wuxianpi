@@ -34,6 +34,8 @@ function session(input: Partial<SessionInfo> & Pick<SessionInfo, "id">): Session
     modified: "2026-08-04T00:00:00.000Z",
     messageCount: 1,
     firstMessage: id,
+    archived: false,
+    archivedAt: null,
     ...overrides,
     bindingRevision: overrides.bindingRevision ?? 1,
   };

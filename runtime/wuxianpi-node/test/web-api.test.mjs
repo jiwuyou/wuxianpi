@@ -59,6 +59,15 @@ test("web API serves static UI and core resource endpoints", { timeout: 20_000 }
   assert.deepEqual(snapshot.data.history, []);
   assert.equal(snapshot.data.state.assistantId, "wuxianpi");
 
+  const archived = await jsonFetch(`${base}/api/web/v1/sessions/${created.data.sessionId}`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ archived: true }),
+  });
+  assert.equal(archived.data.archived, true);
+  const activeSessions = await jsonFetch(`${base}/api/web/v1/sessions`);
+  assert.equal(activeSessions.data.sessions.some((session) => session.sessionId === created.data.sessionId), false);
+  const allSessions = await jsonFetch(`${base}/api/web/v1/sessions?includeArchived=true`);
+  assert.equal(allSessions.data.sessions.find((session) => session.sessionId === created.data.sessionId)?.archived, true);
+
   const assistants = await jsonFetch(`${base}/api/web/v1/assistants`);
   assert.equal(assistants.data.assistants.some((assistant) => assistant.id === "wuxianpi"), true);
 

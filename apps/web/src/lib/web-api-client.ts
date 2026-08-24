@@ -132,6 +132,8 @@ export function normalizeSessionList(body: unknown): SessionInfo[] {
       messageCount: numberValue(row.messageCount),
       firstMessage: text(row.firstMessage, "新对话"),
       parentSessionId: text(row.parentSessionId) || idByPath.get(parentPath) || undefined,
+      archived: row.archived === true,
+      archivedAt: optionalText(row.archivedAt) ?? null,
     };
   }).filter((session) => session.id.length > 0);
 }
@@ -935,8 +937,8 @@ export class WebApiClient {
     return payload.automation;
   }
 
-  async listSessions(): Promise<SessionInfo[]> {
-    return normalizeSessionList(await this.request<unknown>("/sessions"));
+  async listSessions(options: { includeArchived?: boolean } = {}): Promise<SessionInfo[]> {
+    return normalizeSessionList(await this.request<unknown>(`/sessions${options.includeArchived ? "?includeArchived=true" : ""}`));
   }
 
   async createSession(input: CreateSessionRequest): Promise<{ sessionId: string; session?: SessionInfo; warnings?: JsonRecord[] }> {
@@ -1024,6 +1026,13 @@ export class WebApiClient {
 
   setSessionName(sessionId: string, name: string) {
     return this.request<JsonRecord>(`/sessions/${encodeURIComponent(sessionId)}`, { method: "PATCH", body: JSON.stringify({ name }) });
+  }
+
+  setSessionArchived(sessionId: string, archived: boolean) {
+    return this.request<{ sessionId: string; archived: boolean; archivedAt: string | null }>(
+      `/sessions/${encodeURIComponent(sessionId)}`,
+      { method: "PATCH", body: JSON.stringify({ archived }) },
+    );
   }
 
   updateModel(sessionId: string, provider: string, modelId: string) {

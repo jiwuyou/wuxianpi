@@ -65,6 +65,13 @@ export interface SessionProfileBinding {
   updatedAt: string;
 }
 
+export interface SessionPresentation {
+  sessionId: SessionId;
+  archived: boolean;
+  archivedAt: string | null;
+  updatedAt: string;
+}
+
 export interface CreateSessionBindingInput {
   sessionId: SessionId;
   assistantId: AssistantId;

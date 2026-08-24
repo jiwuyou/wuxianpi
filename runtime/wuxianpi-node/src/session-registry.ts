@@ -305,17 +305,19 @@ export class SessionRegistry {
 
   async list(options: {
     cwd?: string; assistantId?: string; workspaceId?: string | null;
-    all?: boolean; offset: number; limit: number;
+    all?: boolean; includeArchived?: boolean; offset: number; limit: number;
   }) {
     const sessions = options.all || !options.cwd ? await SessionManager.listAll() : await SessionManager.list(resolve(options.cwd));
     const rows = sessions.map((session) => {
       const active = this.byPath.get(this.canonicalPath(session.path));
       const binding = active?.binding ?? this.profileStateStore.getBinding(session.id) ?? null;
+      const presentation = this.profileStateStore.getSessionPresentation(session.id);
       return {
         sessionPath: session.path, sessionId: session.id, cwd: session.cwd, name: session.name,
         parentSessionPath: session.parentSessionPath, createdAt: session.created.toISOString(),
         modifiedAt: session.modified.toISOString(), messageCount: session.messageCount,
         firstMessage: session.firstMessage, isRunning: active?.isRunning ?? false,
+        archived: presentation.archived, archivedAt: presentation.archivedAt,
         ...this.bindingIdentity(binding),
       };
     });
@@ -324,20 +326,28 @@ export class SessionRegistry {
       const session = slot.runtime.session;
       if (knownIds.has(session.sessionId)) continue;
       if (options.cwd && !options.all && resolve(slot.runtime.cwd) !== resolve(options.cwd)) continue;
+      const presentation = this.profileStateStore.getSessionPresentation(session.sessionId);
       rows.push({
         sessionPath: session.sessionFile ?? "", sessionId: session.sessionId, cwd: slot.runtime.cwd,
         name: session.sessionName, parentSessionPath: undefined, createdAt: slot.createdAt.toISOString(),
         modifiedAt: slot.createdAt.toISOString(), messageCount: session.messages.length,
         firstMessage: this.firstUserMessage(session.messages), isRunning: slot.isRunning || session.isStreaming,
+        archived: presentation.archived, archivedAt: presentation.archivedAt,
         ...this.bindingIdentity(slot.binding),
       });
     }
     const filtered = rows.filter((row) =>
       (options.assistantId === undefined || row.assistantId === options.assistantId) &&
-      (options.workspaceId === undefined || row.workspaceId === options.workspaceId));
+      (options.workspaceId === undefined || row.workspaceId === options.workspaceId) &&
+      (options.includeArchived === true || !row.archived));
     filtered.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
     return { sessions: filtered.slice(options.offset, options.offset + options.limit), total: filtered.length,
       offset: options.offset, limit: options.limit };
+  }
+
+  async setArchived(sessionId: string, archived: boolean) {
+    if (!this.activeReference(sessionId)) await this.resolveSessionPath(sessionId);
+    return this.profileStateStore.setSessionArchived(sessionId, archived);
   }
 
   async history(reference: string, offset: number, limit: number) {

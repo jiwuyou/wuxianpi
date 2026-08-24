@@ -276,6 +276,8 @@ export interface SessionInfo {
   messageCount: number;
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another
+  archived: boolean;
+  archivedAt: string | null;
 }
 
 export interface SessionContext {

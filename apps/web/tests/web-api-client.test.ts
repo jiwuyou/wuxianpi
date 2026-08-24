@@ -148,6 +148,25 @@ describe("WebApiClient Runtime contract", () => {
     expect(sessions[0]).toMatchObject({ id: "parent", path: "/sessions/parent.jsonl", assistantId: "coding", workspaceId: "workspace-a", workspaceName: "Project A", ownershipState: "bound", created: "2026-01-01", modified: "2026-01-02" });
     expect(sessions[1]).toMatchObject({ id: "child", assistantId: null, workspaceId: null, ownershipState: "unbound", parentSessionId: "parent", firstMessage: "新对话" });
     expect(sessions[2]).toMatchObject({ id: "malformed", assistantId: null, workspaceId: null, ownershipState: "unbound" });
+    expect(sessions[0]).toMatchObject({ archived: false, archivedAt: null });
+  });
+
+  it("lists archived sessions on request and updates their WuxianPi presentation state", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ ok: true, data: { sessions: [] } }))
+      .mockResolvedValueOnce(json({ ok: true, data: { sessionId: "s1", archived: true, archivedAt: "2026-01-01T00:00:00.000Z" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new WebApiClient();
+
+    await client.listSessions({ includeArchived: true });
+    await expect(client.setSessionArchived("s1", true)).resolves.toEqual({
+      sessionId: "s1", archived: true, archivedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/web/v1/sessions?includeArchived=true",
+      "/api/web/v1/sessions/s1",
+    ]);
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ archived: true });
   });
 
   it("forwards the complete create request and normalizes Runtime identity", async () => {

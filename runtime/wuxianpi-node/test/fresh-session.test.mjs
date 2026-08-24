@@ -25,6 +25,26 @@ test("fresh unsaved session supports history, list, and reconnect open", async (
   }
 });
 
+test("archiving is WuxianPi presentation state and is hidden unless requested", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-archive-"));
+  const registry = new SessionRegistry(() => {}, { agentDir: join(root, "agent"), idleTimeoutMs: 0 });
+  try {
+    const created = await registry.create(root);
+    const archived = await registry.setArchived(created.sessionId, true);
+    assert.equal(archived.archived, true);
+    assert.ok(archived.archivedAt);
+    assert.equal((await registry.list({ all: true, offset: 0, limit: 100 })).sessions
+      .some((session) => session.sessionId === created.sessionId), false);
+    const listed = await registry.list({ all: true, includeArchived: true, offset: 0, limit: 100 });
+    assert.equal(listed.sessions.find((session) => session.sessionId === created.sessionId)?.archived, true);
+    assert.equal((await registry.history(created.sessionId, 0, 100)).sessionId, created.sessionId);
+    assert.equal((await registry.setArchived(created.sessionId, false)).archived, false);
+  } finally {
+    await registry.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("active sessions reload external JSONL appends before snapshot and SSE refresh", async () => {
   const root = await mkdtemp(join(tmpdir(), "wuxianpi-external-session-refresh-"));
   const agentDir = join(root, "agent");

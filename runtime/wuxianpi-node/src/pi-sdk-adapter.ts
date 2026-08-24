@@ -36,6 +36,7 @@ export class PiSdkAdapter {
       case "session.list":
         return this.registry.list({
           cwd: optionalString(payload, "cwd"), all: payload.all === true,
+          includeArchived: payload.includeArchived === true,
           offset: boundedInteger(payload, "offset", 0, Number.MAX_SAFE_INTEGER),
           limit: boundedInteger(payload, "limit", 100, 1000),
         });

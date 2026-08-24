@@ -126,6 +126,7 @@ export function AppShell() {
   // opened it so closing returns the user to the exact previous context.
   const [modelsReturnContext, setModelsReturnContext] = useState<ShellOverlayContext | null>(null);
   const [includeArchived, setIncludeArchived] = useState(false);
+  const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const [loading, setLoading] = useState(true);
   const [platformUnavailable, setPlatformUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -142,7 +143,7 @@ export function AppShell() {
   const branchLeafChangeRef = useRef<((leafId: string | null) => void) | null>(null);
 
   const loadSessions = useCallback(async () => {
-    const loaded = await webApi.listSessions();
+    const loaded = await webApi.listSessions({ includeArchived: true });
     setSessions(loaded);
     return loaded;
   }, []);
@@ -187,7 +188,14 @@ export function AppShell() {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
-  const sessionsByAssistant = useMemo(() => groupSessionsByAssistant(assistants, sessions), [assistants, sessions]);
+  const visibleSessions = useMemo(
+    () => sessions.filter((session) => showArchivedSessions || !session.archived),
+    [sessions, showArchivedSessions],
+  );
+  const sessionsByAssistant = useMemo(
+    () => groupSessionsByAssistant(assistants, visibleSessions),
+    [assistants, visibleSessions],
+  );
 
   const visibleAssistants = useMemo(() => assistants
     .filter((assistant) => includeArchived || !assistant.manifest.archived)
@@ -353,6 +361,20 @@ export function AppShell() {
       setNotice(reason instanceof Error ? reason.message : String(reason));
     }
   };
+
+  const handleSessionArchive = useCallback(async (session: SessionInfo) => {
+    try {
+      const updated = await webApi.setSessionArchived(session.id, !session.archived);
+      setSessions((current) => current.map((item) => item.id === session.id ? {
+        ...item,
+        archived: updated.archived,
+        archivedAt: updated.archivedAt,
+      } : item));
+      setNotice(updated.archived ? "对话已归档" : "对话已恢复");
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, []);
 
   const handleArchive = async (assistant: AssistantSummary) => {
     try {
@@ -586,8 +608,11 @@ export function AppShell() {
             assistants={assistants}
             grouped={sessionsByAssistant}
             activeSessionId={selectedSession?.id ?? null}
+            showArchived={showArchivedSessions}
+            onShowArchivedChange={setShowArchivedSessions}
             onOpen={openSession}
             onNew={openNewChat}
+            onArchive={(session) => void handleSessionArchive(session)}
           />
         </div>
       </aside>
@@ -723,14 +748,20 @@ function ConversationDrawer({
   assistants,
   grouped,
   activeSessionId,
+  showArchived,
+  onShowArchivedChange,
   onOpen,
   onNew,
+  onArchive,
 }: {
   assistants: AssistantSummary[];
   grouped: { map: Map<string, SessionInfo[]>; unbound: SessionInfo[]; unavailable: SessionInfo[] };
   activeSessionId: string | null;
+  showArchived: boolean;
+  onShowArchivedChange: (value: boolean) => void;
   onOpen: (session: SessionInfo) => void;
   onNew: (assistant: AssistantSummary) => void;
+  onArchive: (session: SessionInfo) => void;
 }) {
   const groups = assistants
     .map((assistant) => ({ assistant, sessions: grouped.map.get(assistant.id) ?? [] }))
@@ -745,16 +776,26 @@ function ConversationDrawer({
 
   if (groups.every((group) => group.sessions.length === 0) && grouped.unbound.length === 0 && grouped.unavailable.length === 0) {
     return (
-      <div className="empty-hero shell-drawer-empty">
-        <div>◌</div>
-        <h2>还没有对话</h2>
-        <p>点上方「新对话」开始，或在助手库中选择角色。</p>
+      <div className="conversation-groups shell-conversation-groups">
+        <label className="conversation-archive-toggle">
+          <input type="checkbox" checked={showArchived} onChange={(event) => onShowArchivedChange(event.target.checked)} />
+          <span>显示已归档</span>
+        </label>
+        <div className="empty-hero shell-drawer-empty">
+          <div>◌</div>
+          <h2>{showArchived ? "没有归档对话" : "还没有对话"}</h2>
+          <p>{showArchived ? "归档的对话会显示在这里。" : "点上方「新对话」开始，或在助手库中选择角色。"}</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="conversation-groups shell-conversation-groups">
+      <label className="conversation-archive-toggle">
+        <input type="checkbox" checked={showArchived} onChange={(event) => onShowArchivedChange(event.target.checked)} />
+        <span>显示已归档</span>
+      </label>
       {groups.map(({ assistant, sessions: items }) => (
         <section key={assistant.id}>
           <header>
@@ -773,6 +814,7 @@ function ConversationDrawer({
                 session={session}
                 active={session.id === activeSessionId}
                 onOpen={onOpen}
+                onArchive={onArchive}
               />
             ))}
           </div>
@@ -789,7 +831,7 @@ function ConversationDrawer({
           </header>
           <div>
             {grouped.unbound.map((session) => (
-              <ConversationRow key={session.id} session={session} active={session.id === activeSessionId} onOpen={onOpen} />
+              <ConversationRow key={session.id} session={session} active={session.id === activeSessionId} onOpen={onOpen} onArchive={onArchive} />
             ))}
           </div>
         </section>
@@ -800,25 +842,35 @@ function ConversationDrawer({
             <div className="assistant-mini-avatar muted">!</div>
             <div><strong>助手不可用</strong><small>{grouped.unavailable.length} 个历史对话</small></div>
           </header>
-          <div>{grouped.unavailable.map((session) => <ConversationRow key={session.id} session={session} active={session.id === activeSessionId} onOpen={onOpen} />)}</div>
+          <div>{grouped.unavailable.map((session) => <ConversationRow key={session.id} session={session} active={session.id === activeSessionId} onOpen={onOpen} onArchive={onArchive} />)}</div>
         </section>
       )}
     </div>
   );
 }
 
-function ConversationRow({ session, active, onOpen }: { session: SessionInfo; active?: boolean; onOpen: (session: SessionInfo) => void }) {
+function ConversationRow({ session, active, onOpen, onArchive }: { session: SessionInfo; active?: boolean; onOpen: (session: SessionInfo) => void; onArchive: (session: SessionInfo) => void }) {
   const scope = session.workspaceName
     ?? (session.workspaceId ? basename(session.cwd) || "工作区" : session.ownershipState === "unbound" ? basename(session.cwd) || "Pi 会话" : "日常对话");
   return (
-    <button type="button" className={`conversation-row ${active ? "active" : ""}`} onClick={() => onOpen(session)}>
-      <span>
-        <strong>{session.name || session.firstMessage || "新对话"}</strong>
-        <small>{scope} · {session.messageCount} 条消息</small>
-      </span>
-      <time>{formatTime(session.modified)}</time>
-      <em>›</em>
-    </button>
+    <div className={`conversation-row-wrap ${active ? "active" : ""}`}>
+      <button type="button" className="conversation-row" onClick={() => onOpen(session)}>
+        <span>
+          <strong>{session.name || session.firstMessage || "新对话"}</strong>
+          <small>{scope} · {session.messageCount} 条消息</small>
+        </span>
+        <time>{formatTime(session.modified)}</time>
+        <em>›</em>
+      </button>
+      <button
+        type="button"
+        className="conversation-row-action"
+        onClick={() => onArchive(session)}
+        aria-label={session.archived ? "恢复对话" : "归档对话"}
+      >
+        {session.archived ? "恢复" : "归档"}
+      </button>
+    </div>
   );
 }
 

@@ -185,10 +185,12 @@ session is bound to the Workspace. Successful deletion returns:
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| `GET` | `/api/web/v1/sessions` | List Pi sessions with explicit ownership |
+| `GET` | `/api/web/v1/sessions` | List active Pi sessions with explicit ownership |
+| `GET` | `/api/web/v1/sessions?includeArchived=true` | Include WuxianPi-archived sessions |
 | `GET` | `/api/web/v1/sessions?assistantId=:id` | Filter by Main Assistant |
 | `GET` | `/api/web/v1/sessions?workspaceId=:id` | Filter by Workspace |
 | `POST` | `/api/web/v1/sessions` | Create a bound WuxianPi session |
+| `PATCH` | `/api/web/v1/sessions/:id` | Rename a Pi session or update WuxianPi presentation state |
 
 Web session creation requires `assistantId`:
 
@@ -245,6 +247,12 @@ fields. Sessions created directly by Pi have no SQLite binding and return:
 WuxianPi never derives Assistant ownership from `cwd`. Fork and new-session
 operations inherit the source binding; existing bindings cannot be reassigned
 to another Assistant or Workspace.
+
+Session archiving is WuxianPi-only presentation metadata. `PATCH` with
+`{ "archived": true }` hides the session from default lists without modifying,
+moving, or closing the Pi JSONL session. `PATCH` with `{ "archived": false }`
+restores it. List rows expose `archived` and `archivedAt`; this metadata also
+works for unbound sessions.
 
 ## Functional-assistant bindings
 

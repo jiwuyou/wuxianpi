@@ -9,6 +9,7 @@ import type {
   InheritSessionBindingInput,
   RebindSessionInput,
   SessionBindingListFilter,
+  SessionPresentation,
   SessionProfileBinding,
   UpdateWorkspaceInput,
   WorkspaceListFilter,
@@ -18,7 +19,7 @@ import type {
 const SAFE_ENTITY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_SESSION_ID_LENGTH = 512;
 const MAX_WORKSPACE_NAME_LENGTH = 160;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export interface ProfileStateStoreOptions {
   path: string;
@@ -256,6 +257,34 @@ export class ProfileStateStore {
     return this.database.prepare("DELETE FROM session_bindings WHERE session_id = ?").run(sessionId).changes > 0;
   }
 
+  getSessionPresentation(sessionId: string): SessionPresentation {
+    this.assertOpen();
+    assertSessionId(sessionId, "session id");
+    const row = this.database.prepare(`
+      SELECT session_id, archived, archived_at, updated_at
+      FROM session_presentation WHERE session_id = ?
+    `).get(sessionId);
+    return row ? presentationFromRow(row) : {
+      sessionId, archived: false, archivedAt: null, updatedAt: "",
+    };
+  }
+
+  setSessionArchived(sessionId: string, archived: boolean): SessionPresentation {
+    this.assertOpen();
+    assertSessionId(sessionId, "session id");
+    if (typeof archived !== "boolean") throw new RequestError("invalid_session_archived", "archived flag must be boolean");
+    const now = this.timestamp();
+    this.database.prepare(`
+      INSERT INTO session_presentation (session_id, archived, archived_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        archived = excluded.archived,
+        archived_at = excluded.archived_at,
+        updated_at = excluded.updated_at
+    `).run(sessionId, archived ? 1 : 0, archived ? now : null, now);
+    return this.getSessionPresentation(sessionId);
+  }
+
   private initializeSchema(): void {
     const versionRow = this.database.prepare("PRAGMA user_version").get();
     const version = Number(versionRow?.user_version ?? 0);
@@ -291,14 +320,44 @@ export class ProfileStateStore {
           ON session_bindings (workspace_id, created_at, session_id);
         CREATE INDEX IF NOT EXISTS session_bindings_cwd_idx
           ON session_bindings (cwd, created_at, session_id);
-        PRAGMA user_version = 2;
+        CREATE TABLE IF NOT EXISTS session_presentation (
+          session_id TEXT PRIMARY KEY,
+          archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+          archived_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS session_presentation_archived_idx
+          ON session_presentation (archived, updated_at, session_id);
+        PRAGMA user_version = 3;
         COMMIT;
       `);
     } else if (version === 1) {
       this.database.exec(`
         BEGIN IMMEDIATE;
         ALTER TABLE session_bindings ADD COLUMN binding_revision INTEGER NOT NULL DEFAULT 1;
-        PRAGMA user_version = 2;
+        CREATE TABLE IF NOT EXISTS session_presentation (
+          session_id TEXT PRIMARY KEY,
+          archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+          archived_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS session_presentation_archived_idx
+          ON session_presentation (archived, updated_at, session_id);
+        PRAGMA user_version = 3;
+        COMMIT;
+      `);
+    } else if (version === 2) {
+      this.database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS session_presentation (
+          session_id TEXT PRIMARY KEY,
+          archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+          archived_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS session_presentation_archived_idx
+          ON session_presentation (archived, updated_at, session_id);
+        PRAGMA user_version = 3;
         COMMIT;
       `);
     }
@@ -481,6 +540,15 @@ function bindingFromRow(row: Record<string, unknown>): SessionProfileBinding {
     bindingRevision: Number(row.binding_revision ?? 1),
     inheritedFromSessionId: row.inherited_from_session_id === null ? null : String(row.inherited_from_session_id),
     createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function presentationFromRow(row: Record<string, unknown>): SessionPresentation {
+  return {
+    sessionId: String(row.session_id),
+    archived: Number(row.archived) === 1,
+    archivedAt: row.archived_at === null ? null : String(row.archived_at),
     updatedAt: String(row.updated_at),
   };
 }

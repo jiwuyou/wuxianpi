@@ -227,6 +227,7 @@ export class WebApi {
         assistantId: url.searchParams.get("assistantId") ?? undefined,
         workspaceId: url.searchParams.get("workspaceId") ?? undefined,
         all: url.searchParams.get("all") !== "false",
+        includeArchived: url.searchParams.get("includeArchived") === "true",
         offset: boundedInteger(payload, "offset", 0, Number.MAX_SAFE_INTEGER),
         limit: boundedInteger(payload, "limit", 100, 1000),
       }) }); return;
@@ -623,6 +624,10 @@ export class WebApi {
     if (!action && method === "DELETE") { json(response, 200, { ok: true, data: await registry.close(sessionId) }); return; }
     if (!action && method === "PATCH") {
       const body = await readJsonBody(request);
+      if (body.archived !== undefined) {
+        if (typeof body.archived !== "boolean") throw new RequestError("invalid_payload", "archived must be a boolean");
+        json(response, 200, { ok: true, data: await registry.setArchived(sessionId, body.archived) }); return;
+      }
       await registry.setName(sessionId, requireString(body, "name"));
       json(response, 200, { ok: true, data: await registry.snapshot(sessionId) }); return;
     }
