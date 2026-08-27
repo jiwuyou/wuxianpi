@@ -31,6 +31,19 @@ test("web API serves static UI and core resource endpoints", { timeout: 20_000 }
   assert.equal(page.status, 200);
   assert.match(await page.text(), /WuxianPi AI/);
 
+  const filesystemRoots = await jsonFetch(`${base}/api/web/v1/filesystem/roots`);
+  assert.equal(filesystemRoots.ok, true);
+  assert.equal(filesystemRoots.data.roots.some((root) => root.path === process.env.HOME), true);
+  const directory = await jsonFetch(`${base}/api/web/v1/filesystem/directories?path=${encodeURIComponent(root)}`);
+  assert.equal(directory.data.path, root);
+  const createdDirectory = await jsonFetch(`${base}/api/web/v1/filesystem/directories`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ parent: root, name: "workspace-root" }),
+  });
+  assert.equal(createdDirectory.data.created, true);
+  assert.equal(directory.data.entries.some((entry) => entry.name === "workspace-root"), false);
+  const refreshedDirectory = await jsonFetch(`${base}/api/web/v1/filesystem/directories?path=${encodeURIComponent(root)}`);
+  assert.equal(refreshedDirectory.data.entries.some((entry) => entry.name === "workspace-root"), true);
+
   const status = await jsonFetch(`${base}/api/web/v1/status`);
   assert.equal(status.ok, true);
   assert.match(status.deploymentId, /^sha256-[a-f0-9]{24}$/);
@@ -67,6 +80,18 @@ test("web API serves static UI and core resource endpoints", { timeout: 20_000 }
   assert.equal(activeSessions.data.sessions.some((session) => session.sessionId === created.data.sessionId), false);
   const allSessions = await jsonFetch(`${base}/api/web/v1/sessions?includeArchived=true`);
   assert.equal(allSessions.data.sessions.find((session) => session.sessionId === created.data.sessionId)?.archived, true);
+
+  const group = await jsonFetch(`${base}/api/web/v1/session-groups`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: "project", name: "Project" }),
+  });
+  assert.equal(group.data.group.name, "Project");
+  const presentation = await jsonFetch(`${base}/api/web/v1/sessions/${created.data.sessionId}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ groupId: "project", pinned: true }),
+  });
+  assert.equal(presentation.data.groupId, "project");
+  assert.equal(presentation.data.pinned, true);
 
   const assistants = await jsonFetch(`${base}/api/web/v1/assistants`);
   assert.equal(assistants.data.assistants.some((assistant) => assistant.id === "wuxianpi"), true);

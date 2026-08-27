@@ -45,7 +45,7 @@ test("session presentation archives arbitrary Pi session ids without changing bi
   t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
 
   assert.deepEqual(store.getSessionPresentation("unbound-pi-session"), {
-    sessionId: "unbound-pi-session", archived: false, archivedAt: null, updatedAt: "",
+    sessionId: "unbound-pi-session", archived: false, archivedAt: null, groupId: null, pinned: false, updatedAt: "",
   });
   const archived = store.setSessionArchived("unbound-pi-session", true);
   assert.equal(archived.archived, true);
@@ -54,6 +54,20 @@ test("session presentation archives arbitrary Pi session ids without changing bi
   const restored = store.setSessionArchived("unbound-pi-session", false);
   assert.equal(restored.archived, false);
   assert.equal(restored.archivedAt, null);
+});
+
+test("session groups are independent from bindings and clear presentation references on delete", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wuxianpi-session-groups-"));
+  const store = new ProfileStateStore({ path: join(root, "state.sqlite") });
+  t.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  const group = store.createSessionGroup({ id: "wuxianpi-dev", name: "WuxianPi 开发", color: "#2563eb" });
+  assert.equal(store.listSessionGroups()[0].name, "WuxianPi 开发");
+  const presentation = store.updateSessionPresentation("unbound-session", { groupId: group.id, pinned: true });
+  assert.equal(presentation.groupId, group.id);
+  assert.equal(presentation.pinned, true);
+  assert.equal(store.getBinding("unbound-session"), undefined);
+  assert.equal(store.removeSessionGroup(group.id), true);
+  assert.equal(store.getSessionPresentation("unbound-session").groupId, null);
 });
 
 test("binding inheritance is explicit and reconciliation cannot rewrite authoritative ownership", async (t) => {

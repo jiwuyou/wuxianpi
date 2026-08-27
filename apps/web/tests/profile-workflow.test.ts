@@ -37,6 +37,8 @@ function session(input: Partial<SessionInfo> & Pick<SessionInfo, "id">): Session
     archived: false,
     archivedAt: null,
     ...overrides,
+    groupId: overrides.groupId ?? null,
+    pinned: overrides.pinned ?? false,
     bindingRevision: overrides.bindingRevision ?? 1,
   };
 }

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Archive, ArchiveRestore, FolderOpen, Pencil, Plus, Save, Trash2, X } from "lucide-react";
 import type { Workspace, WorkspaceCreateRequest, WorkspaceUpdateRequest } from "@/lib/wuxianpi/contracts";
 import { createWorkspace, deleteWorkspace, updateWorkspace } from "./api";
+import { webApi } from "@/lib/web-api-client";
 
 interface Props {
   workspaces: Workspace[];
@@ -36,8 +37,45 @@ export function WorkspaceManager({ workspaces, onChanged }: Props) {
   const [includeArchived, setIncludeArchived] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerPath, setPickerPath] = useState<string | null>(null);
+  const [pickerParent, setPickerParent] = useState<string | null>(null);
+  const [pickerEntries, setPickerEntries] = useState<Array<{ name: string; path: string; readable: boolean; writable: boolean; selectable: boolean }>>([]);
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerError, setPickerError] = useState<string | null>(null);
 
   useEffect(() => setDraft(draftOf(editing ?? undefined)), [editing]);
+
+  const openPicker = async () => {
+    setPickerOpen(true);
+    setPickerError(null);
+    try {
+      const roots = await webApi.filesystemRoots();
+      await loadPickerDirectory(roots[0]?.path ?? "/");
+    } catch (reason) { setPickerError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+
+  const loadPickerDirectory = async (path: string) => {
+    setPickerLoading(true);
+    setPickerError(null);
+    try {
+      const data = await webApi.listDirectories(path);
+      setPickerPath(data.path);
+      setPickerParent(data.parent);
+      setPickerEntries(data.entries);
+    } catch (reason) { setPickerError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setPickerLoading(false); }
+  };
+
+  const createPickerDirectory = async () => {
+    if (!pickerPath) return;
+    const name = window.prompt("新建文件夹");
+    if (!name?.trim()) return;
+    try {
+      const created = await webApi.createDirectory(pickerPath, name.trim());
+      await loadPickerDirectory(created.path);
+    } catch (reason) { setPickerError(reason instanceof Error ? reason.message : String(reason)); }
+  };
 
   const sorted = [...workspaces]
     .filter((workspace) => includeArchived || !workspace.archived)
@@ -131,13 +169,43 @@ export function WorkspaceManager({ workspaces, onChanged }: Props) {
           <div className="form-grid">
             {!editing && <label>工作区 ID<input value={draft.id} onChange={(event) => setDraft((current) => ({ ...current, id: event.target.value }))} placeholder="leetcode" /></label>}
             <label className={editing ? "span-2" : ""}>名称<input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} placeholder="LeetCode 训练" /></label>
-            <label className="span-2">根路径<input value={draft.rootCwd} onChange={(event) => setDraft((current) => ({ ...current, rootCwd: event.target.value }))} placeholder="/data/data/com.termux/files/home/projects/leetcode" /></label>
+            <label className="span-2">根路径
+              <div className="workspace-path-input"><input value={draft.rootCwd} onChange={(event) => setDraft((current) => ({ ...current, rootCwd: event.target.value }))} placeholder="/data/data/com.termux/files/home/projects/leetcode" /><button type="button" className="secondary-button compact" onClick={() => void openPicker()}><FolderOpen size={15} />选择目录</button></div>
+            </label>
             <label className="span-2">INSTRUCTIONS.md<textarea value={draft.instructions} onChange={(event) => setDraft((current) => ({ ...current, instructions: event.target.value }))} rows={8} /></label>
             <label className="span-2">MEMORY.md<textarea value={draft.memory} onChange={(event) => setDraft((current) => ({ ...current, memory: event.target.value }))} rows={6} /></label>
           </div>
           <footer><button type="button" className="secondary-button" onClick={() => setEditing(undefined)}>取消</button><button type="button" className="primary-button" disabled={busy} onClick={() => void save()}><Save size={16} />{busy ? "保存中…" : "保存工作区"}</button></footer>
         </div>
       )}
+
+      {pickerOpen && <DirectoryPicker
+        path={pickerPath}
+        parent={pickerParent}
+        entries={pickerEntries}
+        loading={pickerLoading}
+        error={pickerError}
+        onClose={() => setPickerOpen(false)}
+        onOpen={(path) => void loadPickerDirectory(path)}
+        onSelect={(path) => { setDraft((current) => ({ ...current, rootCwd: path })); setPickerOpen(false); }}
+        onCreate={() => void createPickerDirectory()}
+      />}
     </div>
   );
+}
+
+function DirectoryPicker({ path, parent, entries, loading, error, onClose, onOpen, onSelect, onCreate }: {
+  path: string | null;
+  parent: string | null;
+  entries: Array<{ name: string; path: string; readable: boolean; writable: boolean; selectable: boolean }>;
+  loading: boolean; error: string | null; onClose: () => void; onOpen: (path: string) => void; onSelect: (path: string) => void; onCreate: () => void;
+}) {
+  return <div className="wuxianpi-modal-backdrop" role="dialog" aria-modal="true" aria-label="选择工作区根目录">
+    <div className="directory-picker">
+      <header><div><strong>选择工作区根目录</strong><small>{path ?? "正在加载…"}</small></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={17} /></button></header>
+      {error && <div className="wuxianpi-state error">{error}</div>}
+      <div className="directory-picker-list">{loading ? <div className="conversation-empty">加载中…</div> : entries.length === 0 ? <div className="conversation-empty">没有可进入的子文件夹</div> : entries.map((entry) => <button type="button" key={entry.path} disabled={!entry.readable} onClick={() => onOpen(entry.path)}><FolderOpen size={17} /><span>{entry.name}</span><em>›</em></button>)}</div>
+      <footer><button type="button" className="secondary-button" disabled={!parent || loading} onClick={() => parent && onOpen(parent)}>返回上级</button><button type="button" className="secondary-button" disabled={!path || loading} onClick={onCreate}><Plus size={15} />新建文件夹</button><button type="button" className="primary-button" disabled={!path || loading} onClick={() => path && onSelect(path)}>选择当前目录</button></footer>
+    </div>
+  </div>;
 }

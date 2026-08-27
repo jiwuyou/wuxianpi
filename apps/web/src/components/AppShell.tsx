@@ -8,9 +8,11 @@ import { useRuntimeDeploymentSync } from "@/hooks/useRuntimeDeploymentSync";
 import { useTheme } from "@/hooks/useTheme";
 import { useBrowserNavigation } from "@/lib/browser-navigation";
 import { webApi } from "@/lib/web-api-client";
+import { copyText } from "@/lib/copy-text";
 import { assistantAvatarBackground, assistantAvatarUrl } from "@/lib/assistant-avatar";
 import { resolveStarterPrompt } from "@/lib/starter-prompts";
 import { ChatWindow } from "./ChatWindow";
+import { OrganizedConversationDrawer } from "./OrganizedConversationDrawer";
 import type { ChatInputHandle } from "./ChatInput";
 import { ExtensionHost } from "./wuxianpi/ExtensionHost";
 import {
@@ -112,6 +114,7 @@ export function AppShell() {
   const [assistants, setAssistants] = useState<AssistantSummary[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [sessionGroups, setSessionGroups] = useState<Array<{ id: string; name: string; color: string | null; sortOrder: number }>>([]);
   const [extensions, setExtensions] = useState<WebExtensionSummary[]>([]);
   const [catalog, setCatalog] = useState<CapabilityCatalog | null>(null);
   const [globalConfig, setGlobalConfig] = useState<GlobalWuxianPiConfigV1 | null>(null);
@@ -126,7 +129,6 @@ export function AppShell() {
   // opened it so closing returns the user to the exact previous context.
   const [modelsReturnContext, setModelsReturnContext] = useState<ShellOverlayContext | null>(null);
   const [includeArchived, setIncludeArchived] = useState(false);
-  const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const [loading, setLoading] = useState(true);
   const [platformUnavailable, setPlatformUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -154,18 +156,20 @@ export function AppShell() {
     try {
       await loadSessions();
       try {
-        const [assistantList, capabilityCatalog, config, extensionList, workspaceList] = await Promise.all([
+        const [assistantList, capabilityCatalog, config, extensionList, workspaceList, groups] = await Promise.all([
           listAssistants({ includeArchived: true }),
           getCapabilityCatalog(),
           getGlobalConfig(),
           listWebExtensions(),
           listWorkspaces({ includeArchived: true }),
+          webApi.listSessionGroups(),
         ]);
         setAssistants(assistantList);
         setCatalog(capabilityCatalog);
         setGlobalConfig(config);
         setExtensions(extensionList);
         setWorkspaces(workspaceList);
+        setSessionGroups(groups);
         setPlatformUnavailable(false);
       } catch (reason) {
         if (!isUnavailableError(reason)) throw reason;
@@ -187,15 +191,6 @@ export function AppShell() {
     const timeout = window.setTimeout(() => setNotice(null), 3200);
     return () => window.clearTimeout(timeout);
   }, [notice]);
-
-  const visibleSessions = useMemo(
-    () => sessions.filter((session) => showArchivedSessions || !session.archived),
-    [sessions, showArchivedSessions],
-  );
-  const sessionsByAssistant = useMemo(
-    () => groupSessionsByAssistant(assistants, visibleSessions),
-    [assistants, visibleSessions],
-  );
 
   const visibleAssistants = useMemo(() => assistants
     .filter((assistant) => includeArchived || !assistant.manifest.archived)
@@ -362,19 +357,84 @@ export function AppShell() {
     }
   };
 
-  const handleSessionArchive = useCallback(async (session: SessionInfo) => {
+  const handleSessionPresentation = useCallback(async (session: SessionInfo, input: { archived?: boolean; groupId?: string | null; pinned?: boolean }) => {
     try {
-      const updated = await webApi.setSessionArchived(session.id, !session.archived);
+      const updated = await webApi.updateSessionPresentation(session.id, input);
       setSessions((current) => current.map((item) => item.id === session.id ? {
         ...item,
         archived: updated.archived,
         archivedAt: updated.archivedAt,
+        groupId: updated.groupId,
+        pinned: updated.pinned,
       } : item));
-      setNotice(updated.archived ? "对话已归档" : "对话已恢复");
+      if (input.archived !== undefined) setNotice(updated.archived ? "对话已归档" : "对话已恢复");
     } catch (reason) {
       setNotice(reason instanceof Error ? reason.message : String(reason));
     }
   }, []);
+
+  const handleCreateSessionGroup = useCallback(async () => {
+    const name = window.prompt("分组名称");
+    if (!name?.trim()) return;
+    const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `group-${Date.now()}`;
+    try {
+      const result = await webApi.createSessionGroup({ id, name: name.trim() });
+      setSessionGroups((current) => [...current, result.group]);
+      setNotice("分组已创建");
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); }
+  }, []);
+
+  const handleRenameSessionGroup = useCallback(async (group: { id: string; name: string }) => {
+    const name = window.prompt("新的分组名称", group.name);
+    if (!name?.trim() || name.trim() === group.name) return;
+    try {
+      const result = await webApi.updateSessionGroup(group.id, { name: name.trim() });
+      setSessionGroups((current) => current.map((item) => item.id === group.id ? result.group : item));
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); }
+  }, []);
+
+  const handleDeleteSessionGroup = useCallback(async (group: { id: string; name: string }) => {
+    if (!window.confirm(`删除分组「${group.name}」？其中对话会回到未整理。`)) return;
+    try {
+      await webApi.deleteSessionGroup(group.id);
+      setSessionGroups((current) => current.filter((item) => item.id !== group.id));
+      setSessions((current) => current.map((session) => session.groupId === group.id ? { ...session, groupId: null } : session));
+      setNotice("分组已删除");
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); }
+  }, []);
+
+  const handleCopySessionId = useCallback(async (session: SessionInfo) => {
+    try { await copyText(session.id); setNotice("会话 ID 已复制"); }
+    catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); }
+  }, []);
+
+  const handleRenameSession = useCallback(async (session: SessionInfo) => {
+    const name = window.prompt("会话名称", session.name ?? session.firstMessage);
+    if (!name?.trim() || name.trim() === session.name) return;
+    try {
+      await webApi.setSessionName(session.id, name.trim());
+      setSessions((current) => current.map((item) => item.id === session.id ? { ...item, name: name.trim() } : item));
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); }
+  }, []);
+
+  const handleBranchSession = useCallback(async (session: SessionInfo) => {
+    try {
+      const snapshot = await webApi.snapshot(session.id);
+      if (!snapshot.leafId) throw new Error("当前会话没有可分支的消息");
+      const result = await webApi.fork(session.id, snapshot.leafId);
+      const newSessionId = result.newSessionId;
+      if (!newSessionId) throw new Error("Runtime 未返回新会话 ID");
+      const created = await loadSessions();
+      const target = created.find((item) => item.id === newSessionId);
+      if (target) {
+        const next = await webApi.updateSessionPresentation(target.id, { groupId: session.groupId, archived: false, pinned: false });
+        const groupedTarget = { ...target, groupId: next.groupId, archived: next.archived, archivedAt: next.archivedAt, pinned: next.pinned };
+        setSessions((current) => current.map((item) => item.id === groupedTarget.id ? groupedTarget : item));
+        openSession(groupedTarget);
+      }
+      setNotice("已分支到新聊天");
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); }
+  }, [loadSessions, openSession]);
 
   const handleArchive = async (assistant: AssistantSummary) => {
     try {
@@ -604,15 +664,19 @@ export function AppShell() {
           </button>
         </div>
         <div className="shell-drawer-scroll">
-          <ConversationDrawer
+          <OrganizedConversationDrawer
+            sessions={sessions}
             assistants={assistants}
-            grouped={sessionsByAssistant}
+            groups={sessionGroups}
             activeSessionId={selectedSession?.id ?? null}
-            showArchived={showArchivedSessions}
-            onShowArchivedChange={setShowArchivedSessions}
             onOpen={openSession}
-            onNew={openNewChat}
-            onArchive={(session) => void handleSessionArchive(session)}
+            onCreateGroup={() => void handleCreateSessionGroup()}
+            onRenameGroup={(group) => void handleRenameSessionGroup(group)}
+            onDeleteGroup={(group) => void handleDeleteSessionGroup(group)}
+            onBranch={(session) => void handleBranchSession(session)}
+            onCopySessionId={(session) => void handleCopySessionId(session)}
+            onRename={(session) => void handleRenameSession(session)}
+            onUpdate={(session, input) => void handleSessionPresentation(session, input)}
           />
         </div>
       </aside>

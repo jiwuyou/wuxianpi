@@ -134,6 +134,8 @@ export function normalizeSessionList(body: unknown): SessionInfo[] {
       parentSessionId: text(row.parentSessionId) || idByPath.get(parentPath) || undefined,
       archived: row.archived === true,
       archivedAt: optionalText(row.archivedAt) ?? null,
+      groupId: optionalText(row.groupId) ?? null,
+      pinned: row.pinned === true,
     };
   }).filter((session) => session.id.length > 0);
 }
@@ -1029,10 +1031,46 @@ export class WebApiClient {
   }
 
   setSessionArchived(sessionId: string, archived: boolean) {
-    return this.request<{ sessionId: string; archived: boolean; archivedAt: string | null }>(
-      `/sessions/${encodeURIComponent(sessionId)}`,
-      { method: "PATCH", body: JSON.stringify({ archived }) },
+    return this.updateSessionPresentation(sessionId, { archived });
+  }
+
+  updateSessionPresentation(sessionId: string, input: { archived?: boolean; groupId?: string | null; pinned?: boolean }) {
+    return this.request<{ sessionId: string; archived: boolean; archivedAt: string | null; groupId: string | null; pinned: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}`, { method: "PATCH", body: JSON.stringify(input) },
     );
+  }
+
+  async filesystemRoots(): Promise<Array<{ name: string; path: string }>> {
+    const body = await this.request<{ roots: Array<{ name: string; path: string }> }>("/filesystem/roots");
+    return body.roots;
+  }
+
+  async listDirectories(path: string): Promise<{ path: string; parent: string | null; entries: Array<{ name: string; path: string; readable: boolean; writable: boolean; selectable: boolean }> }> {
+    return this.request(`/filesystem/directories?path=${encodeURIComponent(path)}`);
+  }
+
+  async createDirectory(parent: string, name: string): Promise<{ path: string; created: boolean }> {
+    const body = await this.request<{ path: string; created: boolean }>("/filesystem/directories", {
+      method: "POST", body: JSON.stringify({ parent, name }),
+    });
+    return body;
+  }
+
+  async listSessionGroups(): Promise<Array<{ id: string; name: string; color: string | null; sortOrder: number }>> {
+    const body = await this.request<{ groups: Array<{ id: string; name: string; color: string | null; sortOrder: number }> }>("/session-groups");
+    return body.groups;
+  }
+
+  createSessionGroup(input: { id: string; name: string; color?: string | null }) {
+    return this.request<{ group: { id: string; name: string; color: string | null; sortOrder: number } }>("/session-groups", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateSessionGroup(id: string, input: { name?: string; color?: string | null }) {
+    return this.request<{ group: { id: string; name: string; color: string | null; sortOrder: number } }>(`/session-groups/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) });
+  }
+
+  deleteSessionGroup(id: string) {
+    return this.request<{ removed: boolean }>(`/session-groups/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   updateModel(sessionId: string, provider: string, modelId: string) {

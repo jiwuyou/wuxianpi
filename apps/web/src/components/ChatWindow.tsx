@@ -11,6 +11,8 @@ import { useTts } from "@/hooks/useTts";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { STARTER_PROMPTS, resolveStarterPrompt } from "@/lib/starter-prompts";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { Copy } from "lucide-react";
+import { copyText } from "@/lib/copy-text";
 import { FloatingExtensionLayer } from "./extensions/FloatingExtensionLayer";
 
 const MessageView = lazy(() => import("./MessageView").then((module) => ({ default: module.MessageView })));
@@ -237,6 +239,9 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
   }, [handleAbort, stopSpeaking]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
+  const copySessionId = useCallback(() => {
+    if (session?.id) void copyText(session.id);
+  }, [session?.id]);
   const quickPrompts = assistant?.manifest.starterPrompts?.length
     ? assistant.manifest.starterPrompts.map((prompt) => resolveStarterPrompt(prompt, assistant.id === "wuxianpi"))
     : STARTER_PROMPTS;
@@ -380,6 +385,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
 
       <div className="chat-scope-bar">
         <span>{assistant?.manifest.name ?? (session?.assistantId ? "助手不可用" : "未归属 Pi 会话")}</span>
+        {session?.id && <button type="button" className="session-id-copy" onClick={copySessionId} title="复制会话 ID" aria-label="复制会话 ID"><span>{session.id}</span><Copy size={13} /></button>}
         <i>·</i>
         {isEmptyNew && onWorkspaceChange ? (
           <label>

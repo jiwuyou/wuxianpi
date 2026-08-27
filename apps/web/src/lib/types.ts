@@ -278,6 +278,8 @@ export interface SessionInfo {
   parentSessionId?: string; // set if this session was forked from another
   archived: boolean;
   archivedAt: string | null;
+  groupId: string | null;
+  pinned: boolean;
 }
 
 export interface SessionContext {

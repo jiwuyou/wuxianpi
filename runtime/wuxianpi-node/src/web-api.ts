@@ -1,6 +1,7 @@
-import { stat } from "node:fs/promises";
+import { access, mkdir, readdir, stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename } from "node:path";
+import { basename, dirname, isAbsolute, normalize, resolve } from "node:path";
+import { homedir } from "node:os";
 import { Readable } from "node:stream";
 import { boundedInteger, RequestError, stringifyMessage } from "./protocol.js";
 import type { RegistrySessionEvent, SessionRegistry } from "./session-registry.js";
@@ -232,6 +233,29 @@ export class WebApi {
         limit: boundedInteger(payload, "limit", 100, 1000),
       }) }); return;
     }
+    if (path === "/session-groups" && method === "GET") {
+      json(response, 200, { ok: true, data: { groups: this.options.registry.listSessionGroups() } }); return;
+    }
+    if (path === "/session-groups" && method === "POST") {
+      const body = await readJsonBody(request);
+      json(response, 201, { ok: true, data: { group: this.options.registry.createSessionGroup({
+        id: requireString(body, "id"), name: requireString(body, "name"),
+        ...(optionalString(body, "color") ? { color: optionalString(body, "color") } : {}),
+      }) } }); return;
+    }
+    const sessionGroupRoute = /^\/session-groups\/([^/]+)$/.exec(path);
+    if (sessionGroupRoute) {
+      const id = decodeURIComponent(sessionGroupRoute[1]!);
+      if (method === "PATCH") {
+        const body = await readJsonBody(request);
+        json(response, 200, { ok: true, data: { group: this.options.registry.updateSessionGroup(id, {
+          ...(body.name === undefined ? {} : { name: requireString(body, "name") }),
+          ...(body.color === undefined ? {} : { color: body.color === null ? null : requireString(body, "color") }),
+        }) } });
+      } else if (method === "DELETE") json(response, 200, { ok: true, data: { removed: this.options.registry.removeSessionGroup(id) } });
+      else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
+      return;
+    }
     if (path === "/sessions" && method === "POST") {
       const body = await readJsonBody(request);
       const assistantId = requireString(body, "assistantId");
@@ -391,6 +415,41 @@ export class WebApi {
         json(response, 200, { ok: true, data: { id } });
       } else throw new RequestError("method_not_allowed", `Method not allowed: ${method}`);
       return;
+    }
+    if (path === "/filesystem/roots" && method === "GET") {
+      const roots = [{ name: "Termux Home", path: homedir() }];
+      const shared = resolve(homedir(), "storage");
+      try { if ((await stat(shared)).isDirectory()) roots.push({ name: "共享存储", path: shared }); } catch { /* optional Termux storage link */ }
+      roots.push({ name: "文件系统根目录", path: "/" });
+      json(response, 200, { ok: true, data: { roots } }); return;
+    }
+    if (path === "/filesystem/directories" && method === "GET") {
+      const directory = normalizeFilesystemDirectory(requireQuery(url, "path"));
+      const info = await stat(directory);
+      if (!info.isDirectory()) throw new RequestError("filesystem_not_directory", "Path is not a directory");
+      const entries = [];
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        const entryPath = resolve(directory, entry.name);
+        let readable = true; let writable = false;
+        try { await access(entryPath); } catch { readable = false; }
+        try { await access(entryPath, 2); writable = true; } catch { /* read-only directory */ }
+        entries.push({ name: entry.name, path: entryPath, kind: "directory", readable, writable, selectable: readable });
+      }
+      entries.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+      json(response, 200, { ok: true, data: { path: directory, parent: directory === "/" ? null : dirname(directory), entries } }); return;
+    }
+    if (path === "/filesystem/directories" && method === "POST") {
+      const body = await readJsonBody(request);
+      const parent = normalizeFilesystemDirectory(requireString(body, "parent"));
+      const name = requireString(body, "name").trim();
+      if (name === "." || name === ".." || /[\\/\\0\\u0000-\\u001f\\u007f]/.test(name)) throw new RequestError("invalid_directory_name", "Directory name must be a single visible path component");
+      const parentInfo = await stat(parent);
+      if (!parentInfo.isDirectory()) throw new RequestError("filesystem_not_directory", "Parent is not a directory");
+      const createdPath = resolve(parent, name);
+      await mkdir(createdPath, { recursive: false, mode: 0o700 });
+      if (!(await stat(createdPath)).isDirectory()) throw new RequestError("filesystem_create_failed", "Created path is not a directory");
+      json(response, 201, { ok: true, data: { path: createdPath, created: true } }); return;
     }
     if (path === "/files" && method === "GET") {
       json(response, 200, { ok: true, data: await this.options.services.fileInfo(requireQuery(url, "path")) }); return;
@@ -624,9 +683,15 @@ export class WebApi {
     if (!action && method === "DELETE") { json(response, 200, { ok: true, data: await registry.close(sessionId) }); return; }
     if (!action && method === "PATCH") {
       const body = await readJsonBody(request);
-      if (body.archived !== undefined) {
-        if (typeof body.archived !== "boolean") throw new RequestError("invalid_payload", "archived must be a boolean");
-        json(response, 200, { ok: true, data: await registry.setArchived(sessionId, body.archived) }); return;
+      if (body.archived !== undefined || body.groupId !== undefined || body.pinned !== undefined) {
+        if (body.archived !== undefined && typeof body.archived !== "boolean") throw new RequestError("invalid_payload", "archived must be a boolean");
+        if (body.pinned !== undefined && typeof body.pinned !== "boolean") throw new RequestError("invalid_payload", "pinned must be a boolean");
+        if (body.groupId !== undefined && body.groupId !== null && typeof body.groupId !== "string") throw new RequestError("invalid_payload", "groupId must be a string or null");
+        json(response, 200, { ok: true, data: await registry.setPresentation(sessionId, {
+          ...(body.archived === undefined ? {} : { archived: body.archived as boolean }),
+          ...(body.pinned === undefined ? {} : { pinned: body.pinned as boolean }),
+          ...(body.groupId === undefined ? {} : { groupId: body.groupId as string | null }),
+        }) }); return;
       }
       await registry.setName(sessionId, requireString(body, "name"));
       json(response, 200, { ok: true, data: await registry.snapshot(sessionId) }); return;
@@ -935,6 +1000,10 @@ function requireObject(value: unknown, name: string): Record<string, unknown> {
   return value;
 }
 function requireQuery(url: URL, name: string): string { const value = url.searchParams.get(name); if (!value) throw new RequestError("invalid_payload", `${name} is required`); return value; }
+function normalizeFilesystemDirectory(value: string): string {
+  if (!isAbsolute(value) || value.includes("\0")) throw new RequestError("invalid_filesystem_path", "Filesystem path must be absolute");
+  return normalize(value);
+}
 function requireString(body: Record<string, unknown>, name: string): string { const value = body[name]; if (typeof value !== "string" || !value.trim()) throw new RequestError("invalid_payload", `${name} must be a non-empty string`); return value; }
 function optionalString(body: Record<string, unknown>, name: string): string | undefined { const value = body[name]; if (value === undefined || value === null || value === "") return undefined; if (typeof value !== "string") throw new RequestError("invalid_payload", `${name} must be a string`); return value; }
 function optionalText(body: Record<string, unknown>, name: string): string { const value = body[name]; if (typeof value !== "string") throw new RequestError("invalid_payload", `${name} must be a string`); return value; }

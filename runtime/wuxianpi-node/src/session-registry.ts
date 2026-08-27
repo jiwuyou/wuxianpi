@@ -318,6 +318,7 @@ export class SessionRegistry {
         modifiedAt: session.modified.toISOString(), messageCount: session.messageCount,
         firstMessage: session.firstMessage, isRunning: active?.isRunning ?? false,
         archived: presentation.archived, archivedAt: presentation.archivedAt,
+        groupId: presentation.groupId, pinned: presentation.pinned,
         ...this.bindingIdentity(binding),
       };
     });
@@ -333,6 +334,7 @@ export class SessionRegistry {
         modifiedAt: slot.createdAt.toISOString(), messageCount: session.messages.length,
         firstMessage: this.firstUserMessage(session.messages), isRunning: slot.isRunning || session.isStreaming,
         archived: presentation.archived, archivedAt: presentation.archivedAt,
+        groupId: presentation.groupId, pinned: presentation.pinned,
         ...this.bindingIdentity(slot.binding),
       });
     }
@@ -345,10 +347,19 @@ export class SessionRegistry {
       offset: options.offset, limit: options.limit };
   }
 
-  async setArchived(sessionId: string, archived: boolean) {
+  async setPresentation(sessionId: string, input: { archived?: boolean; groupId?: string | null; pinned?: boolean }) {
     if (!this.activeReference(sessionId)) await this.resolveSessionPath(sessionId);
-    return this.profileStateStore.setSessionArchived(sessionId, archived);
+    return this.profileStateStore.updateSessionPresentation(sessionId, input);
   }
+
+  async setArchived(sessionId: string, archived: boolean) {
+    return this.setPresentation(sessionId, { archived });
+  }
+
+  listSessionGroups() { return this.profileStateStore.listSessionGroups(); }
+  createSessionGroup(input: Parameters<ProfileStateStore["createSessionGroup"]>[0]) { return this.profileStateStore.createSessionGroup(input); }
+  updateSessionGroup(id: string, input: Parameters<ProfileStateStore["updateSessionGroup"]>[1]) { return this.profileStateStore.updateSessionGroup(id, input); }
+  removeSessionGroup(id: string) { return this.profileStateStore.removeSessionGroup(id); }
 
   async history(reference: string, offset: number, limit: number) {
     const active = this.activeReference(reference);

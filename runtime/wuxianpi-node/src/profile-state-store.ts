@@ -9,6 +9,7 @@ import type {
   InheritSessionBindingInput,
   RebindSessionInput,
   SessionBindingListFilter,
+  SessionGroup,
   SessionPresentation,
   SessionProfileBinding,
   UpdateWorkspaceInput,
@@ -19,7 +20,7 @@ import type {
 const SAFE_ENTITY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_SESSION_ID_LENGTH = 512;
 const MAX_WORKSPACE_NAME_LENGTH = 160;
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 export interface ProfileStateStoreOptions {
   path: string;
@@ -261,28 +262,78 @@ export class ProfileStateStore {
     this.assertOpen();
     assertSessionId(sessionId, "session id");
     const row = this.database.prepare(`
-      SELECT session_id, archived, archived_at, updated_at
+      SELECT session_id, archived, archived_at, group_id, pinned, updated_at
       FROM session_presentation WHERE session_id = ?
     `).get(sessionId);
     return row ? presentationFromRow(row) : {
-      sessionId, archived: false, archivedAt: null, updatedAt: "",
+      sessionId, archived: false, archivedAt: null, groupId: null, pinned: false, updatedAt: "",
     };
   }
 
   setSessionArchived(sessionId: string, archived: boolean): SessionPresentation {
+    return this.updateSessionPresentation(sessionId, { archived });
+  }
+
+  updateSessionPresentation(sessionId: string, input: { archived?: boolean; groupId?: string | null; pinned?: boolean }): SessionPresentation {
     this.assertOpen();
     assertSessionId(sessionId, "session id");
-    if (typeof archived !== "boolean") throw new RequestError("invalid_session_archived", "archived flag must be boolean");
+    if (input.archived !== undefined && typeof input.archived !== "boolean") throw new RequestError("invalid_session_archived", "archived flag must be boolean");
+    if (input.pinned !== undefined && typeof input.pinned !== "boolean") throw new RequestError("invalid_session_pinned", "pinned flag must be boolean");
+    if (input.groupId !== undefined && input.groupId !== null) assertEntityId(input.groupId, "session group id");
+    if (input.groupId !== undefined && input.groupId !== null && !this.getSessionGroup(input.groupId)) throw new RequestError("session_group_not_found", `Session group not found: ${input.groupId}`);
+    const current = this.getSessionPresentation(sessionId);
+    const archived = input.archived ?? current.archived;
+    const groupId = input.groupId === undefined ? current.groupId : input.groupId;
+    const pinned = input.pinned ?? current.pinned;
     const now = this.timestamp();
     this.database.prepare(`
-      INSERT INTO session_presentation (session_id, archived, archived_at, updated_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET
-        archived = excluded.archived,
-        archived_at = excluded.archived_at,
-        updated_at = excluded.updated_at
-    `).run(sessionId, archived ? 1 : 0, archived ? now : null, now);
+      INSERT INTO session_presentation (session_id, archived, archived_at, group_id, pinned, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET archived = excluded.archived, archived_at = excluded.archived_at,
+        group_id = excluded.group_id, pinned = excluded.pinned, updated_at = excluded.updated_at
+    `).run(sessionId, archived ? 1 : 0, archived ? (current.archivedAt ?? now) : null, groupId, pinned ? 1 : 0, now);
     return this.getSessionPresentation(sessionId);
+  }
+
+  createSessionGroup(input: { id: string; name: string; color?: string | null; sortOrder?: number }): SessionGroup {
+    this.assertOpen();
+    assertEntityId(input.id, "session group id");
+    const name = normalizeGroupName(input.name);
+    const color = input.color ?? null;
+    if (color !== null && (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color))) throw new RequestError("invalid_session_group_color", "Session group color must be a hex color");
+    const now = this.timestamp();
+    try {
+      this.database.prepare("INSERT INTO session_groups (id, name, color, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run(input.id, name, color, input.sortOrder ?? 0, now, now);
+    } catch { throw new RequestError("session_group_conflict", `Session group already exists: ${input.id}`); }
+    return this.getSessionGroup(input.id)!;
+  }
+
+  getSessionGroup(id: string): SessionGroup | undefined {
+    this.assertOpen();
+    assertEntityId(id, "session group id");
+    const row = this.database.prepare("SELECT id, name, color, sort_order, created_at, updated_at FROM session_groups WHERE id = ?").get(id);
+    return row ? groupFromRow(row) : undefined;
+  }
+
+  listSessionGroups(): SessionGroup[] {
+    this.assertOpen();
+    return this.database.prepare("SELECT id, name, color, sort_order, created_at, updated_at FROM session_groups ORDER BY sort_order, name COLLATE NOCASE, id").all().map(groupFromRow);
+  }
+
+  updateSessionGroup(id: string, input: { name?: string; color?: string | null; sortOrder?: number }): SessionGroup {
+    const current = this.getSessionGroup(id);
+    if (!current) throw new RequestError("session_group_not_found", `Session group not found: ${id}`);
+    const name = input.name === undefined ? current.name : normalizeGroupName(input.name);
+    const color = input.color === undefined ? current.color : input.color;
+    if (color !== null && (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color))) throw new RequestError("invalid_session_group_color", "Session group color must be a hex color");
+    this.database.prepare("UPDATE session_groups SET name = ?, color = ?, sort_order = ?, updated_at = ? WHERE id = ?").run(name, color, input.sortOrder ?? current.sortOrder, this.timestamp(), id);
+    return this.getSessionGroup(id)!;
+  }
+
+  removeSessionGroup(id: string): boolean {
+    if (!this.getSessionGroup(id)) return false;
+    this.database.prepare("UPDATE session_presentation SET group_id = NULL, updated_at = ? WHERE group_id = ?").run(this.timestamp(), id);
+    return this.database.prepare("DELETE FROM session_groups WHERE id = ?").run(id).changes > 0;
   }
 
   private initializeSchema(): void {
@@ -296,70 +347,61 @@ export class ProfileStateStore {
     if (version === 0) {
       this.database.exec(`
         BEGIN IMMEDIATE;
-        CREATE TABLE IF NOT EXISTS workspaces (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          root_cwd TEXT NOT NULL,
+        CREATE TABLE workspaces (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, root_cwd TEXT NOT NULL,
           archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS session_bindings (
-          session_id TEXT PRIMARY KEY,
-          assistant_id TEXT NOT NULL,
+        CREATE TABLE session_bindings (
+          session_id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL,
           workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
-          cwd TEXT NOT NULL,
-          binding_revision INTEGER NOT NULL DEFAULT 1 CHECK (binding_revision >= 1),
-          inherited_from_session_id TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
+          cwd TEXT NOT NULL, binding_revision INTEGER NOT NULL DEFAULT 1 CHECK (binding_revision >= 1),
+          inherited_from_session_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS session_bindings_assistant_idx
-          ON session_bindings (assistant_id, created_at, session_id);
-        CREATE INDEX IF NOT EXISTS session_bindings_workspace_idx
-          ON session_bindings (workspace_id, created_at, session_id);
-        CREATE INDEX IF NOT EXISTS session_bindings_cwd_idx
-          ON session_bindings (cwd, created_at, session_id);
-        CREATE TABLE IF NOT EXISTS session_presentation (
+        CREATE TABLE session_groups (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE session_presentation (
           session_id TEXT PRIMARY KEY,
-          archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
-          archived_at TEXT,
-          updated_at TEXT NOT NULL
+          archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)), archived_at TEXT,
+          group_id TEXT REFERENCES session_groups(id) ON DELETE SET NULL,
+          pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)), updated_at TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS session_presentation_archived_idx
-          ON session_presentation (archived, updated_at, session_id);
-        PRAGMA user_version = 3;
+        CREATE INDEX session_bindings_assistant_idx ON session_bindings (assistant_id, created_at, session_id);
+        CREATE INDEX session_bindings_workspace_idx ON session_bindings (workspace_id, created_at, session_id);
+        CREATE INDEX session_bindings_cwd_idx ON session_bindings (cwd, created_at, session_id);
+        CREATE INDEX session_presentation_archived_idx ON session_presentation (archived, updated_at, session_id);
+        CREATE INDEX session_presentation_group_idx ON session_presentation (group_id, pinned, updated_at, session_id);
+        PRAGMA user_version = 4;
         COMMIT;
       `);
-    } else if (version === 1) {
-      this.database.exec(`
-        BEGIN IMMEDIATE;
-        ALTER TABLE session_bindings ADD COLUMN binding_revision INTEGER NOT NULL DEFAULT 1;
-        CREATE TABLE IF NOT EXISTS session_presentation (
-          session_id TEXT PRIMARY KEY,
-          archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
-          archived_at TEXT,
-          updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS session_presentation_archived_idx
-          ON session_presentation (archived, updated_at, session_id);
-        PRAGMA user_version = 3;
-        COMMIT;
-      `);
-    } else if (version === 2) {
-      this.database.exec(`
-        BEGIN IMMEDIATE;
-        CREATE TABLE IF NOT EXISTS session_presentation (
-          session_id TEXT PRIMARY KEY,
-          archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
-          archived_at TEXT,
-          updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS session_presentation_archived_idx
-          ON session_presentation (archived, updated_at, session_id);
-        PRAGMA user_version = 3;
-        COMMIT;
-      `);
+      return;
+    }
+    if (version === 1) this.database.exec("ALTER TABLE session_bindings ADD COLUMN binding_revision INTEGER NOT NULL DEFAULT 1");
+    if (version <= 2) {
+      this.database.exec(`CREATE TABLE IF NOT EXISTS session_presentation (
+        session_id TEXT PRIMARY KEY, archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+        archived_at TEXT, updated_at TEXT NOT NULL
+      )`);
+      this.database.exec("CREATE INDEX IF NOT EXISTS session_presentation_archived_idx ON session_presentation (archived, updated_at, session_id)");
+    }
+    if (version <= 3) {
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(`CREATE TABLE IF NOT EXISTS session_groups (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )`);
+        this.database.exec("ALTER TABLE session_presentation ADD COLUMN group_id TEXT REFERENCES session_groups(id) ON DELETE SET NULL");
+        this.database.exec("ALTER TABLE session_presentation ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))");
+        this.database.exec("CREATE INDEX session_presentation_group_idx ON session_presentation (group_id, pinned, updated_at, session_id)");
+        this.database.exec("PRAGMA user_version = 4");
+        this.database.exec("COMMIT");
+      } catch (error) {
+        try { this.database.exec("ROLLBACK"); } catch { /* Preserve the migration error. */ }
+        throw error;
+      }
     }
   }
 
@@ -546,9 +588,20 @@ function bindingFromRow(row: Record<string, unknown>): SessionProfileBinding {
 
 function presentationFromRow(row: Record<string, unknown>): SessionPresentation {
   return {
-    sessionId: String(row.session_id),
-    archived: Number(row.archived) === 1,
+    sessionId: String(row.session_id), archived: Number(row.archived) === 1,
     archivedAt: row.archived_at === null ? null : String(row.archived_at),
+    groupId: row.group_id === null ? null : String(row.group_id), pinned: Number(row.pinned) === 1,
     updatedAt: String(row.updated_at),
   };
+}
+
+function groupFromRow(row: Record<string, unknown>): SessionGroup {
+  return { id: String(row.id), name: String(row.name), color: row.color === null ? null : String(row.color), sortOrder: Number(row.sort_order), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+}
+
+function normalizeGroupName(value: string): string {
+  if (typeof value !== "string") throw new RequestError("invalid_session_group_name", "Session group name must be text");
+  const name = value.trim();
+  if (!name || name.length > 80 || /[\u0000-\u001f\u007f]/.test(name)) throw new RequestError("invalid_session_group_name", "Session group name must be 1-80 visible characters");
+  return name;
 }

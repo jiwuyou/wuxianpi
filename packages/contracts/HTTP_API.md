@@ -191,6 +191,10 @@ session is bound to the Workspace. Successful deletion returns:
 | `GET` | `/api/web/v1/sessions?workspaceId=:id` | Filter by Workspace |
 | `POST` | `/api/web/v1/sessions` | Create a bound WuxianPi session |
 | `PATCH` | `/api/web/v1/sessions/:id` | Rename a Pi session or update WuxianPi presentation state |
+| `GET` | `/api/web/v1/session-groups` | List user-managed conversation groups |
+| `POST` | `/api/web/v1/session-groups` | Create a conversation group |
+| `PATCH` | `/api/web/v1/session-groups/:id` | Rename or recolor a conversation group |
+| `DELETE` | `/api/web/v1/session-groups/:id` | Delete a group and return its sessions to ungrouped |
 
 Web session creation requires `assistantId`:
 
@@ -253,6 +257,11 @@ Session archiving is WuxianPi-only presentation metadata. `PATCH` with
 moving, or closing the Pi JSONL session. `PATCH` with `{ "archived": false }`
 restores it. List rows expose `archived` and `archivedAt`; this metadata also
 works for unbound sessions.
+
+Conversation groups are also WuxianPi-only metadata and are independent of
+Assistant ownership, Workspace, and `cwd`. Session `PATCH` accepts `groupId`
+(string or `null`) and `pinned` (boolean). List rows expose both fields. Deleting
+a group sets its sessions' `groupId` to `null` without changing Pi JSONL.
 
 ## Functional-assistant bindings
 

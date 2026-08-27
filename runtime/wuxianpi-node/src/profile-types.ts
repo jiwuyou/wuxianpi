@@ -69,6 +69,17 @@ export interface SessionPresentation {
   sessionId: SessionId;
   archived: boolean;
   archivedAt: string | null;
+  groupId: string | null;
+  pinned: boolean;
+  updatedAt: string;
+}
+
+export interface SessionGroup {
+  id: string;
+  name: string;
+  color: string | null;
+  sortOrder: number;
+  createdAt: string;
   updatedAt: string;
 }
 

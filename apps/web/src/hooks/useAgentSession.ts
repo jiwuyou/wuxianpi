@@ -521,6 +521,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       firstMessage,
       archived: false,
       archivedAt: null,
+      groupId: null,
+      pinned: false,
     });
   }, [assistantId, isNew, newSessionCwd, newSessionWorkspaceId, onSessionCreated]);
 
