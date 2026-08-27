@@ -747,6 +747,18 @@ button:disabled { cursor: not-allowed !important; opacity: .48; transform: none 
 .session-id-copy { display: inline-flex; align-items: center; gap: 5px; max-width: min(42vw, 360px); padding: 3px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--text-dim); font-family: var(--font-mono); font-size: 10px; cursor: pointer; }
 .session-id-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-id-copy:hover { background: var(--bg-hover); color: var(--accent); }
+.chat-attach-label { font-size: 11px; white-space: nowrap; }
+.chat-file-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; }
+.chat-file-attachment { display: flex; align-items: center; gap: 7px; max-width: 260px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); }
+.chat-file-attachment > span:nth-child(2) { display: grid; min-width: 0; gap: 2px; }
+.chat-file-attachment strong, .chat-file-attachment small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-file-attachment strong { font-size: 11px; font-weight: 600; }
+.chat-file-attachment small { color: var(--text-dim); font-size: 10px; }
+.chat-file-attachment button { border: 0; background: transparent; color: var(--text-dim); cursor: pointer; }
+.workspace-upload-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; grid-column: 1 / -1; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); }
+.workspace-upload-row span { display: grid; gap: 3px; }
+.workspace-upload-row small { color: var(--text-dim); font-size: 10px; }
+@media (max-width: 560px) { .workspace-upload-row { align-items: stretch; flex-direction: column; } }
 .conversation-actions, .conversation-group-picker { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 10px 9px; border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg)); }
 .conversation-actions button, .conversation-group-picker button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text-muted); font-size: 11px; cursor: pointer; }
 .conversation-actions button:hover, .conversation-group-picker button:hover { border-color: var(--accent); color: var(--accent); }

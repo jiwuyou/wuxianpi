@@ -251,6 +251,13 @@ export interface AttachedImage {
   previewUrl: string;
 }
 
+export interface AttachedFile {
+  name: string;
+  mimeType: string;
+  size: number;
+  content: string;
+}
+
 type SelectedModel = { provider: string; modelId: string };
 type ModelsResponse = {
   models: Record<string, string>;
@@ -907,9 +914,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await webApi.cancelCard(sid, cardId);
   }, []);
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], files?: AttachedFile[]) => {
     const trimmedMessage = message.trim();
-    if (!trimmedMessage && !images?.length) return;
+    if (!trimmedMessage && !images?.length && !files?.length) return;
+    const messageWithFiles = files?.length ? `${message}\n\n[附加文件]\n${files.map((file) => `--- ${file.name} (${file.mimeType}, ${file.size} bytes) ---\n${file.content}`).join("\n\n")}` : message;
     if (agentRunning) return;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
     const promptRunId = promptRunIdRef.current + 1;
@@ -918,8 +926,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const userMsg: AgentMessage = {
       role: "user",
       content: imageBlocks?.length
-        ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
-        : message,
+        ? [...(messageWithFiles.trim() ? [{ type: "text" as const, text: messageWithFiles }] : []), ...imageBlocks]
+        : messageWithFiles,
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMsg]);
@@ -947,7 +955,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await connectEvents(existingSid);
         await sendAgentCommand(existingSid, {
           type: "prompt",
-          message,
+          message: messageWithFiles,
           ...(piImages?.length ? { images: piImages } : {}),
         });
         promoteNewSession(1, message);
@@ -956,7 +964,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await connectEvents(session.id);
         await sendAgentCommand(session.id, {
           type: "prompt",
-          message,
+          message: messageWithFiles,
           ...(piImages?.length ? { images: piImages } : {}),
         });
       }

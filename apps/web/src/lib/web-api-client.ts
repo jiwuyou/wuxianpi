@@ -1056,6 +1056,13 @@ export class WebApiClient {
     return body;
   }
 
+  async uploadWorkspaceFile(workspaceId: string, file: File, relativePath = file.name): Promise<{ path: string; relativePath: string; sizeBytes: number; overwritten: boolean }> {
+    const form = new FormData();
+    form.set("file", file);
+    form.set("relativePath", relativePath);
+    return this.request(`/workspaces/${encodeURIComponent(workspaceId)}/files`, { method: "POST", body: form });
+  }
+
   async listSessionGroups(): Promise<Array<{ id: string; name: string; color: string | null; sortOrder: number }>> {
     const body = await this.request<{ groups: Array<{ id: string; name: string; color: string | null; sortOrder: number }> }>("/session-groups");
     return body.groups;

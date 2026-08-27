@@ -13,6 +13,13 @@ export interface AttachedImage {
   previewUrl: string; // object URL for display
 }
 
+export interface AttachedFile {
+  name: string;
+  mimeType: string;
+  size: number;
+  content: string;
+}
+
 interface ModelOption {
   provider: string;
   modelId: string;
@@ -20,7 +27,7 @@ interface ModelOption {
 }
 
 interface Props {
-  onSend: (message: string, images?: AttachedImage[]) => void;
+  onSend: (message: string, images?: AttachedImage[], files?: AttachedFile[]) => void;
   onAbort: () => void;
   onSteer?: (message: string, images?: AttachedImage[]) => void;
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
@@ -101,6 +108,12 @@ const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], string> = {
   xhigh: "最高强度推理",
 };
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
   if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
@@ -166,6 +179,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [advancedControlsOpen, setAdvancedControlsOpen] = useState(false);
@@ -266,17 +280,31 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, []);
 
+  const clearFiles = useCallback(() => setAttachedFiles([]), []);
+
+  const processFiles = useCallback(async (files: File[]) => {
+    const allowed = files.filter((file) => file.size > 0 && file.size <= 2 * 1024 * 1024 && !file.type.startsWith("image/"));
+    if (!allowed.length) return;
+    const next = await Promise.all(allowed.map(async (file) => ({
+      name: file.name, mimeType: file.type || "application/octet-stream", size: file.size,
+      content: await file.text(),
+    })));
+    setAttachedFiles((current) => [...current, ...next]);
+  }, []);
+
   const clearInput = useCallback(() => {
     setValue("");
     clearImages();
+    clearFiles();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages]);
+  }, [clearFiles, clearImages]);
 
   const clearQueuedInput = useCallback(() => {
     setValue("");
     setAttachedImages([]);
+    clearFiles();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -290,7 +318,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handleSend = useCallback(async () => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
+    if (!msg && !attachedImages.length && !attachedFiles.length) return;
     if (isStreaming || modelSelectionBlocked) return;
     if (!attachedImages.length && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
@@ -299,9 +327,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
     }
-    onSend(msg, attachedImages.length ? attachedImages : undefined);
+    onSend(msg, attachedImages.length ? attachedImages : undefined, attachedFiles.length ? attachedFiles : undefined);
     clearInput();
-  }, [value, attachedImages, isStreaming, modelSelectionBlocked, onBuiltinCommand, onSend, clearInput]);
+  }, [value, attachedImages, attachedFiles, isStreaming, modelSelectionBlocked, onBuiltinCommand, onSend, clearInput]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -661,12 +689,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,.txt,.md,.json,.yaml,.yml,.xml,.csv,.ts,.tsx,.js,.jsx,.py,.java,.go,.rs,.sh,.css,.html,.pdf"
         multiple
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           processImageFiles(files);
+          processFiles(files);
           e.target.value = "";
         }}
       />
@@ -727,6 +756,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             ))}
           </div>
         )}
+
+        {attachedFiles.length > 0 && <div className="chat-file-attachments">
+          {attachedFiles.map((file, index) => <div className="chat-file-attachment" key={`${file.name}-${index}`}><span>📄</span><span><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><button type="button" onClick={() => setAttachedFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`删除 ${file.name}`}>×</button></div>)}
+        </div>}
 
         {/* Main input */}
         <div style={{ position: "relative" }}>
@@ -1072,7 +1105,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={isStreaming}
-              title="添加图片"
+              title="添加到消息"
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
@@ -1093,6 +1126,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text-muted)";
               }}
             >
+              <span className="chat-attach-label">添加到消息</span>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
                 <circle cx="8.5" cy="8.5" r="1.5" />

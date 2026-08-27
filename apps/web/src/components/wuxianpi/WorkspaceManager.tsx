@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Archive, ArchiveRestore, FolderOpen, Pencil, Plus, Save, Trash2, X } from "lucide-react";
 import type { Workspace, WorkspaceCreateRequest, WorkspaceUpdateRequest } from "@/lib/wuxianpi/contracts";
 import { createWorkspace, deleteWorkspace, updateWorkspace } from "./api";
@@ -36,6 +36,7 @@ export function WorkspaceManager({ workspaces, onChanged }: Props) {
   const [draft, setDraft] = useState<WorkspaceDraft>(EMPTY_DRAFT);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [busy, setBusy] = useState(false);
+  const workspaceFileInputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerPath, setPickerPath] = useState<string | null>(null);
@@ -108,6 +109,19 @@ export function WorkspaceManager({ workspaces, onChanged }: Props) {
     }
   };
 
+  const uploadToWorkspace = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !editing) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await webApi.uploadWorkspaceFile(editing.id, file);
+      setError(null);
+      window.alert(`已上传到 ${result.relativePath}`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  };
+
   const toggleArchive = async (workspace: Workspace) => {
     setBusy(true);
     setError(null);
@@ -172,6 +186,10 @@ export function WorkspaceManager({ workspaces, onChanged }: Props) {
             <label className="span-2">根路径
               <div className="workspace-path-input"><input value={draft.rootCwd} onChange={(event) => setDraft((current) => ({ ...current, rootCwd: event.target.value }))} placeholder="/data/data/com.termux/files/home/projects/leetcode" /><button type="button" className="secondary-button compact" onClick={() => void openPicker()}><FolderOpen size={15} />选择目录</button></div>
             </label>
+            {editing && <>
+              <input ref={workspaceFileInputRef} hidden type="file" onChange={(event) => void uploadToWorkspace(event)} />
+              <div className="workspace-upload-row"><span><strong>工作区文件</strong><small>上传到当前 Workspace 根目录，不覆盖已有文件</small></span><button type="button" className="secondary-button compact" disabled={busy} onClick={() => workspaceFileInputRef.current?.click()}>上传到工作区</button></div>
+            </>}
             <label className="span-2">INSTRUCTIONS.md<textarea value={draft.instructions} onChange={(event) => setDraft((current) => ({ ...current, instructions: event.target.value }))} rows={8} /></label>
             <label className="span-2">MEMORY.md<textarea value={draft.memory} onChange={(event) => setDraft((current) => ({ ...current, memory: event.target.value }))} rows={6} /></label>
           </div>

@@ -1,6 +1,6 @@
-import { access, mkdir, readdir, stat } from "node:fs/promises";
+import { access, mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, dirname, isAbsolute, normalize, resolve } from "node:path";
+import { basename, dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { Readable } from "node:stream";
 import { boundedInteger, RequestError, stringifyMessage } from "./protocol.js";
@@ -197,6 +197,23 @@ export class WebApi {
         ...(body.memory === undefined ? {} : { memory: optionalText(body, "memory") }),
       });
       json(response, 201, { ok: true, data: { workspace: workspaceView(workspace) } }); return;
+    }
+    const workspaceUploadRoute = /^\/workspaces\/([^/]+)\/files$/.exec(path);
+    if (workspaceUploadRoute && method === "POST") {
+      const id = decodeURIComponent(workspaceUploadRoute[1]!);
+      const workspace = await this.options.registry.getWorkspace(id);
+      const form = await readFormData(request);
+      const file = form.get("file");
+      const relativePath = form.get("relativePath");
+      if (!file || typeof file === "string") throw new RequestError("invalid_payload", "file is required");
+      if (typeof relativePath !== "string" || !relativePath.trim()) throw new RequestError("invalid_payload", "relativePath is required");
+      const root = resolve(workspace.workspace.rootCwd);
+      const target = resolve(root, relativePath);
+      const nested = relative(root, target);
+      if (!nested || nested === ".." || nested.startsWith(`..${sep}`) || isAbsolute(nested)) throw new RequestError("invalid_workspace_file_path", "Upload path must stay inside the Workspace root");
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await writeFile(target, new Uint8Array(await file.arrayBuffer()), { flag: "wx", mode: 0o600 });
+      json(response, 201, { ok: true, data: { path: target, relativePath: nested, sizeBytes: file.size, overwritten: false } }); return;
     }
     const workspaceRoute = /^\/workspaces\/([^/]+)$/.exec(path);
     if (workspaceRoute) {
