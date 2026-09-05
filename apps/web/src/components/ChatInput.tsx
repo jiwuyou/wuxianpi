@@ -6,6 +6,7 @@ import type { SelectableToolPreset, ToolPreset } from "@/components/ToolPanel";
 import { consumeRuntimeReloadDraft } from "@/lib/runtime-deployment";
 import type { ModelListEntry } from "@/lib/web-api-client";
 import { selectableModels } from "@/lib/model-selection";
+import { webApi } from "@/lib/web-api-client";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -17,7 +18,7 @@ export interface AttachedFile {
   name: string;
   mimeType: string;
   size: number;
-  content: string;
+  relativePath: string;
 }
 
 interface ModelOption {
@@ -27,6 +28,7 @@ interface ModelOption {
 }
 
 interface Props {
+  sessionId?: string;
   onSend: (message: string, images?: AttachedImage[], files?: AttachedFile[]) => void;
   onAbort: () => void;
   onSteer?: (message: string, images?: AttachedImage[]) => void;
@@ -163,7 +165,7 @@ function slashMatchRank(command: SlashCommandPaletteItem, query: string): number
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList,
+  sessionId, onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList,
   modelsLoaded, modelAvailabilityError, modelRequired, onModelChange, onOpenModelsConfig,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, assistantToolPresetAvailable, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
@@ -283,14 +285,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const clearFiles = useCallback(() => setAttachedFiles([]), []);
 
   const processFiles = useCallback(async (files: File[]) => {
-    const allowed = files.filter((file) => file.size > 0 && file.size <= 2 * 1024 * 1024 && !file.type.startsWith("image/"));
+    if (!sessionId) return;
+    const allowed = files.filter((file) => file.size > 0 && file.size <= 32 * 1024 * 1024 && !file.type.startsWith("image/"));
     if (!allowed.length) return;
-    const next = await Promise.all(allowed.map(async (file) => ({
-      name: file.name, mimeType: file.type || "application/octet-stream", size: file.size,
-      content: await file.text(),
-    })));
+    const next: AttachedFile[] = [];
+    for (const file of allowed) {
+      const uploaded = await webApi.uploadSessionAttachment(sessionId, file);
+      next.push({ name: uploaded.name, mimeType: uploaded.mimeType, size: uploaded.sizeBytes, relativePath: uploaded.relativePath });
+    }
     setAttachedFiles((current) => [...current, ...next]);
-  }, []);
+  }, [sessionId]);
 
   const clearInput = useCallback(() => {
     setValue("");
@@ -1105,7 +1109,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={isStreaming}
-              title="添加到消息"
+              title="添加附件"
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
@@ -1126,7 +1130,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text-muted)";
               }}
             >
-              <span className="chat-attach-label">添加到消息</span>
+              <span className="chat-attach-label">添加附件</span>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
                 <circle cx="8.5" cy="8.5" r="1.5" />

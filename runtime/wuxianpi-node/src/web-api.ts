@@ -1,6 +1,7 @@
 import { access, mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { Readable } from "node:stream";
 import { boundedInteger, RequestError, stringifyMessage } from "./protocol.js";
@@ -320,6 +321,28 @@ export class WebApi {
         throw error;
       }
       return;
+    }
+    const attachmentRoute = /^\/sessions\/([^/]+)\/attachments$/.exec(path);
+    if (attachmentRoute && method === "POST") {
+      const sessionId = decodeURIComponent(attachmentRoute[1]!);
+      const location = await this.options.registry.attachmentLocation(sessionId);
+      const form = await readFormData(request);
+      const file = form.get("file");
+      if (!file || typeof file === "string") throw new RequestError("invalid_payload", "file is required");
+      if (file.size <= 0 || file.size > 32 * 1024 * 1024) throw new RequestError("payload_too_large", "Attachment must be between 1 byte and 32 MiB");
+      const originalName = file.name || "attachment";
+      const safeBase = basename(originalName).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "attachment";
+      const extension = extname(safeBase);
+      const stem = basename(safeBase, extension).slice(0, 100) || "attachment";
+      const storedName = `${stem}-${randomUUID().slice(0, 8)}${extension}`;
+      await mkdir(location.directory, { recursive: true, mode: 0o700 });
+      const target = resolve(location.directory, storedName);
+      await writeFile(target, new Uint8Array(await file.arrayBuffer()), { flag: "wx", mode: 0o600 });
+      const relativePath = location.workspaceRoot ? `${location.displayRoot}/${storedName}` : target;
+      json(response, 201, { ok: true, data: {
+        sessionId, name: originalName, storedName, mimeType: file.type || "application/octet-stream",
+        sizeBytes: file.size, relativePath, absolutePath: target, status: "ready",
+      } }); return;
     }
     const sessionRoute = /^\/sessions\/([^/]+)(?:\/(.*))?$/.exec(path);
     if (sessionRoute) {

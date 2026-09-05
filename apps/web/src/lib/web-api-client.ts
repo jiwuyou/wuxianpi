@@ -1056,6 +1056,12 @@ export class WebApiClient {
     return body;
   }
 
+  async uploadSessionAttachment(sessionId: string, file: File): Promise<{ sessionId: string; name: string; storedName: string; mimeType: string; sizeBytes: number; relativePath: string; absolutePath: string; status: string }> {
+    const form = new FormData();
+    form.set("file", file);
+    return this.request(`/sessions/${encodeURIComponent(sessionId)}/attachments`, { method: "POST", body: form });
+  }
+
   async uploadWorkspaceFile(workspaceId: string, file: File, relativePath = file.name): Promise<{ path: string; relativePath: string; sizeBytes: number; overwritten: boolean }> {
     const form = new FormData();
     form.set("file", file);

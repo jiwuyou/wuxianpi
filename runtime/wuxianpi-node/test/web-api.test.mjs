@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -67,6 +67,16 @@ test("web API serves static UI and core resource endpoints", { timeout: 20_000 }
   assert.equal(typeof created.data.sessionId, "string");
   assert.equal(created.data.assistantId, "wuxianpi");
   assert.equal(created.data.ownershipState, "bound");
+  const attachmentForm = new FormData();
+  attachmentForm.set("file", new Blob(["hello attachment"], { type: "text/plain" }), "note.txt");
+  const attachment = await jsonFetch(`${base}/api/web/v1/sessions/${created.data.sessionId}/attachments`, {
+    method: "POST", body: attachmentForm,
+  });
+  assert.equal(attachment.data.status, "ready");
+  assert.equal(attachment.data.name, "note.txt");
+  assert.match(attachment.data.relativePath, /attachments\//);
+  const attachmentBytes = await readFile(attachment.data.absolutePath, "utf8");
+  assert.equal(attachmentBytes, "hello attachment");
   const snapshot = await jsonFetch(`${base}/api/web/v1/sessions/${created.data.sessionId}/snapshot`);
   assert.equal(snapshot.data.type, "snapshot");
   assert.deepEqual(snapshot.data.history, []);

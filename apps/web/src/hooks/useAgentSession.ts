@@ -255,7 +255,7 @@ export interface AttachedFile {
   name: string;
   mimeType: string;
   size: number;
-  content: string;
+  relativePath: string;
 }
 
 type SelectedModel = { provider: string; modelId: string };
@@ -917,7 +917,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], files?: AttachedFile[]) => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length && !files?.length) return;
-    const messageWithFiles = files?.length ? `${message}\n\n[附加文件]\n${files.map((file) => `--- ${file.name} (${file.mimeType}, ${file.size} bytes) ---\n${file.content}`).join("\n\n")}` : message;
+    const messageWithFiles = files?.length ? `${message}\n\n---\n附件信息\n${files.map((file) => `名称：${file.name}\n类型：${file.mimeType}\n大小：${file.size} bytes\n路径：${file.relativePath}`).join("\n\n")}\n\n请使用文件工具按需读取这些附件，不要在未读取文件前猜测内容。\n---` : message;
     if (agentRunning) return;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
     const promptRunId = promptRunIdRef.current + 1;

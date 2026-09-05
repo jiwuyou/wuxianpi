@@ -281,6 +281,7 @@ export function ChatWindow({ assistantId, assistant, webExtensions = [], default
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
+      sessionId={session?.id}
       onSend={handleSend}
       onAbort={handleAbortWithTts}
       onSteer={agentRunning ? handleSteer : undefined}

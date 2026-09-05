@@ -347,6 +347,17 @@ export class SessionRegistry {
       offset: options.offset, limit: options.limit };
   }
 
+  async attachmentLocation(sessionId: string): Promise<{ directory: string; displayRoot: string; workspaceRoot: string | null }> {
+    const active = this.activeReference(sessionId);
+    if (!active) await this.resolveSessionPath(sessionId);
+    const binding = this.profileStateStore.getBinding(sessionId);
+    const workspaceRoot = binding?.workspaceId ? (await this.workspaceManager.get(binding.workspaceId)).workspace.rootCwd : null;
+    const directory = workspaceRoot
+      ? join(workspaceRoot, ".wuxianpi", "attachments", sessionId)
+      : join(this.agentDir, "wuxianpi", "attachments", sessionId);
+    return { directory, displayRoot: workspaceRoot ? `.wuxianpi/attachments/${sessionId}` : directory, workspaceRoot };
+  }
+
   async setPresentation(sessionId: string, input: { archived?: boolean; groupId?: string | null; pinned?: boolean }) {
     if (!this.activeReference(sessionId)) await this.resolveSessionPath(sessionId);
     return this.profileStateStore.updateSessionPresentation(sessionId, input);
